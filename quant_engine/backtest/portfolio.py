@@ -1,0 +1,124 @@
+"""组合估值
+
+管理回测中的虚拟持仓、现金和总权益。支持 T+1 锁仓规则。
+"""
+from datetime import date, timedelta
+from typing import Optional
+
+from quant_engine.backtest.types import Trade, OrderSide, Position, AccountState
+
+
+class Portfolio:
+    """回测组合管理器"""
+
+    def __init__(self, initial_capital: float = 1_000_000.0):
+        self._initial_capital = initial_capital
+        self._cash = initial_capital
+        self._positions: dict[str, Position] = {}
+        self._previous_total: float = initial_capital
+        self._current_total: float = initial_capital
+
+    @property
+    def cash(self) -> float:
+        return self._cash
+
+    @property
+    def positions(self) -> dict[str, Position]:
+        return dict(self._positions)
+
+    @property
+    def market_value(self) -> float:
+        return sum(p.market_value for p in self._positions.values())
+
+    @property
+    def total_value(self) -> float:
+        return self._cash + self.market_value
+
+    @property
+    def previous_total_value(self) -> float:
+        return self._previous_total
+
+    @property
+    def daily_return(self) -> float:
+        if self._previous_total == 0:
+            return 0.0
+        return (self.total_value - self._previous_total) / self._previous_total
+
+    def apply_trade(self, trade: Trade):
+        """应用一笔成交到组合"""
+        cost = trade.commission + trade.stamp_duty + trade.slippage
+
+        if trade.side == OrderSide.BUY:
+            self._apply_buy(trade, cost)
+        else:
+            self._apply_sell(trade, cost)
+
+    def _apply_buy(self, trade: Trade, cost: float):
+        """处理买入成交"""
+        total_cost = trade.amount + cost
+        self._cash -= total_cost
+
+        existing = self._positions.get(trade.code)
+        if existing:
+            # 加仓: 更新平均成本
+            total_shares = existing.shares + trade.shares
+            total_cost_basis = (
+                existing.shares * existing.avg_cost + trade.amount + cost
+            )
+            new_avg_cost = total_cost_basis / total_shares if total_shares > 0 else 0
+            existing.shares = total_shares
+            existing.avg_cost = new_avg_cost
+            # T+1: 新买入的股份锁定到下一个交易日
+            existing.unlock_date = max(
+                existing.unlock_date, trade.date + timedelta(days=1)
+            )
+        else:
+            self._positions[trade.code] = Position(
+                code=trade.code,
+                shares=trade.shares,
+                avg_cost=(trade.amount + cost) / trade.shares,
+                market_value=trade.amount,
+                unlock_date=trade.date + timedelta(days=1),
+            )
+
+    def _apply_sell(self, trade: Trade, cost: float):
+        """处理卖出成交"""
+        self._cash += trade.amount - cost
+
+        existing = self._positions.get(trade.code)
+        if existing:
+            actual_sell = min(trade.shares, existing.shares)
+            existing.shares -= actual_sell
+            if existing.shares <= 0:
+                self._positions.pop(trade.code, None)
+            # 保留 T+1 锁定期不变
+
+    def update_market_values(self, prices: dict[str, float], dt: date):
+        """更新持仓市值（每日估值）
+
+        Args:
+            prices: {code: close_price} — 当日收盘价
+            dt: 当前交易日
+        """
+        self._previous_total = self.total_value
+
+        for code, pos in self._positions.items():
+            if code in prices:
+                pos.market_value = pos.shares * prices[code]
+
+    def get_sellable_shares(self, code: str, dt: date) -> int:
+        """获取某只股票在 dt 日可卖出的股数（考虑 T+1 锁仓）
+
+        Args:
+            code: 股票代码
+            dt: 当前交易日
+
+        Returns:
+            可卖股数
+        """
+        pos = self._positions.get(code)
+        if pos is None or pos.shares <= 0:
+            return 0
+        if pos.is_locked(dt):
+            return 0
+        return pos.shares
