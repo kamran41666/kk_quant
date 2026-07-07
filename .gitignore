@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.env
+.venv/
+venv/
+
+# C++
+cpp_engine/build/
+*.o
+*.obj
+*.dll
+*.dylib
+
+# Data (large binary files)
+data/
+*.parquet
+*.h5
+*.hdf5
+*.feather
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backtest results
+backtest_result/
+
+# Claude
+.claude/
+
+# Conda
+.pixi/
