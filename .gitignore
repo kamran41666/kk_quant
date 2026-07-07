@@ -19,7 +19,7 @@ cpp_engine/build/
 *.dylib
 
 # Data (large binary files)
-data/
+/data/
 *.parquet
 *.h5
 *.hdf5
