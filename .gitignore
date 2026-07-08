@@ -43,6 +43,10 @@ Thumbs.db
 # Backtest results
 backtest_result/
 
+# Web build artifacts
+web/node_modules/
+web/dist/
+
 # Claude
 .claude/
 

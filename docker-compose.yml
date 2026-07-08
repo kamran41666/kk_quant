@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: kk_quant_server
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./backtest_result:/app/backtest_result
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: kk_quant_web
+    ports:
+      - "80:80"
+    depends_on:
+      - server
+    restart: unless-stopped
