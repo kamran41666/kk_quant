@@ -6,6 +6,8 @@
 from datetime import date
 from typing import Optional
 
+import pandas as pd
+
 from quant_engine.data.api import DataAPI
 
 
@@ -31,6 +33,15 @@ class DataHandler:
                     "turnover_rate", "up_limit", "down_limit", "is_suspended"],
             adjust="event_driven",
         )
+
+        # Normalize date level to datetime.date (Parquet round-trips produce Timestamps)
+        if not self._daily_data.empty:
+            code_level = self._daily_data.index.get_level_values(0)
+            date_level = self._daily_data.index.get_level_values(1)
+            date_level = pd.to_datetime(date_level).date
+            self._daily_data.index = pd.MultiIndex.from_arrays(
+                [code_level, date_level], names=["code", "date"]
+            )
 
         self._current_date: Optional[date] = None
 

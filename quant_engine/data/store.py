@@ -120,6 +120,7 @@ class PriceStore:
             return empty
 
         result = pd.concat(dfs, ignore_index=True)
+        result["date"] = pd.to_datetime(result["date"]).dt.date
         return result.set_index(["code", "date"]).sort_index()
 
 

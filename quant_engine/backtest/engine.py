@@ -82,6 +82,7 @@ class BacktestEngine:
             start=trading_days[0],
             end=trading_days[-1],
         )
+        context._data_handler = data_handler
         scheduler = RebalanceScheduler(
             calendar,
             frequency=rebalance_frequency,

@@ -56,6 +56,19 @@
 | 2026-07-08 | A股市场微观结构 交易成本 冲击成本 滑点 实证 | 学术期刊 + 券商研报 |
 | 2026-07-08 | alternative data alpha decay factor crowding detection | arXiv + Semantic Scholar + ACM |
 | 2026-07-08 | shuiyuan.sjtu.edu.cn 水源社区 量化策略 实盘记录 | 论坛帖子 (topic/436143) |
+| 2026-07-08 | pairs trading statistical arbitrage cointegration A-share market | Google Scholar + Springer + 学术期刊 |
+| 2026-07-08 | machine learning stock prediction LSTM Transformer TFT xLSTM architecture | arXiv + IEEE + Springer + GitHub |
+| 2026-07-08 | Black-Litterman model risk parity portfolio optimization Python | GitHub + PyPI + Medium |
+| 2026-07-08 | 量化回测 幸存者偏差 ST处理 退市处理 除权除息 前视偏差 IPO过滤 | 微信公众号 + 叩富网 + 行业博客 |
+| 2026-07-08 | A股 可转债 量化策略 双低策略 ETF轮动 套利策略 | 券商研报 + 私募报告 + 学术文献 |
+| 2026-07-08 | financial data source comparison akshare tushare wind joinquant free data quality | GitHub + CSDN + 掘金 + 微信公众号 |
+| 2026-07-08 | regime switching detection HMM market state classification quantitative finance | AIMS Press + PLoS ONE + ACM + 系统工程理论与实践 |
+| 2026-07-08 | Python performance optimization numpy pandas polars parallel computing backtesting speedup | NVIDIA + Polars官方 + PyPI + 技术博客 |
+| 2026-07-08 | A股 情绪因子 北向资金 融资融券 新闻情绪 NLP 量化因子 | 券商研报 + 微信公众号 + 哈工大硕士论文 |
+| 2026-07-08 | factor timing rotation strategy dynamic weighting alpha signal | BlackRock + Princeton + Northern Trust + GitHub |
+| 2026-07-08 | A股 市场异象 低波动异象 动量消失 隔夜收益 应计异象 | 学术期刊 + 券商研报 + 微信公众号 |
+| 2026-07-08 | optimal execution TWAP VWAP implementation shortfall Almgren-Chriss Python | 技术博客 + GitHub |
+| 2026-07-08 | model decay monitoring online learning concept drift financial time series | IEEE + Information Sciences + NeurIPS + arXiv |
 
 ---
 
@@ -659,7 +672,502 @@
 
 ---
 
-## 附录：参考来源索引
+## 8. 统计套利与配对交易
+
+### 8.1 A股多股票配对交易优化（MultiPT）
+
+- **来源**: 刘国山, 刁海璨. 《运筹与管理》2024, 33(11): 190-196（学术期刊，单源）
+- **评级**: **B**
+- **内容**:
+  - 提出 MultiPT 优化策略，突破传统配对交易要求等量配对的限制
+  - 使用最小距离法 + 协整检验 + 非零权重约束
+  - 用序贯二次规划 (SQP) 求解最优权重分布
+  - 在沪深 300 成分股 + Wind 行业指数上回测（2015-2020）
+  - 比传统 GGR 和协整策略超额收益至少高 14.97%-15.17%
+  - **市场下行时表现尤为出色**（具有对冲属性）
+- **落地指向**: 在 `strategies/` 目录下新增 `pairs_trading.py`，利用项目已有的协整检验基础设施（可从 `scipy.stats.coint` 入手），实现最小距离法 + 协整检验的双轨配对选择
+- **状态**: 待采用
+
+### 8.2 协整收敛速率过滤器
+
+- **来源**: Ti, Dai, Wang et al., Computational Economics 64: 2717-2745 (2024)（学术期刊，单源）
+- **评级**: **C**
+- **内容**:
+  - 用渐近均值（非样本均值）估计均值回归水平
+  - 提出**收敛速率过滤器**剔除无利可图的配对
+  - 两步模型选择程序（迹检验 + 似然比检验）选最优 VECM
+  - 在台湾 0050/0051 ETF 成分股验证
+- **落地指向**: 高级配对交易增强方法。阶段二如果引入配对交易策略，可以参考收敛速率过滤器的设计
+- **状态**: 待采用
+
+### 8.3 Kalman 滤波动态协整配对交易
+
+- **来源**: Bin Zhou, 2024/2025（学术预印本，单源）
+- **评级**: **C**
+- **内容**:
+  - 使用滚动窗口协整 + Kalman/粒子滤波做动态参数估计
+  - 在 A 股配对 600036-000001 上验证：夏普 1.103，总收益 28.98%
+  - 集成了实时结构断点检测
+- **落地指向**: Kalman 滤波的实现思路可以用于因子暴露的动态估计（如 Beta 的时变估计），不限于配对交易
+- **状态**: 待采用
+
+### 8.4 Ornstein-Uhlenbeck 最优配对交易
+
+- **来源**: Song, Wang, Xie & Zhao, International Review of Financial Analysis (2025)（学术期刊，单源）
+- **评级**: **D**
+- **内容**:
+  - 推导 OU 过程下完全闭式解的最优配对交易策略
+  - 纳入风险厌恶到效用随机控制框架
+  - 跨市场配对（中美英法德）比单市场配对有更强更持久的套利机会
+- **落地指向**: 学术性较强，跨市场套利对个人投资者门槛较高，暂作为理论参考
+- **状态**: 待采用
+
+---
+
+## 9. 机器学习与深度学习预测
+
+### 9.1 HAELT 混合注意力集成 Transformer
+
+- **来源**: arXiv 2506.13981 (2025)（学术论文，单源）
+- **评级**: **C**
+- **内容**:
+  - 架构：ResNet 特征提取 + 时序自注意力 + 并行 LSTM/Transformer 双通道 + 动态集成
+  - 在 AAPL 小时级别数据上（2024.01-2025.05）取得最高方向预测 F1
+  - 核心创新：动态集成根据各子模型近期表现自适应调整权重
+- **落地指向**: 阶段二的 AI 量化策略方向。动态集成权重的思路可以借鉴到多因子合成中
+- **状态**: 待采用
+
+### 9.2 BiLSTM-MTRAN-TCN-TFT（A股验证）
+
+- **来源**: 2025 IEEE 论文（学术会议，单源）
+- **评级**: **C**
+- **内容**:
+  - 集成了 TFT + MTRAN-TCN + BiLSTM 的混合架构
+  - 在沪深 14 家公司上验证，R²=0.986（对比纯 BiLSTM-MTRAN-TCN 的 R²=0.926）
+- **落地指向**: 沪深市场直接验证过的模型，但个人训练成本高。可作为阶段三引入 DL 的参考架构
+- **状态**: 待采用
+
+### 9.3 SeTT：相似度嵌入时序 Transformer
+
+- **来源**: Springer Complex & Intelligent Systems (2024)（学术期刊，单源）
+- **评级**: **B**
+- **内容**:
+  - 扩展 TFT 架构，引入相似度向量（比较当前市场窗口与历史窗口）
+  - 使用 Cramér-von Mises/Kolmogorov-Smirnov/Epps-Singleton 统计检验 + Hamming 距离
+  - 将相似度嵌入注意力机制，自动 mute 不相似的历史时期
+- **落地指向**: 核心概念"找到与当前市场状态相似的历史时期"可以在不引入 DL 的情况下实现——用简单的统计距离筛选相似的历史窗口，仅用相似窗口的数据做因子评估
+- **状态**: 待采用
+
+### 9.4 CEEMDAN + LSTM + Transformer 残差网络
+
+- **来源**: Expert Systems with Applications (2025)（学术期刊，单源）
+- **评级**: **C**
+- **内容**:
+  - CEEMDAN 分解收盘价 → IMF 分量
+  - 每个 IMF 独立 LSTM 处理（输入 OHLC + volume + PE + PB）
+  - Transformer 分支处理残差（长期趋势）
+  - 融合后达 SOTA 精度
+- **落地指向**: 信号分解 + ML 的思路可以降低策略开发的复杂度——先用 EMD/CEEMDAN 分离趋势和噪声，再对趋势部分建模
+- **状态**: 待采用
+
+### 9.5 大模型基准：LSTM/xLSTM/PatchTST/TFT/Mamba2
+
+- **来源**: Oxford 研究 (2025)（学术论文，多源验证）
+- **评级**: **A**
+- **内容**:
+  - 夏普优化基准，期货 2010-2025：
+    - **VSN + LSTM** 夏普最高
+    - **xLSTM** 有最大的保本交易成本缓冲
+    - Generic Transformer 表现不佳——关键是**归纳偏置**
+    - Mamba2 状态空间模型没有超越调优良好的 RNN
+  - 核心结论：在低信噪比金融环境中，良好的归纳偏置 > 模型复杂度
+- **落地指向**: 对项目的直接启发：不一定要用最复杂的模型。LSTM 级别的简单模型 + 好的特征工程可能优于大 Transformer。阶段二的 AI 策略方向可以从简单模型起步
+- **状态**: 待采用
+
+### 9.6 TFT 梯度崩塌发现与修复
+
+- **来源**: GitHub 开源项目 S&P500 TFT Forecasting (2025)（开源项目，单源）
+- **评级**: **C**
+- **内容**:
+  - 450+ 实验揭示 TFT 在金融预测中的失败模式
+  - 编码器正确学习 regime 结构，但输出层梯度 5 个 epoch 内崩塌 83%
+  - 多步预测、regime 条件特征、陈旧性特征在滚动评估中全部失效
+  - 模型仅匹配基准率而非展示真正的技能
+- **落地指向**: 如果你尝试将 TFT 用于 A 股预测，需要注意梯度崩塌问题。这是"模型在回测中表现好但实盘失效"的 DL 版本
+- **状态**: 待采用
+
+---
+
+## 10. 组合优化方法
+
+### 10.1 PyPortfolioOpt 完整框架
+
+- **来源**: PyPortfolioOpt (GitHub, 4492+ stars)（开源项目，多源验证）
+- **评级**: **A**
+- **内容**:
+  - 一站式投资组合优化库：Markowitz 有效前沿、Black-Litterman、层次风险平价 (HRP)
+  - 支持协方差收缩（Ledoit-Wolf、Oracle Approximating Shrinkage）
+  - 支持做多/做空、市场中性、L2 正则化组合
+  - JOSS 发表，持续维护至 2024+
+  - Black-Litterman 支持绝对观点和相对观点，Omega 支持多种估计方法
+- **落地指向**: 可以作为 `factor/synthesis.py` 中 `method='markowitz'` 或 `method='black_litterman'` 的参考实现。当前项目只支持等权和 ICIR 加权，引入最优化方法可以显著提升合成效果
+- **状态**: 待采用
+
+### 10.2 层次风险平价 (HRP)
+
+- **来源**: López de Prado + PyPortfolioOpt 实现（多源验证）
+- **评级**: **B**
+- **内容**:
+  - 用层次聚类选择不相关资产 → 对聚类内做风险平价
+  - 比传统马科维兹更稳健（不需要估计协方差矩阵的逆）
+  - 对样本外表现更好，尤其适合资产数量多而样本少的情况
+- **落地指向**: HRP 特别适合多策略组合场景。帖主计划运行 12-20 个策略，HRP 可以在策略层面做风险分散。阶段二的 `StrategyEnsemble` 可以实现
+- **状态**: 待采用
+
+### 10.3 Black-Litterman 主观观点融合
+
+- **来源**: PyPortfolioOpt + 行业实践（多源验证）
+- **评级**: **B**
+- **内容**:
+  - 从市场隐含收益出发（先验），融合投资者主观观点（似然），得后验收益
+  - 避免纯马科维兹优化的"角解"问题（极端权重）
+  - 绝对观点格式：`{"AAPL": 0.20, "MSFT": -0.05}` 表达年化超额收益预期
+  - 相对观点格式：`["AAPL"] > ["MSFT"]` 表达跑赢预期
+- **落地指向**: 可以用来建模帖主 PowerEason 的经验判断——对有强主观判断的标的给 View，没判断的让市场均衡定价决定
+- **状态**: 待采用
+
+### 10.4 AI + Black-Litterman 混合框架
+
+- **来源**: GitHub 开源项目 (2025)（开源项目，单源）
+- **评级**: **C**
+- **内容**:
+  - 用 PCA + K-Means 聚类 + 动量打分做因子模型
+  - 将 ML 预测转化为 Black-Litterman 的观点输入
+  - 波动率过滤剔除高风险标的
+- **落地指向**: 这是"ML 预测 + 传统优化"的混合方案，比纯端到端 DL 更易解释。阶段二参考
+- **状态**: 待采用
+
+---
+
+## 11. 数据工程与实盘准备
+
+### 11.1 幸存者偏差的量化影响与防御
+
+- **来源**: 微信公众号 + 叩富网 + 行业经验（多源验证）
+- **评级**: **A**
+- **内容**:
+  - 低 PE 策略用当前股票池回测年化 28%，加入退市/ST 后降至 6%
+  - 2019-2023 年 A 股近 200 只退市、500 多只被 ST
+  - 回测必须使用**动态股票池（Point-in-Time Universe）**：回测 2020 年某天时，股票池是 2020 年当天真实存在的所有股票
+  - 必须包含已退市标的的完整历史数据
+- **落地指向**: 你的 `DataHandler` 已经支持 Point-in-Time 数据，但股票池构建需要改进：`_get_stock_pool()` 目前获取的是当前成分股或硬编码列表，应该改为按回测日期查询该日真实的成分股/全市场列表。从 AKShare 获取历史股票列表和退市记录
+- **状态**: 待采用
+
+### 11.2 ST 股处理的实操方案
+
+- **来源**: 叩富网 + 微信公众号（多源验证）
+- **评级**: **A**
+- **内容**:
+  - ST 股涨跌幅限制 5%（正常 10%），流动性极差
+  - 处理流程：选股后检测名称含 "ST" 或 "\*ST" → 剔除；检测停牌和零成交量 → 剔除；检查复牌首日 → 避免跳空
+  - 回测系统中未过滤 ST 会导致以正常市价"买入"实际无法交易的标的
+- **落地指向**: 在 `engine.py` 的 `_get_stock_pool()` 或策略的 `generate_signals()` 中加入 ST 过滤逻辑。可以新增一个 `utils/stock_filter.py` 统一处理 ST/停牌/新股的过滤
+- **状态**: 待采用
+
+### 11.3 前视偏差的具体防御
+
+- **来源**: 微信公众号 + 叩富网 + 行业经验（多源验证）
+- **评级**: **A** *(已部分实现)*
+- **内容**:
+  - 三大前视偏差来源：用当前成分股回测历史（已在 11.1 中讨论）、用未来财报回测历史、选股日用了当日收盘价
+  - 财务数据必须按**公告日期**而非报告期截止日使用
+  - 信号计算必须用可获得的滞后数据（如 T-1 的收盘价）
+- **落地指向**: 你的 PIT 复权已解决价格层面的问题。财务数据的 PIT 是需要补齐的关键缺口——基本面因子（PB/PE/ROE等）在读取时必须使用"报告发布日期 ≤ 查询日期"的约束
+- **状态**: 待采用 (价格 PIT 已实现，财务 PIT 未实现)
+
+### 11.4 除权除息的处理
+
+- **来源**: 叩富网 + 微信公众号（多源验证）
+- **评级**: **A** *(已实现)*
+- **内容**:
+  - 除权导致价格断层，不处理会导致策略信号完全失真
+  - 优先使用前复权/后复权数据
+  - 用复权因子做精确计算
+- **落地指向**: 你的 `adjust.py` 事件驱动复权已经是最佳方案，无需改变
+- **状态**: 已采用 (阶段一已完成)
+
+### 11.5 IPO 过滤规则
+
+- **来源**: 行业通用最佳实践（多源验证）
+- **评级**: **A**
+- **内容**:
+  - 新股上市初期（通常 1-6 个月）数据波动剧烈，回测应剔除
+  - 次新股存在流动性异常和投机性溢价
+  - 新股上市首日涨跌幅限制与正常股票不同
+  - 建议过滤上市不满 120 个交易日的股票
+- **落地指向**: 在 `DataAPI.stock_list()` 或策略层面加入上市日期过滤。从 AKShare/MetaDB 获取 `listed_date`，回测时排除 `dt - listed_date < 120` 的股票
+- **状态**: 待采用
+
+### 11.6 可转债量化策略全景
+
+- **来源**: 国金证券研报（2025.06）+ 国盛证券月报（2025.08）（多源，券商研报）
+- **评级**: **C**
+- **内容**:
+  - 六大策略体系：择时、行业轮动、选券、低价策略、双低策略、期权策略
+  - 缝补型策略（次低价）：年化 17.35%，夏普 1.2，容量 25 亿+
+  - 期权平替策略：年化 14%，回撤 < 10%，夏普 1.5
+  - 双低五因子增强：年化 24%，超额回撤 < 9%
+  - 四因子中观行业轮动：年化 26%，回撤 < 11%，夏普 2+
+  - **注意：可转债和 A 股共用 QMT 基础设施，但需要独立的定价和因子体系**
+- **落地指向**: 项目策略边界已覆盖可转债（设计文档 §1.4），但当前所有代码都是 A 股。阶段三可以扩展。双低策略的因子设计可以部分借鉴 A 股的因子方法论
+- **状态**: 待采用
+
+### 11.7 数据源全景对比与备份策略
+
+- **来源**: CSDN + 掘金 + 微信公众号 + TusharePro 停运事件（2025.08）（多源验证）
+- **评级**: **A**
+- **内容**:
+  - **AKShare**: 完全免费，覆盖面最广（A股/港股/美股/加密/期货/期权/宏观），质量中等需清洗，社区驱动
+  - **Tushare Pro**: 质量高、接口规范，2025.08 突发停运一周震惊量化圈，暴露单一依赖风险
+  - **Wind**: 行业金标准，年费数万~数十万，个人不可及
+  - **JoinQuant（聚宽）**: 免费额度充足，平台生态完善，分钟级回测
+  - **行业反思**: 所有量化团队现在至少维护**两个独立数据源的备份**
+  - **Baostock**: 免费、无需注册、稳定（补充推荐）
+- **落地指向**: 你当前只有 AKShare 一个适配器。应该在 `fetcher/` 下新增至少一个备用适配器（推荐 Baostock 或 Tushare），实现 failover 机制。`DataPipeline` 支持多源交叉验证
+- **状态**: 待采用
+
+---
+
+## 12. 市场状态识别与自适应
+
+### 12.1 集成 HMM 市场状态投票框架
+
+- **来源**: AIMS Press (2025.10)（学术期刊，单源）
+- **评级**: **B**
+- **内容**:
+  - XGBoost + BaggingClassifier + HMM 混合投票分类器
+  - 识别牛/熊/中性三种市场状态，使用宏观和技术指标
+  - 在 S&P 500 和 Russell 3000 ETF 上验证
+  - regime-aware 策略夏普和 Sortino 均优于 buy-and-hold
+- **落地指向**: 和你的阶段二"因子择时"需求高度契合。可以在市场状态识别的基础上实现"不同市场状态下用不同因子权重"
+- **状态**: 待采用
+
+### 12.2 自适应层次 HMM (AH-HMM)
+
+- **来源**: Journal of Risk and Financial Management (2025)（学术期刊，单源）
+- **评级**: **C**
+- **内容**:
+  - 引入"元 regime"（如低/高 VIX 环境），每个元 regime 有自己的状态转移矩阵
+  - 识别关键转折点：GFC、COVID-19、2022 紧缩周期
+  - VaR 覆盖优于传统 HMM 和时变转移模型
+- **落地指向**: AH-HMM 提供了更精细的市场状态建模，但复杂度较高。传统的 2 状态或 3 状态 HMM 就足够覆盖大多数需求
+- **状态**: 待采用
+
+### 12.3 网络异方差体制检测
+
+- **来源**: PLoS ONE (2025.10)（学术期刊，单源）
+- **评级**: **C**
+- **内容**:
+  - 将金融时间序列映射为**异方差网络**（HMM + ARMA-GARCH + KNN）
+  - 网络社区结构检测 regime switching 并生成预警信号
+  - 在 S&P 500 上识别关键切换点
+- **落地指向**: 预警信号生成的方法论可以用于你的风控体系。但实现复杂度高，优先级低
+- **状态**: 待采用
+
+### 12.4 市场状态识别 Python 工具
+
+- **来源**: GitHub market_regime_detector + market-regime-detection（开源项目）
+- **评级**: **B**
+- **内容**:
+  - 支持 K-Means / GMM / HMM 三种聚类方法
+  - 分裂滚动训练模式，转移矩阵 + 驻留时间分析
+  - 前向验证无前视偏差
+  - 内置策略钩子和向量化回测
+- **落地指向**: 可以直接集成到你的 `analytics/` 模块，添加 `regime_detection.py` 做市场状态标记，然后用标记来调整策略的因子权重
+- **状态**: 待采用
+
+### 12.5 概念漂移检测与自适应学习
+
+- **来源**: IEEE + Information Sciences + NeurIPS (2024)（多源验证，学术文献）
+- **评级**: **C**
+- **内容**:
+  - SHAP 层次概念漂移检测（HCDD-SHAP）：误差率 → 特征重要性 → 样本回溯三层检测
+  - GMM + KL 散度滑动窗口漂移检测
+  - PCA 特征向量差异检测 + 自增长 GRU + 灾难性遗忘控制
+  - 2024 年趋势：detect-then-adapt 框架，兼顾速度、可解释性和准确度
+- **落地指向**: 概念漂移检测是解决"策略何时失效"的终极方案。阶段三引入 ML 模型时，需要在模型层面实现漂移检测而非仅靠回测
+- **状态**: 待采用
+
+---
+
+## 13. 情绪因子与另类数据
+
+### 13.1 A 股综合情绪指数（平安证券框架）
+
+- **来源**: 平安证券量化资产配置系列之八（2024.04）（券商研报，单源）
+- **评级**: **A**
+- **内容**:
+  - 11 个指标覆盖三维度：
+    - **交易面**: 换手率、100-20日动量、涨停股占比、创近一年新高占比
+    - **资金面**: 融资余额、融资买入额占比、北向资金净流入、机构净买入、开放式基金股票投资比例
+    - **跨市场**: 权益风险溢价 (ERP)、股指期货升贴水
+  - 综合情绪指数股债轮动策略：年化 15.7%，夏普 1.21，月度胜率 75%
+  - 指数极端低位领先于市场底部
+- **落地指向**: 在当前 `factor/builtin/` 下新增 `sentiment.py`，优先实现北向资金净流入因子和融资余额因子（数据可从 AKShare 获取）。这两个是 A 股情绪因子中验证最充分的
+- **状态**: 待采用
+
+### 13.2 北向资金因子体系
+
+- **来源**: 平安证券 + 微信公众号技术文章（多源验证）
+- **评级**: **A**
+- **内容**:
+  - 北向资金 = "聪明钱"，通过沪股通/深股通流入的境外资金
+  - 三个核心因子：`north_money_5d`（5 日累计净流入）、`north_ratio`（北向持股占比）、`north_diff`（今日流入 vs 5 日均值）
+  - 与指数上涨高度相关但非因果——共同受预期、政策、流动性驱动
+  - 北向资金连续 5 日流入 + 主力同向 → 加仓信号；连续流出 → 减仓信号
+- **落地指向**: AKShare 有 `ak.stock_hsgt_*` 系列接口可以获取沪深港通数据。实现北向资金因子后，可以在策略中作为情绪面增强信号
+- **状态**: 待采用
+
+### 13.3 融资融券情绪信号
+
+- **来源**: 平安证券研报（券商研报，单源）
+- **评级**: **B**
+- **内容**:
+  - 融资余额极端上行 → 未来 1 月收益提升；极端下行 → 收益下滑
+  - 融资买入额占比的分位数 > 0.85 时，未来 1 月存在显著超额收益
+  - 2015 年牛市中两融余额与大盘高度正相关（散户杠杆情绪指标）
+- **落地指向**: 在情绪因子模块中加入融资买入额占比因子。注意：两融数据是滞后公布的，使用时需要考虑 PIT
+- **状态**: 待采用
+
+### 13.4 FinBERT 金融新闻情绪因子
+
+- **来源**: 哈尔滨工业大学 2025 年硕士论文（学术论文，单源）
+- **评级**: **B**
+- **内容**:
+  - 使用 FinBERT 对 A 股新闻做情感分类
+  - 构建月度情绪因子 SENT = 积极情绪组收益 - 消极情绪组收益
+  - 用 SENT 替代 Fama-French 五因子中解释力不足的 CMA 因子，形成扩展模型
+  - **证明了新闻情绪因子是独立于传统风险因子的定价维度**
+- **落地指向**: 阶段二的 AI 策略方向可以包含新闻情绪因子。AKShare 有 `ak.stock_news_em` 接口获取新闻标题，加上 FinBERT 模型即可构建
+- **状态**: 待采用
+
+### 13.5 四维情绪体系（北向+新闻+主力+人气）
+
+- **来源**: 微信公众号"量化交易进阶第40天"（行业博客，单源）
+- **评级**: **B**
+- **内容**:
+  - 综合得分 = 0.4×财务因子 + 0.3×技术因子 + 0.3×情绪因子
+  - 情绪共振加仓：北向连续 5 日流入 + 主力同向 + 新闻情绪 > 0.5 → 仓位 80%
+  - 情绪转弱降仓：北向连续流出 + 新闻情绪 < -0.3 → 仓位 30%
+  - 市场人气 > 0.9 → 短期顶部预警；市场人气 < 0.1 → 可能接近底部
+- **落地指向**: 这是帖子 PowerEason 也认同的情绪量化方向。可以作为策略的风控增强层
+- **状态**: 待采用
+
+---
+
+## 14. 因子择时（Factor Timing）
+
+### 14.1 四大信号类别
+
+- **来源**: BlackRock Systematic (2025) + DYNF ETF（行业实践，单源）
+- **评级**: **A**
+- **内容**:
+  - 因子择时四个信号维度：
+    1. **经济 regime**：扩张=动量+成长，收缩=质量+低波，衰退=质量+最小波动，复苏=小盘+价值
+    2. **因子估值**：因子本身会过度/低估，低估因子历史上跑赢高估因子
+    3. **情绪**：因子层面的动量和持仓拥挤度
+    4. **因子特定指标**：增长因子看盈利能力和创新投入，动量因子看稳定性和拥挤度
+  - 组合使用四个信号的 IR 高于任何单一信号，回撤更浅
+- **落地指向**: 这是给你阶段二"因子择时模块"设计的直接输入。不需要复杂 ML 模型，简单的经济 regime 分类 + 因子估值排名就可以实现
+- **状态**: 待采用
+
+### 14.2 AI 驱动的动态因子择时
+
+- **来源**: Northern Trust + U. Chicago (Nagel) (2025)（学术+行业，单源）
+- **评级**: **B**
+- **内容**:
+  - 传统因子择时是静态的（假设预测因子与因子收益之间的关系稳定）
+  - AI 驱动方式：对择时信号施加数据驱动的怀疑（正则化）
+  - 当模型缺乏信心时自动降级为等权（"关掉择时"）
+  - 当信号强时加大倾斜
+  - 结果：夏普从 0.66 → 0.75（等权）→ 0.82（动态）
+- **落地指向**: "不确定时不操作"的原则比复杂的预测模型更重要。可以用信心阈值来控制因子择时的激进程度
+- **状态**: 待采用
+
+### 14.3 XGBoost 因子轮动策略
+
+- **来源**: GitHub 开源项目 (2025)（开源项目，单源，待验证）
+- **评级**: **B**
+- **内容**:
+  - XGBoost 训练于宏观特征（VIX、收益率差、put/call 比、通胀预期、消费者信心）
+  - 加上因子动量特征，预测每日因子收益
+  - 年化 11.37%，夏普 5.28，Beta 近零
+- **落地指向**: 宏观特征在 A 股可以替换为相应指标（Shibor、国债收益率差、CPI/PPI、PMI 等），技术上可行
+- **状态**: 待采用
+
+### 14.4 Sparse Jump Model + Black-Litterman 因子分配
+
+- **来源**: Shu & Mulvey, Journal of Portfolio Management (2025)（学术期刊，单源）
+- **评级**: **C**
+- **内容**:
+  - 使用 Sparse Jump Model 识别单个因子的牛/熊 regime
+  - 将 regime 推断输入 Black-Litterman 框架
+  - IR 从 0.05（等权）提升至 0.40-0.50
+- **落地指向**: 组合了 12.1 的市场状态识别和 10.3 的 BL 模型，是高级方向
+- **状态**: 待采用
+
+---
+
+## 15. A 股市场异象实证
+
+### 15.1 A 股异象复现研究
+
+- **来源**: 顶级期刊（2024）+ 华中科技大学（2025）（学术期刊，多源验证）
+- **评级**: **A**
+- **内容**:
+  - 复现 152 个国际主流异象 → **超过 80% 在 A 股失效**
+  - 即使表面显著的策略，纳入交易成本和多重检验校正后收益迅速归零
+  - 另 Li (2024) 复制 469 个 A 股异象，84.22% 未产生偏离 CAPM 的实际收益
+  - 华中科技大学王少平（2025）：控制自相关和时变波动率后，仅 **9 个异象**统计显著
+  - 泡沫期内仅 3 个显著，相对有效期内 4 个显著
+- **落地指向**: **这是最重要的警示类知识。** 在设计策略时不要过度依赖文献报告的异象。任何新因子必须经过：①包含退市标的；②交易成本调整；③多重检验校正后的验证
+- **状态**: 待采用
+
+### 15.2 A 股动量消失之谜
+
+- **来源**: 李松等《金融经济学研究》(2025) + 刘天权等 (2025)（学术期刊，多源验证）
+- **评级**: **A**
+- **内容**:
+  - 传统月度动量在 A 股确实消失了——但原因是主观的："市场状态-动态 Beta 暴露"机制
+  - **月内周频动量依然显著存在**：T+1 和 T+2 期强劲，T+4 期反转
+  - 财报披露月（4月、8月、10月）动量被放大，非财报月动量几乎为零
+  - 散户主导和信息处理滞后是主要原因
+- **落地指向**: 你的策略是周频调仓！这意味着你可以利用"月内周频动量"效应。当前 `momentum.py` 中的 `momentum_1m` 是一个月（21个交易日），可以尝试 5 日和 10 日动量来捕捉这个效应
+- **状态**: 待采用
+
+### 15.3 隔夜负收益之谜与日内反转
+
+- **来源**: 中信建投 Alpha 专题 (2025.11) + 陆蓉、王麒《经济学》季刊 (2025)（多源验证）
+- **评级**: **B**
+- **内容**:
+  - A 股存在独特的"隔夜负收益"现象：隔夜收益系统性为负，日内存在正向风险溢价
+  - 特质波动率之谜**只存在于隔夜**，日内不成立
+  - 低开 = 机构套利（隔夜），高走 = 个人追逐（日内）
+  - 同时段动量（同时间窗口的截面动量）和异时段反转（不同时间窗口的截面反转）显著
+- **落地指向**: 如果你的信号生成使用的是收盘价，需要考虑隔夜和日内的差异化行为。这个发现可以优化信号生成的时间选择——日频策略基于日内部分（而非隔夜部分）做因子计算可能更有效
+- **状态**: 待采用
+
+### 15.4 最优执行算法
+
+- **来源**: Michael Brenndoerfer 技术博客 (2025.01)（技术博客，单源）
+- **评级**: **B**
+- **内容**:
+  - TWAP/VWAP/Implementation Shortfall 三类算法的完整 Python 实现
+  - Almgren-Chriss 模型：平衡市场冲击 vs 时机风险
+  - 执行成本 = 市场冲击 + 时机成本 + 延迟成本 + 机会成本
+  - 紧急程度参数控制激进程度：0 = TWAP 均匀分片，1 = 激进前端加载
+- **落地指向**: 当前 `matcher.py` 使用简化 VWAP 撮合。阶段二 `SimulationAccount` 中如果需要更精确的模拟执行，可以实现 Implementation Shortfall 算法
+- **状态**: 待采用
 
 ### 学术论文
 - Tang, Chen, Yang et al. "AlphaAgent: LLM-Driven Alpha Mining with Regularized Exploration to Counteract Alpha Decay." KDD '25.
@@ -694,11 +1202,57 @@
 - single-stock-autotrading-china: https://github.com/eyeglasses/single-stock-autotrading-china
 - Multi-Factor-Strategy-Development-Framework: https://github.com/AnQreiShikov/Multi-Factor-Strategy-Development-Framework
 
-### 社区讨论
-- 水源社区 (shuiyuan.sjtu.edu.cn) topic/436143 — PowerEason 实盘记录帖
-- 知乎: 量化因子实战、机器学习因子失效分析
-- CSDN: MiniQMT 教程系列
-- 迅投 QMT 社区: MiniQMT 配置指南
+### 学术论文（续）
+- 刘国山, 刁海璨. "Research on Optimization of Multi-stock Pair Trading: Empirical Test Based on the Chinese Stock Market." 运筹与管理, 2024, 33(11): 190-196.
+- Ti, Dai, Wang et al. "Improving Cointegration-Based Pairs Trading Strategy with Asymptotic Analyses and Convergence Rate Filters." Computational Economics, 2024, 64: 2717-2745.
+- Song, Wang, Xie & Zhao. "Optimal Pairs Trading in Theory and Practice." International Review of Financial Analysis, 2025.
+- "HAELT: A Hybrid Attentive Ensemble Learning Transformer for Stock Price Forecasting." arXiv 2506.13981 (2025).
+- "SeTT: Similarity-Embedded Temporal Transformers." Complex & Intelligent Systems, Springer, 2024.
+- "CEEMDAN + LSTM + Transformer Residual for Stock Prediction." Expert Systems with Applications, 2025.
+- Oxford Research. "Deep Learning for Financial Time Series: A Large-Scale Benchmark of Risk-Adjusted Performance." arXiv 2603.01820 (2025).
+- "A Forest of Opinions: A Multi-Model Ensemble-HMM Voting Framework." Data Science in Finance and Economics, 2025.
+- "Adaptive Hierarchical Hidden Markov Models for Structural Market Change." Journal of Risk and Financial Management, 2025.
+- "High-Order Semi-Hidden Markov Modeling for Minute-Level Commodity Futures." ACM, 2025.
+- "A Multi-Asset Allocation Study Based on a TVTP-RS Model." 系统工程理论与实践, 2025.
+- "Early Warning of Regime Switching: A Heteroskedastic Network Model." PLoS ONE, 2025.
+- HCDD-SHAP: "Multilayer Concept Drift Detection Based on Model Explainability." IEEE, 2024.
+- ADIN-Forecast: "Adaptive Incremental Learning for Stock Trend Forecasting." METU, 2024.
+- DSW-EFS: "Dynamic Similarity Weighted Evolving Fuzzy System for Concept Drift." Information Sciences, 2024.
+- 陆蓉, 王麒. "'昼伏夜出'的特质波动率之谜." 经济学(季刊), 2025.
+- 李松等. "中国股票市场'动量消失'之谜的新阐释." 金融经济学研究, 2025.
+- 刘天权等. "股市动量与反转现象的一个新解释：基于信息差异的视角." 2025.
+- "Replicating and Digesting Anomalies in the Chinese A-share Market." 顶级期刊, 2024.
+- 邱志刚等. "股票市场时钟效应、流动性变化周期与高频股票定价异象." 2024-2025.
+- "Return Extrapolation in China." Finance Research Letters, 2026.
+- Lehnherr, Mehta & Nagel. "Optimal Factor Timing in a High-Dimensional Setting." Working Paper, 2024.
+- Shu & Mulvey. "Dynamic Factor Allocation Leveraging Regime-Switching Signals." Journal of Portfolio Management, 2025.
+
+### 券商研报（续）
+- 中信建投. "'逐鹿'Alpha专题报告：隔夜-日内异象因子及领先滞后分析." 2025.11.
+- 国金证券. "可转债量化择时、轮动、选券策略." 2025.06.
+- 国盛证券. "转债处于低配置价值区间——八月可转债量化月报." 2025.08.
+
+### 开源项目（续）
+- PyPortfolioOpt: https://github.com/PyPortfolio/PyPortfolioOpt
+- market_regime_detector: https://github.com/zanisimone/market_regime_detector
+- market-regime-detection: https://github.com/Sakeeb91/market-regime-detection
+- TFT S&P 500 Forecasting: https://github.com/aman-720/sp500-tft-forecasting
+- XGBoost Factor Rotation: https://github.com/TJ9068/XGBoost-Factor-Rotation-Strategy
+- OpenBB Tushare: https://github.com/finanalyzer/openbb_tushare
+
+### 行业报告与实践
+- BlackRock. "Time to Tilt: Harnessing Factor Cyclicality." DYNF ETF, 2025.
+- Northern Trust. "Exploiting the Benefits of AI for Factor Investors." 2025.02.
+- Resonanz Capital. "Evaluating Hedge Funds in a Crowded Market." 2025.10.
+- Finantrix. "Backtesting at Scale — Cloud HPC and Event-Driven Simulation." 2024.
+- Interactive Brokers / QuantInsti. "The Risk-Constrained Kelly Criterion." 2024.
+- Michael Brenndoerfer. "Optimal Execution Algorithms: TWAP, VWAP & Market Impact." 2025.01.
+
+### 社区讨论（续）
+- 叩富网: "量化回测中的幸存者偏差" / "ST及停牌股数据陷阱" 系列
+- 微信公众号: "如何在策略回测中避免过度拟合" / "量化交易进阶第40天——情绪与资金流因子"
+- 掘金: "年度最好用的股票数据API接口" (2025)
+- TusharePro 停运事件: 财联社报道 (2025.08)
 
 ---
 
