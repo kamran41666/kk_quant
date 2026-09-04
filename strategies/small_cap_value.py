@@ -71,35 +71,12 @@ class SmallCapValueStrategy(Strategy):
             self.log("[Error] Empty stock pool")
             return {}
 
-        # ---- Get historical close prices via DataAPI (for factor window) ----
-        from quant_engine.data.api import DataAPI
-        api = DataAPI()
-
         lookback = 30  # need ~30 days to compute 20-day volatility/momentum
-        current_dt = dh.current_date  # already set to current day by engine
-
-        # Compute start date for lookback window
-        from quant_engine.data.calendar import TradingCalendar
-        cal = TradingCalendar()
-        trading_days = cal.get_trading_days(
-            date(2020, 1, 1), current_dt
+        df = dh.get_history(
+            codes=codes,
+            lookback=lookback,
+            fields=["close", "amount", "turnover_rate"],
         )
-        if len(trading_days) < lookback:
-            self.log(f"[Skip] Only {len(trading_days)} trading days available (need {lookback})")
-            return {}
-        lb_start = trading_days[-lookback]
-
-        try:
-            df = api.daily(
-                codes=codes,
-                start=lb_start,
-                end=current_dt,
-                fields=["close", "volume", "turnover_rate"],
-                adjust="event_driven",
-            )
-        except Exception as e:
-            self.log(f"[Error] api.daily() failed: {e}")
-            return {}
 
         if df.empty:
             self.log("[Error] DataAPI returned empty DataFrame")
@@ -115,10 +92,13 @@ class SmallCapValueStrategy(Strategy):
         # 2. Momentum (20-day)
         mom = close.pct_change(20).iloc[-1]
 
-        # 3. Log market cap (approx: close * volume as proxy)
-        vol_col = df["volume"].unstack(level="code")
-        approx_mcap = close * vol_col.shift(1)  # avoid look-ahead
-        log_mcap: pd.Series = approx_mcap.apply(np.log).iloc[-1]
+        # 3. Approximate circulating market cap from amount / turnover rate.
+        # This is a demo proxy. Production research must use a point-in-time
+        # fundamental/share-count provider.
+        amount = df["amount"].unstack(level="code")
+        turnover = df["turnover_rate"].unstack(level="code").replace(0, np.nan)
+        approx_mcap = amount / (turnover / 100.0)
+        log_mcap: pd.Series = np.log(approx_mcap).iloc[-1]
 
         # ---- Cross-sectional z-score ----
         def cs_zscore(s: pd.Series) -> pd.Series:

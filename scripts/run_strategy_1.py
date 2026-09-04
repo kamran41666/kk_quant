@@ -8,12 +8,14 @@ Usage:
     python scripts/run_strategy_1.py
 """
 import sys
-import io
+import argparse
+import os
 from datetime import date
 from pathlib import Path
 
-# Force UTF-8 encoding on Windows
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+# Keep progress visible on Windows while the backtest is running.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
@@ -27,8 +29,19 @@ from quant_engine.data.store import PriceStore
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Run the Strategy #1 backtest demo")
+    parser.add_argument(
+        "--generate-demo",
+        action="store_true",
+        help="create deterministic synthetic files only when they are missing",
+    )
+    args = parser.parse_args()
+    if args.generate_demo:
+        # Synthetic data lives outside the production data root and is selected
+        # explicitly through the same runtime configuration used by DataAPI.
+        os.environ["QUANT_DATA_DIR"] = str(Path("data/demo").resolve())
     print("=" * 60)
-    print("Strategy #1: Small-Cap Value Alpha Backtest")
+    print("Strategy #1: Small-Cap Value Alpha — SYNTHETIC DEMO")
     print("=" * 60)
 
     # 股票池: 全A股 or 中证500成分股
@@ -44,6 +57,7 @@ def main():
     ]
 
     print(f"\nStock pool: {len(stock_list)} stocks")
+    print("Data: deterministic synthetic fixture (not investable market evidence)")
     print("Period: 2023-01-01 ~ 2024-12-31")
     print("Capital: 1,000,000")
     print("Rebalance: weekly (Friday signal, Monday exec)")
@@ -62,9 +76,15 @@ def main():
         "is_trading_day": [True] * len(cal_dates),
         "exchange": ["SSE"] * len(cal_dates),
     })
-    calendar_path = Path("data/raw/calendar/trading_dates.parquet")
-    calendar_path.parent.mkdir(parents=True, exist_ok=True)
-    cal_df.to_parquet(calendar_path, index=False)
+    data_root = Path(os.getenv("QUANT_DATA_DIR", "data"))
+    calendar_path = data_root / "raw" / "calendar" / "trading_dates.parquet"
+    if not calendar_path.exists():
+        if not args.generate_demo:
+            raise SystemExit(
+                f"Missing calendar {calendar_path}; pass --generate-demo to create synthetic demo data."
+            )
+        calendar_path.parent.mkdir(parents=True, exist_ok=True)
+        cal_df.to_parquet(calendar_path, index=False)
 
     # Step 2: Get trading days
     cal = TradingCalendar()
@@ -75,8 +95,21 @@ def main():
     store = PriceStore()
     np.random.seed(42)
 
-    print("Generating synthetic daily data for 30 stocks ...")
-    for code in stock_list:
+    fixture_probe = Path("data/raw/daily/year=2024/quarter=4/000001.SZ.parquet")
+    missing_codes = [
+        code for code in stock_list
+        if not (data_root / "raw" / "daily" / "year=2024" / "quarter=4" / f"{code}.parquet").exists()
+    ]
+    if missing_codes and not args.generate_demo:
+        raise SystemExit(
+            f"Missing {len(missing_codes)} local price files; pass --generate-demo to create synthetic demo data."
+        )
+    codes_to_generate = missing_codes
+    if codes_to_generate:
+        print("Generating deterministic synthetic fixture for 30 stocks ...")
+    else:
+        print("Using existing local demo fixture; source files are left unchanged.")
+    for code in codes_to_generate:
         n = len(trading_days)
         # Random walk for close
         close = 10.0 + np.cumsum(np.random.randn(n) * 0.15)
@@ -102,7 +135,8 @@ def main():
         })
         store.write(code, df)
 
-    print("Synthetic data generated.\n")
+    if codes_to_generate:
+        print("Synthetic fixture generated.\n")
 
     engine = BacktestEngine(SmallCapValueStrategy, stock_list=stock_list)
 

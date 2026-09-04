@@ -4,6 +4,7 @@ A 股交易日历基于中国金融期货交易所发布的交易日历。
 使用 AKShare 获取官方日历数据，本地缓存到 Parquet。
 """
 import warnings
+import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -22,7 +23,8 @@ class TradingCalendar:
         self._load()
 
     def _data_path(self) -> Path:
-        base = Path(__file__).parent.parent.parent / "data" / "raw" / "calendar"
+        configured_root = os.getenv("QUANT_DATA_DIR")
+        base = (Path(configured_root) if configured_root else Path(__file__).parent.parent.parent / "data") / "raw" / "calendar"
         base.mkdir(parents=True, exist_ok=True)
         return base / "trading_dates.parquet"
 

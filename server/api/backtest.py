@@ -1,28 +1,53 @@
 """Backtest run endpoints"""
 import json
 import traceback
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional
 
 from server.models.database import get_db
 from server.models.schema import Run, Strategy
 
 router = APIRouter(prefix="/backtest", tags=["backtest"])
+_cancelled_runs: set[str] = set()
+_cancel_lock = threading.Lock()
 
 
 # ---- Request/Response Models ----
 
 class BacktestRunRequest(BaseModel):
     strategy_id: str
-    start_date: str  # "YYYY-MM-DD"
-    end_date: str
-    initial_capital: float = 1_000_000.0
-    benchmark: str = "000300.SH"
-    rebalance_frequency: str = "weekly"  # daily | weekly | monthly
+    start_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    initial_capital: float = Field(default=1_000_000.0, gt=0, le=1_000_000_000_000)
+    benchmark: str = Field(default="000300.SH", min_length=1, max_length=20)
+    rebalance_frequency: str = Field(default="weekly", pattern=r"^(daily|weekly|monthly)$")
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def valid_iso_date(cls, value: str) -> str:
+        try:
+            date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("date must be a valid YYYY-MM-DD value") from exc
+        return value
+
+    @field_validator("initial_capital")
+    @classmethod
+    def finite_capital(cls, value: float) -> float:
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError("initial_capital must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def ordered_dates(self):
+        if date.fromisoformat(self.end_date) < date.fromisoformat(self.start_date):
+            raise ValueError("end_date must be on or after start_date")
+        return self
 
 
 class RunResponse(BaseModel):
@@ -56,19 +81,34 @@ def _import_strategy(class_path: str):
     if len(parts) != 2:
         raise ValueError(f"Invalid strategy class path: {class_path}. Expected format: module.ClassName")
     module_name, class_name = parts
+    if not module_name.startswith("strategies."):
+        raise ValueError(
+            "Strategy classes must be declared in the local strategies package"
+        )
     import importlib
     module = importlib.import_module(module_name)
-    return getattr(module, class_name)
+    strategy_class = getattr(module, class_name)
+    from quant_engine.backtest.strategy import Strategy as StrategyBase
+    if not isinstance(strategy_class, type) or not issubclass(strategy_class, StrategyBase):
+        raise TypeError(f"{class_path} is not a Strategy subclass")
+    return strategy_class
 
 
 def _execute_backtest(run_id: str, req: BacktestRunRequest):
     """Background task: run the backtest engine"""
     from server.models.database import SessionLocal
+    from quant_engine.backtest.engine import BacktestCancelled, BacktestEngine
     db = SessionLocal()
 
     try:
         run = db.query(Run).filter(Run.id == run_id).first()
         if not run:
+            return
+        if _is_cancelled(run_id):
+            run.status = "cancelled"
+            run.error_message = "Cancellation requested"
+            run.completed_at = datetime.now().isoformat()
+            db.commit()
             return
         run.status = "running"
         db.commit()
@@ -85,8 +125,6 @@ def _execute_backtest(run_id: str, req: BacktestRunRequest):
         params = json.loads(strategy_def.params) if strategy_def.params else {}
 
         # Run backtest
-        from quant_engine.backtest.engine import BacktestEngine
-
         engine = BacktestEngine(strategy_cls, **params)
         result_dir = engine.run(
             start=date.fromisoformat(req.start_date),
@@ -95,6 +133,8 @@ def _execute_backtest(run_id: str, req: BacktestRunRequest):
             benchmark=req.benchmark,
             output_dir=f"backtest_result/{run_id}",
             rebalance_frequency=req.rebalance_frequency,
+            cancel_check=lambda: _is_cancelled(run_id),
+            max_seconds=60 * 30,
         )
 
         # Read summary
@@ -122,6 +162,13 @@ def _execute_backtest(run_id: str, req: BacktestRunRequest):
         run.completed_at = datetime.now().isoformat()
         db.commit()
 
+    except BacktestCancelled as e:
+        run = db.query(Run).filter(Run.id == run_id).first()
+        if run:
+            run.status = "cancelled"
+            run.error_message = str(e)
+            run.completed_at = datetime.now().isoformat()
+            db.commit()
     except Exception as e:
         run = db.query(Run).filter(Run.id == run_id).first()
         if run:
@@ -129,6 +176,8 @@ def _execute_backtest(run_id: str, req: BacktestRunRequest):
             run.error_message = f"{str(e)}\n{traceback.format_exc()}"
             db.commit()
     finally:
+        with _cancel_lock:
+            _cancelled_runs.discard(run_id)
         db.close()
 
 
@@ -168,6 +217,31 @@ def run_backtest(
         initial_capital=run.initial_capital,
         created_at=run.created_at,
         completed_at=run.completed_at,
+    )
+
+
+def _is_cancelled(run_id: str) -> bool:
+    with _cancel_lock:
+        return run_id in _cancelled_runs
+
+
+@router.post("/runs/{run_id}/cancel", response_model=RunResponse)
+def cancel_run(run_id: str, db: Session = Depends(get_db)):
+    """Request cancellation for a pending/running run."""
+    run = db.query(Run).filter(Run.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status not in {"pending", "running"}:
+        raise HTTPException(status_code=409, detail=f"Run is already {run.status}")
+    with _cancel_lock:
+        _cancelled_runs.add(run_id)
+    run.status = "cancelled" if run.status == "pending" else run.status
+    db.commit()
+    return RunResponse(
+        id=run.id, run_type=run.run_type, status=run.status,
+        strategy_id=run.strategy_id, start_date=run.start_date, end_date=run.end_date,
+        initial_capital=run.initial_capital, created_at=run.created_at,
+        completed_at=run.completed_at, error_message="Cancellation requested",
     )
 
 

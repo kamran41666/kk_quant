@@ -142,3 +142,18 @@ class TestAdjustHandler:
         monkeypatch.setattr(handler, "_read_adjust_table", mock_read_factor)
         assert handler.is_ex_date("000001.SZ", date(2024, 6, 3))
         assert not handler.is_ex_date("000001.SZ", date(2024, 6, 4))
+
+    def test_vectorized_factors_are_point_in_time_safe(self, handler, monkeypatch):
+        def mock_read_factor(code):
+            return pd.DataFrame({
+                "date": [date(2024, 6, 3), date(2024, 12, 2)],
+                "factor": [2.0, 1.1],
+            })
+
+        monkeypatch.setattr(handler, "_read_adjust_table", mock_read_factor)
+        factors = handler.factors_for_dates("000001.SZ", [
+            date(2024, 6, 2), date(2024, 6, 3), date(2024, 8, 1),
+            date(2024, 12, 2),
+        ])
+
+        assert factors.tolist() == pytest.approx([1.0, 2.0, 2.0, 2.2])

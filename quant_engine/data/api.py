@@ -63,12 +63,18 @@ class DataAPI:
             return df
 
         result = df.copy()
-        for (code, dt) in result.index:
-            factor = self._adjust._get_adjust_factor_up_to(
-                code, dt.date() if hasattr(dt, 'date') else dt
+        if result.empty:
+            return result
+
+        # Compute one aligned factor vector per instrument.  Avoid scalar .loc
+        # writes, which are quadratic enough to make multi-year runs unusable.
+        for code in result.index.get_level_values("code").unique():
+            mask = result.index.get_level_values("code") == code
+            dates = result.index.get_level_values("date")[mask]
+            factors = self._adjust.factors_for_dates(code, dates).to_numpy()
+            result.loc[mask, list(price_fields)] = (
+                result.loc[mask, list(price_fields)].to_numpy() * factors[:, None]
             )
-            for f in price_fields:
-                result.loc[(code, dt), f] *= factor
         return result
 
     def stock_list(self) -> list[dict]:

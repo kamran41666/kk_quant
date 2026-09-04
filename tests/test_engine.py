@@ -286,3 +286,48 @@ class TestBacktestEngine:
         )
 
         assert received_kwargs.get('top_n') == 3
+
+    def test_signal_executes_on_next_trading_day(self, mock_data_api, tmp_path):
+        engine = BacktestEngine(
+            SimpleTestStrategy,
+            stock_list=['000001.SZ', '000002.SZ'],
+        )
+        result_dir = engine.run(
+            start=date(2024, 1, 2),
+            end=date(2024, 1, 12),
+            initial_capital=1_000_000.0,
+            rebalance_frequency='weekly',
+            output_dir=str(tmp_path / 'lagged_execution'),
+        )
+
+        signals = pd.read_parquet(Path(result_dir) / 'signals.parquet')
+        trades = pd.read_parquet(Path(result_dir) / 'trades.parquet')
+        first_signal = pd.Timestamp(signals['date'].min())
+        first_trade = pd.Timestamp(trades['date'].min())
+        assert first_trade > first_signal
+        assert first_signal.dayofweek == 4  # Friday
+        assert first_trade.dayofweek == 0   # next Monday
+
+    def test_empty_target_liquidates_on_next_session(self, mock_data_api, tmp_path):
+        class BuyThenCashStrategy(Strategy):
+            def initialize(self):
+                pass
+
+            def generate_signals(self, dt):
+                if dt == date(2024, 1, 5):
+                    return {'000001.SZ': 0.5}
+                return {}
+
+        engine = BacktestEngine(
+            BuyThenCashStrategy,
+            stock_list=['000001.SZ'],
+        )
+        result_dir = engine.run(
+            start=date(2024, 1, 2),
+            end=date(2024, 1, 19),
+            rebalance_frequency='weekly',
+            output_dir=str(tmp_path / 'liquidate'),
+        )
+        trades = pd.read_parquet(Path(result_dir) / 'trades.parquet')
+        assert trades['side'].tolist() == ['buy', 'sell']
+        assert pd.Timestamp(trades.iloc[1]['date']) > pd.Timestamp(date(2024, 1, 12))

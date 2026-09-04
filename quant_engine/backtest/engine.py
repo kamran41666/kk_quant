@@ -3,8 +3,8 @@
 将 Strategy、DataHandler、RebalanceScheduler、OrderManager、Matcher、
 Portfolio、Recorder 串联，按交易日迭代执行完整回测流程。
 """
-import warnings
-from datetime import date, timedelta
+import time
+from datetime import date
 from pathlib import Path
 from typing import Type
 
@@ -24,6 +24,10 @@ from quant_engine.backtest.portfolio import Portfolio
 from quant_engine.backtest.recorder import Recorder
 
 
+class BacktestCancelled(RuntimeError):
+    """Raised when a bounded background run is cancelled or exceeds its deadline."""
+
+
 class BacktestEngine:
     """事件驱动回测引擎
 
@@ -34,6 +38,7 @@ class BacktestEngine:
 
     def __init__(self, strategy_class: Type[Strategy], **strategy_kwargs):
         self._strategy_class = strategy_class
+        self._stock_list = strategy_kwargs.pop("stock_list", None)
         self._strategy_kwargs = strategy_kwargs
 
     def run(
@@ -45,6 +50,8 @@ class BacktestEngine:
         output_dir: str = 'backtest_result',
         rebalance_frequency: str = 'weekly',
         rebalance_weekday: int = 5,
+        cancel_check=None,
+        max_seconds: float | None = None,
     ) -> str:
         """运行回测
 
@@ -60,6 +67,7 @@ class BacktestEngine:
         Returns:
             结果目录路径
         """
+        started_at = time.monotonic()
         # ---- 初始化 ----
         calendar = TradingCalendar()
         trading_days = calendar.get_trading_days(start, end)
@@ -101,45 +109,70 @@ class BacktestEngine:
         recorder.set_meta("benchmark", benchmark)
         recorder.set_meta("rebalance_frequency", rebalance_frequency)
 
-        current_weights: dict[str, float] = {}
-        signals: dict[str, float] = {}
+        pending_target: dict[str, float] | None = None
+        pending_signal_date: date | None = None
 
         # ---- 主循环 ----
         for i, day in enumerate(trading_days):
+            if cancel_check is not None and cancel_check():
+                raise BacktestCancelled("backtest cancelled")
+            if max_seconds is not None and time.monotonic() - started_at > max_seconds:
+                raise BacktestCancelled("backtest deadline exceeded")
             data_handler.push_day(day)
             context.set_date(day)
             strategy.before_trading()
 
-            # 调仓日: 生成信号 → 订单 → 撮合
-            if scheduler.is_rebalance_day(day):
-                signals = strategy.generate_signals(day)
-
-                if signals:
-                    # 计算旧权重
-                    total_val = portfolio.total_value
-                    old_weights = {}
-                    if total_val > 0:
-                        for code, pos in portfolio.positions.items():
-                            if pos.shares > 0:
-                                old_weights[code] = pos.market_value / total_val
-
-                    strategy.on_rebalance(day, old_weights, signals)
-
-                    # 信号 → 订单
-                    orders = self._signals_to_orders(
-                        signals, portfolio, order_manager, data_handler, day
-                    )
-
-                    # 撮合
-                    for order in orders:
-                        recorder.record_order(order)
-                        trade = matcher.match(order, data_handler)
-                        if trade is not None and not pd.isna(trade.price):
+            # Execute the previous signal on the next trading day.  A strategy may
+            # observe the signal day's close, so same-day OHLC/VWAP execution would
+            # be a look-ahead violation.
+            if pending_target is not None:
+                orders = self._signals_to_orders(
+                    pending_target, portfolio, order_manager, data_handler, day
+                )
+                # Release cash before funding buys during a rebalance.
+                orders.sort(key=lambda item: 0 if item.side == OrderSide.SELL else 1)
+                for order in orders:
+                    trade = matcher.match(order, data_handler)
+                    if trade is not None and not pd.isna(trade.price):
+                        required_cash = (
+                            trade.amount + trade.commission +
+                            trade.stamp_duty + trade.slippage
+                        )
+                        if order.side == OrderSide.BUY and required_cash > portfolio.cash + 1e-9:
+                            order.fill_shares = 0
+                            order.reject("insufficient cash including fees")
+                        else:
                             portfolio.apply_trade(trade)
                             recorder.record_trade(trade)
                             strategy.on_order_filled(trade)
+                    # Record after matching so persisted status reflects the result.
+                    recorder.record_order(order)
+                pending_target = None
 
-                    current_weights = signals
+            # Rebalance day: generate a target for the *next* trading day.  An empty
+            # mapping is a valid target and means liquidate all sellable holdings.
+            if scheduler.is_rebalance_day(day):
+                target = strategy.generate_signals(day)
+                if not isinstance(target, dict):
+                    raise TypeError("generate_signals() must return dict[str, float]")
+                invalid = {
+                    code: weight for code, weight in target.items()
+                    if not isinstance(code, str) or not isinstance(weight, (int, float))
+                    or pd.isna(weight) or weight < 0
+                }
+                if invalid or sum(target.values()) > 1.0 + 1e-9:
+                    raise ValueError(f"Invalid target weights: {invalid or target}")
+
+                total_val = portfolio.total_value
+                old_weights = {}
+                if total_val > 0:
+                    for code, pos in portfolio.positions.items():
+                        if pos.shares > 0:
+                            old_weights[code] = pos.market_value / total_val
+                strategy.on_rebalance(day, old_weights, target)
+                recorder.record_signal(day, target)
+                pending_target = dict(target)
+                pending_signal_date = day
 
             # 每日估值（所有交易日）
             prices = {}
@@ -155,15 +188,14 @@ class BacktestEngine:
             recorder.record_positions(day, portfolio.positions)
             recorder.record_portfolio(day, portfolio)
 
-            if i == len(trading_days) - 1 or scheduler.is_rebalance_day(day):
-                if signals:
-                    recorder.record_signal(day, signals)
-
         # ---- 结束 ----
         strategy.teardown()
         recorder.set_meta("final_value", portfolio.total_value)
         recorder.set_meta("total_return",
                           (portfolio.total_value - initial_capital) / initial_capital)
+        recorder.set_meta("execution_lag", "next_trading_day")
+        if pending_signal_date is not None and pending_target is not None:
+            recorder.set_meta("unexecuted_signal_date", str(pending_signal_date))
         recorder.save()
 
         return str(Path(output_dir).resolve())
@@ -171,8 +203,8 @@ class BacktestEngine:
     def _get_stock_pool(self, first_day: date) -> list[str]:
         """获取初始股票池"""
         # 尝试从 strategy_kwargs 获取
-        if 'stock_list' in self._strategy_kwargs:
-            codes = self._strategy_kwargs.pop('stock_list')
+        if self._stock_list is not None:
+            codes = self._stock_list
             return codes if isinstance(codes, list) else list(codes)
 
         # 默认: 从 DataAPI 获取沪深300成分
@@ -211,25 +243,35 @@ class BacktestEngine:
         total_value = portfolio.total_value
 
         for code, target_weight in signals.items():
+            # Orders generated from the prior session's signal execute at the
+            # next session's open.  Sizing against close/VWAP would either
+            # disagree with the fill model or leak same-day information.
+            price = data_handler.get_price(code, 'open')
             if target_weight <= 0:
-                continue
+                target_shares = 0
+            else:
+                if pd.isna(price) or price <= 0:
+                    # Missing execution-day open means the order cannot be
+                    # modelled without using a future close; skip it.
+                    continue
 
-            price = data_handler.get_price(code, 'close')
-            if pd.isna(price) or price <= 0:
-                continue
-
-            # 目标股数
-            target_amount = total_value * target_weight
-            target_shares = order_manager.round_lot(
-                int(target_amount / price)
-            )
-
-            if target_shares <= 0:
-                continue
+                # 目标股数；为佣金和滑点预留现金，避免 100% 目标因
+                # 交易费用导致整单被拒绝。
+                target_amount = total_value * target_weight
+                expected_price = float(price) * (1.0 + order_manager.cost_model.slippage_rate)
+                expected_commission = max(
+                    target_amount * order_manager.cost_model.commission_rate,
+                    order_manager.cost_model.min_commission,
+                )
+                target_shares = order_manager.round_lot(
+                    int(max(0.0, target_amount - expected_commission) / expected_price)
+                )
 
             # 当前持仓
             current_pos = portfolio.positions.get(code)
             current_shares = current_pos.shares if current_pos else 0
+            if target_shares <= 0 and current_shares <= 0:
+                continue
 
             diff = target_shares - current_shares
 

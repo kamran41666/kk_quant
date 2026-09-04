@@ -143,3 +143,24 @@ class DataHandler:
         mask = df.index <= self._current_date
         recent = df[mask].tail(lookback)
         return recent[field].tolist()
+
+    def get_history(
+        self,
+        codes: list[str] | None = None,
+        lookback: int = 30,
+        fields: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """Return an aligned point-in-time window from the preload cache."""
+        if self._current_date is None or self._daily_data.empty:
+            return self._daily_data.iloc[0:0].copy()
+        selected_codes = codes or self._codes
+        selected_fields = fields or ["close"]
+        available = [field for field in selected_fields if field in self._daily_data.columns]
+        if not available:
+            return self._daily_data.iloc[0:0].copy()
+
+        code_values = self._daily_data.index.get_level_values("code")
+        date_values = self._daily_data.index.get_level_values("date")
+        mask = code_values.isin(selected_codes) & (date_values <= self._current_date)
+        history = self._daily_data.loc[mask, available]
+        return history.groupby(level="code", group_keys=False).tail(lookback)

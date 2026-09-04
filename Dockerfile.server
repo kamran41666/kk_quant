@@ -18,6 +18,7 @@ RUN pip install -e .
 
 # Copy server code
 COPY server/ ./server/
+COPY strategies/ ./strategies/
 
 # Create data dirs
 RUN mkdir -p /app/data /app/backtest_result

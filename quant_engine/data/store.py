@@ -8,6 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 import sqlite3
+import os
 
 import pandas as pd
 import pyarrow as pa
@@ -30,8 +31,9 @@ class PriceStore:
     目录结构: data/raw/daily/year=YYYY/quarter=Q/CODE.parquet
     """
 
-    def __init__(self, base_dir: str = "data"):
-        self._base = Path(base_dir).resolve() / "raw" / "daily"
+    def __init__(self, base_dir: str | None = None):
+        root = base_dir or os.getenv("QUANT_DATA_DIR", "data")
+        self._base = Path(root).resolve() / "raw" / "daily"
 
     def write(self, code: str, df: pd.DataFrame):
         """写入日线数据 (追加模式, 覆盖已存在的日期)"""
@@ -127,8 +129,9 @@ class PriceStore:
 class AdjustStore:
     """复权因子 / 送转 / 分红事件存储"""
 
-    def __init__(self, base_dir: str = "data"):
-        self._base = Path(base_dir) / "raw" / "adjust"
+    def __init__(self, base_dir: str | None = None):
+        root = base_dir or os.getenv("QUANT_DATA_DIR", "data")
+        self._base = Path(root) / "raw" / "adjust"
 
     def read_adjust_factors(self, code: str) -> pd.DataFrame:
         path = self._base / "adjust_factor.parquet"
@@ -162,8 +165,9 @@ class AdjustStore:
 class MetaDB:
     """SQLite 元数据库"""
 
-    def __init__(self, db_path: str = "data/meta.db"):
-        self._db_path = Path(db_path)
+    def __init__(self, db_path: str | None = None):
+        root = Path(os.getenv("QUANT_DATA_DIR", "data"))
+        self._db_path = Path(db_path) if db_path else root / "meta.db"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_tables()
 

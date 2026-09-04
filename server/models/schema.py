@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional
 import uuid
-from sqlalchemy import String, Float, Integer, Text
+from sqlalchemy import String, Float, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from server.models.database import Base
 
@@ -79,3 +79,112 @@ class Deviation(Base):
     paper_return: Mapped[float] = mapped_column(Float, default=0.0)
     expected_return: Mapped[float] = mapped_column(Float, default=0.0)
     tracking_error: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class PaperAccount(Base):
+    """Durable paper account header; no broker credentials are stored here."""
+    __tablename__ = "paper_account"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    initial_capital: Mapped[float] = mapped_column(Float, nullable=False)
+    cash: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    max_order_notional: Mapped[float] = mapped_column(Float, default=100_000.0)
+    max_position_weight: Mapped[float] = mapped_column(Float, default=0.25)
+    max_daily_loss: Mapped[float] = mapped_column(Float, default=0.03)
+    created_at: Mapped[str] = mapped_column(String(30), default=now_str)
+    updated_at: Mapped[str] = mapped_column(String(30), default=now_str)
+
+
+class PaperAccountPosition(Base):
+    __tablename__ = "paper_account_position"
+    __table_args__ = (UniqueConstraint("account_id", "code", name="uq_paper_account_code"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(20), nullable=False)
+    shares: Mapped[int] = mapped_column(Integer, default=0)
+    avg_cost: Mapped[float] = mapped_column(Float, default=0.0)
+    market_value: Mapped[float] = mapped_column(Float, default=0.0)
+    last_price: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[str] = mapped_column(String(30), default=now_str)
+
+
+class PaperLot(Base):
+    """Per-buy lot used to enforce A-share T+1 sell availability."""
+    __tablename__ = "paper_lot"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    remaining_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    buy_price: Mapped[float] = mapped_column(Float, nullable=False)
+    buy_at: Mapped[str] = mapped_column(String(30), nullable=False)
+    unlock_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(30), default=now_str)
+
+
+class PaperOrder(Base):
+    __tablename__ = "paper_order"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
+    code: Mapped[str] = mapped_column(String(20), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    limit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    filled_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    fill_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    reject_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    price_source: Mapped[str] = mapped_column(String(80), default="manual_input")
+    price_as_of: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    price_freshness: Mapped[str] = mapped_column(String(20), default="manual")
+    created_at: Mapped[str] = mapped_column(String(30), default=now_str)
+
+
+class PaperFill(Base):
+    __tablename__ = "paper_fill"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    order_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(20), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[str] = mapped_column(String(30), default=now_str)
+
+
+class PaperLedgerEvent(Base):
+    __tablename__ = "paper_ledger_event"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    reference_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    amount: Mapped[float] = mapped_column(Float, default=0.0)
+    payload: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[str] = mapped_column(String(30), default=now_str)
+
+
+class PaperValuation(Base):
+    """Durable mark-to-market checkpoints used by risk and the UI."""
+    __tablename__ = "paper_valuation"
+    __table_args__ = (UniqueConstraint("account_id", "valuation_date", name="uq_paper_valuation_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    valuation_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    cash: Mapped[float] = mapped_column(Float, nullable=False)
+    market_value: Mapped[float] = mapped_column(Float, nullable=False)
+    equity: Mapped[float] = mapped_column(Float, nullable=False)
+    daily_return: Mapped[float] = mapped_column(Float, default=0.0)
+    price_source: Mapped[str] = mapped_column(String(80), default="manual_input")
+    price_as_of: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    price_freshness: Mapped[str] = mapped_column(String(20), default="manual")
+    created_at: Mapped[str] = mapped_column(String(30), default=now_str)

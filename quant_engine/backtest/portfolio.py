@@ -17,6 +17,7 @@ class Portfolio:
         self._positions: dict[str, Position] = {}
         self._previous_total: float = initial_capital
         self._current_total: float = initial_capital
+        self._daily_return: float = 0.0
 
     @property
     def cash(self) -> float:
@@ -40,9 +41,7 @@ class Portfolio:
 
     @property
     def daily_return(self) -> float:
-        if self._previous_total == 0:
-            return 0.0
-        return (self.total_value - self._previous_total) / self._previous_total
+        return self._daily_return
 
     def apply_trade(self, trade: Trade):
         """应用一笔成交到组合"""
@@ -56,6 +55,10 @@ class Portfolio:
     def _apply_buy(self, trade: Trade, cost: float):
         """处理买入成交"""
         total_cost = trade.amount + cost
+        if total_cost > self._cash + 1e-9:
+            raise ValueError(
+                f"Insufficient cash: required={total_cost:.2f}, available={self._cash:.2f}"
+            )
         self._cash -= total_cost
 
         existing = self._positions.get(trade.code)
@@ -100,11 +103,21 @@ class Portfolio:
             prices: {code: close_price} — 当日收盘价
             dt: 当前交易日
         """
-        self._previous_total = self.total_value
+        # Compare the marked close with the prior session's marked close.  Do
+        # not reset the denominator after intraday trades: doing so would make
+        # deposits/withdrawals caused by buys and sells look like P&L.
+        previous_total = self._current_total
 
         for code, pos in self._positions.items():
             if code in prices:
                 pos.market_value = pos.shares * prices[code]
+
+        self._previous_total = previous_total
+        self._current_total = self.total_value
+        if previous_total:
+            self._daily_return = (self._current_total - previous_total) / previous_total
+        else:
+            self._daily_return = 0.0
 
     def get_sellable_shares(self, code: str, dt: date) -> int:
         """获取某只股票在 dt 日可卖出的股数（考虑 T+1 锁仓）

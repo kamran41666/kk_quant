@@ -149,3 +149,15 @@ class TestPortfolio:
     def test_custom_initial_capital(self):
         p = Portfolio(initial_capital=100_000.0)
         assert p.cash == 100_000.0
+
+    def test_buy_cannot_make_cash_negative(self):
+        p = Portfolio(initial_capital=1_000.0)
+        trade = Trade(
+            trade_id="t1", order_id="o1", code="000001.SZ",
+            date=date(2024, 6, 14), side=OrderSide.BUY, shares=100,
+            price=10.0, amount=1000.0, commission=5.0,
+        )
+        with pytest.raises(ValueError, match="Insufficient cash"):
+            p.apply_trade(trade)
+        assert p.cash == 1_000.0
+        assert p.positions == {}

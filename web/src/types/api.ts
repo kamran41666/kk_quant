@@ -19,7 +19,7 @@ export interface RunSummary {
   id: string
   strategy_id?: string
   run_type: 'backtest' | 'paper'
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
   start_date?: string
   end_date?: string
   initial_capital?: number
@@ -41,6 +41,8 @@ export interface BacktestRunRequest {
 }
 
 export interface PaperStatus {
+  date?: string
+  message?: string
   cash: number
   market_value: number
   total_value: number
@@ -77,4 +79,41 @@ export interface TradeRecord {
 export interface WSMessage {
   type: 'portfolio_update' | 'order_fill' | 'signal_snapshot' | 'run_complete' | 'progress'
   data: any
+}
+
+export interface MarketHealth {
+  status: 'ok' | 'unknown' | 'degraded' | 'unavailable' | string
+  providers: Record<string, unknown> | unknown[]
+  latest_local_date: string | null
+  stock_count: number
+}
+
+export interface MarketQuote {
+  code: string
+  name: string
+  price: number | null
+  change_pct: number | null
+  volume: number | null
+  amount: number | null
+  source: string
+  as_of: string | null
+  received_at: string
+  freshness: 'fresh' | 'realtime' | 'delayed' | 'stale' | 'unknown' | string
+  is_fallback: boolean
+}
+
+export interface QuotesResponse {
+  data: MarketQuote[]
+  meta: Record<string, unknown>
+}
+
+export interface DailyPrice {
+  code: string
+  date: string
+  open?: number | null
+  high?: number | null
+  low?: number | null
+  close?: number | null
+  volume?: number | null
+  amount?: number | null
 }

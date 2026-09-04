@@ -40,22 +40,29 @@ class Matcher:
 
         # 1. 停牌检查
         if dh.is_suspended(code):
+            order.reject("instrument suspended or market data missing")
             return None
 
-        # 2. 获取参考价和涨跌停
-        vwap = self._get_vwap(code, dh)
+        # 2. 获取执行参考价和涨跌停。订单在当前交易日开盘后执行，
+        # 因此不能使用收盘后才知道的日内 VWAP（会引入前视偏差）。
+        execution_price = self._get_execution_price(code, dh)
         down_limit, up_limit = dh.get_limit_prices(code)
+        if not isinstance(execution_price, (int, float)) or not (execution_price > 0):
+            order.reject("invalid market price")
+            return None
 
         # 3. 涨停 — 买入无法成交
-        if order.side == OrderSide.BUY and vwap >= up_limit:
+        if order.side == OrderSide.BUY and execution_price >= up_limit:
+            order.reject("buy blocked at upper price limit")
             return None
 
         # 4. 跌停 — 卖出无法成交
-        if order.side == OrderSide.SELL and vwap <= down_limit:
+        if order.side == OrderSide.SELL and execution_price <= down_limit:
+            order.reject("sell blocked at lower price limit")
             return None
 
         # 5. 计算含滑点的成交价
-        fill_price = self._cost_model.est_fill_price(vwap, order.side)
+        fill_price = self._cost_model.est_fill_price(execution_price, order.side)
 
         # 6. 确定成交股数 (当前简单: 全额成交剩余未成交部分)
         fill_shares = order.remaining
@@ -89,16 +96,26 @@ class Matcher:
             slippage=slippage,
         )
 
+    def _get_execution_price(self, code: str, dh) -> float:
+        """获取下一交易日开盘执行价；缺少开盘价则拒绝撮合。"""
+        try:
+            opening = float(dh.get_price(code, 'open'))
+            if opening > 0:
+                return opening
+        except (KeyError, TypeError, ValueError):
+            return float('nan')
+        return float('nan')
+
+    # Backward-compatible helper for research code that uses the OHLC VWAP
+    # estimate explicitly. It is not used for event-driven order execution.
     def _get_vwap(self, code: str, dh) -> float:
-        """从 DataHandler 获取当日 VWAP 估计值"""
         try:
             o = float(dh.get_price(code, 'open'))
             h = float(dh.get_price(code, 'high'))
             l = float(dh.get_price(code, 'low'))
             c = float(dh.get_price(code, 'close'))
             return self.est_vwap(o, h, l, c)
-        except (KeyError, TypeError):
-            # fallback to close
+        except (KeyError, TypeError, ValueError):
             return float(dh.get_price(code, 'close'))
 
     def _compute_commission(

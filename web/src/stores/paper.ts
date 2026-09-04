@@ -2,9 +2,9 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 export const usePaperStore = defineStore('paper', () => {
-  const cash = ref(1000000)
-  const marketValue = ref(0)
-  const totalValue = ref(1000000)
+  const cash = ref<number | null>(null)
+  const marketValue = ref<number | null>(null)
+  const totalValue = ref<number | null>(null)
   const positions = ref<any[]>([])
   const signals = ref<{ code: string; weight: number }[]>([])
 
@@ -20,5 +20,13 @@ export const usePaperStore = defineStore('paper', () => {
     }
   }
 
-  return { cash, marketValue, totalValue, positions, signals, updateFromWS }
+  function $reset() {
+    cash.value = null
+    marketValue.value = null
+    totalValue.value = null
+    positions.value = []
+    signals.value = []
+  }
+
+  return { cash, marketValue, totalValue, positions, signals, updateFromWS, $reset }
 })

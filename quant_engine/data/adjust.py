@@ -44,6 +44,34 @@ class AdjustHandler:
             return 1.0
         return float(applicable["factor"].prod())
 
+    def factors_for_dates(
+        self, code: str, dates: pd.Index | list[date]
+    ) -> pd.Series:
+        """Return cumulative point-in-time factors for many dates.
+
+        The previous DataAPI implementation performed a DataFrame scalar write for
+        every price cell.  Besides being slow, that made a normal multi-year demo
+        appear to hang.  This method computes one vector per instrument while still
+        applying only events whose ex-date is not later than the price date.
+        """
+        query_dates = pd.Index([
+            value.date() if hasattr(value, "date") else value
+            for value in dates
+        ])
+        table = self._read_adjust_table(code)
+        if table.empty:
+            return pd.Series(1.0, index=query_dates, dtype="float64")
+
+        events = table[["date", "factor"]].copy().sort_values("date")
+        events["cumulative_factor"] = events["factor"].astype(float).cumprod()
+        lookup = pd.Series(
+            events["cumulative_factor"].to_numpy(),
+            index=pd.Index(events["date"]),
+        )
+        union = lookup.index.union(query_dates).sort_values()
+        expanded = lookup.reindex(union).ffill().fillna(1.0)
+        return expanded.reindex(query_dates).astype("float64")
+
     def _read_raw_price(
         self, code: str, dt: date, field: str
     ) -> float:
