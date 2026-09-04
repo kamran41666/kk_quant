@@ -96,3 +96,12 @@ def test_account_report_is_derived_from_durable_rows():
     assert report["valuation_count"] == 1
     assert report["order_count"] == 1
     assert report["fill_count"] == 1
+
+
+def test_account_report_without_valuation_includes_positions():
+    db = session()
+    account = create_account(db, name="report-current", initial_capital=100_000, max_position_weight=1.0)
+    submit_order(db, account_id=account["id"], idempotency_key="order-report-current", code="000001.SZ", side="buy", quantity=100, price=10)
+    report = account_report(db, account["id"])
+    assert report["equity"] == pytest.approx(99_995.0)
+    assert report["total_return"] == pytest.approx(-0.00005)

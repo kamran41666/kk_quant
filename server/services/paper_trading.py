@@ -169,6 +169,8 @@ def account_report(db: Session, account_id: str) -> dict[str, Any]:
         raise KeyError("paper account not found")
     rows = (db.query(PaperValuation).filter(PaperValuation.account_id == account_id)
             .order_by(PaperValuation.valuation_date.asc()).all())
+    positions = db.query(PaperAccountPosition).filter(PaperAccountPosition.account_id == account_id).all()
+    current_equity = account.cash + sum(item.market_value for item in positions)
     equities = [row.equity for row in rows if row.equity > 0]
     peak = account.initial_capital
     max_drawdown = 0.0
@@ -181,8 +183,8 @@ def account_report(db: Session, account_id: str) -> dict[str, Any]:
     return {
         "account_id": account_id,
         "initial_capital": account.initial_capital,
-        "equity": last.equity if last else account.cash,
-        "total_return": ((last.equity / account.initial_capital) - 1.0) if last and account.initial_capital > 0 else 0.0,
+        "equity": last.equity if last else current_equity,
+        "total_return": ((last.equity if last else current_equity) / account.initial_capital - 1.0) if account.initial_capital > 0 else 0.0,
         "max_drawdown": max_drawdown,
         "valuation_count": len(rows),
         "order_count": order_count,

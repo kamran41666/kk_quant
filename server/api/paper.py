@@ -69,8 +69,13 @@ async def submit_paper_order(account_id: str, req: PaperOrderRequest, db: Sessio
         result = submit_order(db, account_id=account_id, **payload)
         if result["status"] == "filled":
             message = {"type": "order_fill", "account_id": account_id, "data": result}
-            await manager.broadcast(f"paper:{account_id}", message)
-            await manager.broadcast("dashboard", message)
+            try:
+                await manager.broadcast(f"paper:{account_id}", message)
+                await manager.broadcast("dashboard", message)
+            except Exception:
+                # The order is already committed. A broken client socket must
+                # never turn a successful fill into a retryable HTTP failure.
+                pass
         return result
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -119,8 +124,11 @@ async def create_paper_valuation(account_id: str, req: PaperValuationRequest, db
                                 price_as_of=req.price_as_of.isoformat() if req.price_as_of else None,
                                 price_freshness=req.price_freshness)
         message = {"type": "portfolio_update", "account_id": account_id, "data": result}
-        await manager.broadcast(f"paper:{account_id}", message)
-        await manager.broadcast("dashboard", message)
+        try:
+            await manager.broadcast(f"paper:{account_id}", message)
+            await manager.broadcast("dashboard", message)
+        except Exception:
+            pass
         return result
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

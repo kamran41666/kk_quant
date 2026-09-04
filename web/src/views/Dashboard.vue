@@ -159,6 +159,12 @@ interface PersistentAccount {
   daily_return?: number | null
 }
 
+interface RealtimeMessage {
+  account_id?: string
+  type?: string
+  data?: any
+}
+
 const WATCH_CODES = ['000001.SZ', '600519.SH', '600036.SH']
 const { api } = useApi()
 const store = useDashboardStore()
@@ -172,6 +178,7 @@ const portfolioError = ref('')
 const healthError = ref('')
 const quotesError = ref('')
 const history = ref<PaperHistoryPoint[]>([])
+const activeAccountId = ref<string | null>(null)
 const marketHealth = ref<MarketHealth | null>(null)
 const quotes = ref<MarketQuote[]>([])
 const lastUpdatedAt = ref<Date | null>(null)
@@ -198,7 +205,18 @@ const updatedLabel = computed(() => lastUpdatedAt.value
   : '尚未更新')
 
 watch(lastMessage, message => {
-  if (message) store.updateFromWS(message)
+  if (!message || typeof message !== 'object') return
+  const event = message as RealtimeMessage
+  if (activeAccountId.value && event.account_id !== activeAccountId.value) return
+  store.updateFromWS(event)
+  if (event.type === 'portfolio_update' && event.data?.date) {
+    history.value = chronological([...history.value, {
+      date: event.data.date,
+      total_value: event.data.total_value,
+      daily_return: event.data.daily_return,
+    }])
+  }
+  if (event.type === 'order_fill') void loadPortfolio()
 })
 
 async function loadPortfolio() {
@@ -208,11 +226,13 @@ async function loadPortfolio() {
     const { data: accounts } = await api.get<PersistentAccount[]>('/paper/accounts')
     const account = accounts[0]
     if (!account) {
+      activeAccountId.value = null
       store.totalValue = null
       store.dailyReturn = null
       history.value = []
       return
     }
+    activeAccountId.value = account.id
     const [snapshotResponse, historyResponse] = await Promise.all([
       api.get<PersistentAccount>(`/paper/accounts/${account.id}`),
       api.get<PaperHistoryPoint[]>(`/paper/accounts/${account.id}/valuations`, { params: { limit: 30 } }),

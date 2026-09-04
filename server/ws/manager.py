@@ -30,14 +30,20 @@ class ConnectionManager:
         if channel not in self._connections:
             return
         dead = set()
-        for ws in self._connections[channel]:
+        # Snapshot the set before awaiting sends. A disconnect can mutate the
+        # live set while an individual socket is yielding.
+        for ws in tuple(self._connections.get(channel, ())):
             try:
                 await ws.send_json(message)
             except Exception:
                 dead.add(ws)
         # Clean up dead connections
-        for ws in dead:
-            self._connections[channel].discard(ws)
+        current = self._connections.get(channel)
+        if current is not None:
+            for ws in dead:
+                current.discard(ws)
+            if not current:
+                self._connections.pop(channel, None)
 
     async def broadcast_to_all(self, message: dict):
         """Send to all connected clients on all channels"""

@@ -115,6 +115,7 @@ const { connected, lastMessage } = useWebSocket('dashboard')
 const history = ref<any[]>([])
 const status = ref('')
 interface PaperAccountSnapshot { id: string; name: string; initial_capital: number; cash: number; market_value?: number | null; equity?: number | null; daily_return?: number | null; valuation_date?: string | null; positions?: any[] }
+interface RealtimeMessage { account_id?: string; type?: string; data?: any }
 const accounts = ref<PaperAccountSnapshot[]>([])
 const selectedAccountId = ref('')
 const selectedAccount = ref<PaperAccountSnapshot | null>(null)
@@ -128,7 +129,13 @@ const orderPrice = ref(10)
 const orderIdempotencyKey = ref<string | null>(null)
 
 watch(lastMessage, (msg) => {
-  if (msg) store.updateFromWS(msg)
+  if (!msg || typeof msg !== 'object') return
+  const event = msg as RealtimeMessage
+  if (event.account_id && event.account_id !== selectedAccountId.value) return
+  store.updateFromWS(event)
+  if (event.account_id === selectedAccountId.value && (event.type === 'order_fill' || event.type === 'portfolio_update')) {
+    void loadAccountSnapshot()
+  }
 })
 
 function formatNumber(n: number | null | undefined): string {
