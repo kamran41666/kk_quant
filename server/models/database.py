@@ -38,6 +38,9 @@ def init_db():
             "price_as_of": "VARCHAR(40)",
             "price_freshness": "VARCHAR(20) NOT NULL DEFAULT 'manual'",
         },
+        "paper_scheduler_run": {
+            "last_run_at": "VARCHAR(40) NOT NULL DEFAULT ''",
+        },
     }
     inspector = inspect(engine)
     with engine.begin() as connection:

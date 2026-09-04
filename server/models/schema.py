@@ -188,3 +188,53 @@ class PaperValuation(Base):
     price_as_of: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     price_freshness: Mapped[str] = mapped_column(String(20), default="manual")
     created_at: Mapped[str] = mapped_column(String(30), default=now_str)
+
+
+class PaperDeviation(Base):
+    """Expected-vs-realized checkpoint for one account and trading date."""
+    __tablename__ = "paper_deviation"
+    __table_args__ = (UniqueConstraint("account_id", "valuation_date", name="uq_paper_deviation_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    valuation_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    expected_return: Mapped[float] = mapped_column(Float, nullable=False)
+    actual_return: Mapped[float] = mapped_column(Float, nullable=False)
+    tracking_error: Mapped[float] = mapped_column(Float, nullable=False)
+    source: Mapped[str] = mapped_column(String(80), default="manual_plan")
+    created_at: Mapped[str] = mapped_column(String(30), default=now_str)
+
+
+class PaperDailyReport(Base):
+    """Durable daily report generated after valuation or reconciliation."""
+    __tablename__ = "paper_daily_report"
+    __table_args__ = (UniqueConstraint("account_id", "report_date", name="uq_paper_daily_report_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    report_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    equity: Mapped[float] = mapped_column(Float, nullable=False)
+    daily_return: Mapped[float] = mapped_column(Float, nullable=False)
+    total_return: Mapped[float] = mapped_column(Float, nullable=False)
+    max_drawdown: Mapped[float] = mapped_column(Float, nullable=False)
+    order_count: Mapped[int] = mapped_column(Integer, default=0)
+    fill_count: Mapped[int] = mapped_column(Integer, default=0)
+    reconciliation_status: Mapped[str] = mapped_column(String(20), default="not_run")
+    created_at: Mapped[str] = mapped_column(String(30), default=now_str)
+
+
+class PaperSchedulerRun(Base):
+    """Idempotent record of the automatic trading-day task."""
+    __tablename__ = "paper_scheduler_run"
+    __table_args__ = (UniqueConstraint("run_date", name="uq_paper_scheduler_run_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    account_count: Mapped[int] = mapped_column(Integer, default=0)
+    valuation_count: Mapped[int] = mapped_column(Integer, default=0)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(30), default=now_str)
+    # Watermark used to decide whether a later order requires a same-day
+    # revaluation.  Keep creation time immutable for auditability.
+    last_run_at: Mapped[str] = mapped_column(String(40), default=now_str)

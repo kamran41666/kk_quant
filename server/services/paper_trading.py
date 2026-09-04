@@ -11,13 +11,14 @@ import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping, Optional
 
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from quant_engine.data.calendar import TradingCalendar
 from quant_engine.trading.gateway import OrderIntent, PaperBrokerGateway, RiskEngine, RiskLimits
 from server.models.schema import (
     PaperAccount, PaperAccountPosition, PaperFill, PaperLedgerEvent,
-    PaperLot, PaperOrder, PaperValuation,
+    PaperDailyReport, PaperDeviation, PaperLot, PaperOrder, PaperValuation,
 )
 
 COMMISSION_RATE = 0.00025
@@ -25,6 +26,23 @@ STAMP_DUTY_RATE = 0.001
 MIN_COMMISSION = 5.0
 MAX_QUOTE_AGE_SECONDS = 15 * 60
 _account_lock = threading.RLock()
+
+
+def _begin_account_transaction(db: Session) -> None:
+    """Take a database-level write lock for file-backed SQLite.
+
+    The process-local lock protects threads in one worker; ``BEGIN IMMEDIATE``
+    also serializes independent worker processes. In-memory test databases do
+    not support this cross-connection guarantee and use the process lock only.
+    """
+    bind = db.get_bind()
+    if bind.dialect.name != "sqlite" or bind.url.database in (None, "", ":memory:"):
+        return
+    try:
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    except OperationalError as exc:
+        db.rollback()
+        raise ValueError("account_busy_retry") from exc
 
 
 def _now() -> str:
@@ -193,6 +211,109 @@ def account_report(db: Session, account_id: str) -> dict[str, Any]:
     }
 
 
+def reconcile_account(db: Session, account_id: str) -> dict[str, Any]:
+    """Rebuild cash and share totals from immutable fills and compare state."""
+    account = db.query(PaperAccount).filter(PaperAccount.id == account_id).first()
+    if not account:
+        raise KeyError("paper account not found")
+    events = db.query(PaperLedgerEvent).filter(PaperLedgerEvent.account_id == account_id, PaperLedgerEvent.event_type == "fill").all()
+    expected_cash = account.initial_capital + sum(float(event.amount) for event in events)
+    actual_cash = account.cash
+    fills = db.query(PaperFill).filter(PaperFill.account_id == account_id).all()
+    expected_positions: dict[str, int] = {}
+    for fill in fills:
+        expected_positions[fill.code] = expected_positions.get(fill.code, 0) + (fill.quantity if fill.side == "buy" else -fill.quantity)
+    actual_positions = {row.code: row.shares for row in db.query(PaperAccountPosition).filter(PaperAccountPosition.account_id == account_id).all() if row.shares}
+    position_codes = sorted(set(expected_positions) | set(actual_positions))
+    position_diffs = {code: {"expected": expected_positions.get(code, 0), "actual": actual_positions.get(code, 0)} for code in position_codes if expected_positions.get(code, 0) != actual_positions.get(code, 0)}
+    cash_diff = actual_cash - expected_cash
+    ok = abs(cash_diff) <= 1e-6 and not position_diffs
+    return {"account_id": account_id, "status": "ok" if ok else "mismatch", "cash": {"expected": expected_cash, "actual": actual_cash, "difference": cash_diff}, "position_diffs": position_diffs}
+
+
+def record_deviation(db: Session, *, account_id: str, valuation_date: date,
+                     expected_return: float, source: str = "manual_plan") -> dict[str, Any]:
+    if not -1 < expected_return < 10:
+        raise ValueError("expected_return is outside supported range")
+    valuation = (db.query(PaperValuation).filter(PaperValuation.account_id == account_id, PaperValuation.valuation_date == valuation_date.isoformat()).first())
+    if not valuation:
+        raise ValueError("valuation_required_before_deviation")
+    row = (db.query(PaperDeviation).filter(PaperDeviation.account_id == account_id, PaperDeviation.valuation_date == valuation_date.isoformat()).first())
+    tracking_error = valuation.daily_return - expected_return
+    if row:
+        row.expected_return, row.actual_return, row.tracking_error, row.source = expected_return, valuation.daily_return, tracking_error, source
+    else:
+        row = PaperDeviation(account_id=account_id, valuation_date=valuation_date.isoformat(), expected_return=expected_return, actual_return=valuation.daily_return, tracking_error=tracking_error, source=source)
+        db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"date": row.valuation_date, "expected_return": row.expected_return, "actual_return": row.actual_return, "tracking_error": row.tracking_error, "source": row.source}
+
+
+def list_deviations(db: Session, account_id: str, limit: int = 60) -> list[dict[str, Any]]:
+    if not db.query(PaperAccount.id).filter(PaperAccount.id == account_id).first():
+        raise KeyError("paper account not found")
+    rows = (db.query(PaperDeviation).filter(PaperDeviation.account_id == account_id).order_by(PaperDeviation.valuation_date.desc()).limit(limit).all())
+    return [{"date": row.valuation_date, "expected_return": row.expected_return, "actual_return": row.actual_return, "tracking_error": row.tracking_error, "source": row.source} for row in reversed(rows)]
+
+
+def build_daily_report(db: Session, *, account_id: str, report_date: date) -> dict[str, Any]:
+    account = db.query(PaperAccount).filter(PaperAccount.id == account_id).first()
+    if not account:
+        raise KeyError("paper account not found")
+    valuation = (db.query(PaperValuation).filter(PaperValuation.account_id == account_id, PaperValuation.valuation_date == report_date.isoformat()).first())
+    if not valuation:
+        raise ValueError("valuation_required_before_report")
+
+    # A daily report is an as-of checkpoint.  Never derive its metrics from
+    # the current account report: later valuations and orders would otherwise
+    # leak into a historical day (for example, a 2024 report displaying a
+    # 2026 return).  Valuations are unique per account/day, so the ordered
+    # rows below form the complete observable history through ``report_date``.
+    historical_valuations = (db.query(PaperValuation)
+                             .filter(PaperValuation.account_id == account_id,
+                                     PaperValuation.valuation_date <= report_date.isoformat())
+                             .order_by(PaperValuation.valuation_date.asc()).all())
+    last_historical = historical_valuations[-1]
+    peak = account.initial_capital
+    max_drawdown = 0.0
+    for item in historical_valuations:
+        peak = max(peak, item.equity)
+        max_drawdown = min(max_drawdown, item.equity / peak - 1.0)
+    # Use the next midnight as an exclusive bound so records with fractional
+    # seconds during the final second of the report date are included.
+    cutoff = f"{report_date + timedelta(days=1)}T00:00:00"
+    order_count = (db.query(PaperOrder)
+                   .filter(PaperOrder.account_id == account_id,
+                           PaperOrder.created_at < cutoff).count())
+    fill_count = (db.query(PaperFill)
+                  .filter(PaperFill.account_id == account_id,
+                          PaperFill.created_at < cutoff).count())
+    reconciliation = reconcile_account(db, account_id)
+    row = (db.query(PaperDailyReport).filter(PaperDailyReport.account_id == account_id, PaperDailyReport.report_date == report_date.isoformat()).first())
+    values = {"equity": valuation.equity, "daily_return": valuation.daily_return,
+              "total_return": last_historical.equity / account.initial_capital - 1.0,
+              "max_drawdown": max_drawdown, "order_count": order_count,
+              "fill_count": fill_count,
+              "reconciliation_status": reconciliation["status"]}
+    if row:
+        for key, value in values.items():
+            setattr(row, key, value)
+    else:
+        row = PaperDailyReport(account_id=account_id, report_date=report_date.isoformat(), **values)
+        db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"date": row.report_date, **values}
+
+
+def list_daily_reports(db: Session, account_id: str, limit: int = 60) -> list[dict[str, Any]]:
+    if not db.query(PaperAccount.id).filter(PaperAccount.id == account_id).first():
+        raise KeyError("paper account not found")
+    rows = (db.query(PaperDailyReport).filter(PaperDailyReport.account_id == account_id).order_by(PaperDailyReport.report_date.desc()).limit(limit).all())
+    return [{"date": row.report_date, "equity": row.equity, "daily_return": row.daily_return, "total_return": row.total_return, "max_drawdown": row.max_drawdown, "order_count": row.order_count, "fill_count": row.fill_count, "reconciliation_status": row.reconciliation_status} for row in reversed(rows)]
+
+
 def _ensure_legacy_lot(db: Session, account_id: str, code: str,
                        position: PaperAccountPosition, trade_date: date) -> list[PaperLot]:
     lots = (db.query(PaperLot).filter(PaperLot.account_id == account_id,
@@ -241,6 +362,7 @@ def submit_order(db: Session, *, account_id: str, idempotency_key: str, code: st
     _validate_quote(price=price, price_source=price_source, price_as_of=price_as_of,
                     price_freshness=price_freshness)
     with _account_lock:
+        _begin_account_transaction(db)
         existing = db.query(PaperOrder).filter(PaperOrder.idempotency_key == idempotency_key).first()
         if existing:
             same = (existing.account_id == account_id and existing.code == code
@@ -361,6 +483,7 @@ def _mark_to_market_unlocked(db: Session, *, account_id: str, prices: Mapping[st
                              price_source: str = "manual_input", price_as_of: Optional[str] = None,
                              price_freshness: str = "manual") -> dict[str, Any]:
     """Record a valuation and the daily return used by the loss breaker."""
+    _begin_account_transaction(db)
     valuation_day = valuation_date or _trade_date()
     if valuation_day > _trade_date():
         raise ValueError("valuation_date_in_future")

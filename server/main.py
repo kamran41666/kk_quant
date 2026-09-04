@@ -1,15 +1,30 @@
 """FastAPI application"""
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from server.models.database import init_db
 from server.api import strategies, backtest, market, analytics, paper
+from server.config import settings
+from server.services.paper_scheduler import PaperDailyScheduler
+from quant_engine.data.live import AKShareLiveMarketDataProvider
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    yield
+    scheduler = PaperDailyScheduler(AKShareLiveMarketDataProvider(), settings.scheduler_interval_seconds) if settings.scheduler_enabled else None
+    task = asyncio.create_task(scheduler.run_forever()) if scheduler else None
+    app.state.paper_scheduler = scheduler
+    try:
+        yield
+    finally:
+        if scheduler and task:
+            await scheduler.stop()
+            # ``run_forever`` awaits any in-flight ``to_thread`` worker before
+            # returning, so shutdown cannot race a database write.
+            await task
+        app.state.paper_scheduler = None
 
 
 app = FastAPI(

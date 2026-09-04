@@ -5,8 +5,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from server.models.database import Base
-from server.models.schema import PaperLot
-from server.services.paper_trading import account_report, account_snapshot, create_account, list_ledger, list_orders, mark_to_market, submit_order
+from server.models.schema import PaperFill, PaperLot, PaperOrder
+from server.services.paper_trading import account_report, account_snapshot, build_daily_report, create_account, list_ledger, list_orders, mark_to_market, record_deviation, reconcile_account, submit_order
 
 
 def session():
@@ -105,3 +105,54 @@ def test_account_report_without_valuation_includes_positions():
     report = account_report(db, account["id"])
     assert report["equity"] == pytest.approx(99_995.0)
     assert report["total_return"] == pytest.approx(-0.00005)
+
+
+def test_deviation_daily_report_and_reconciliation_are_persistent():
+    db = session()
+    account = create_account(db, name="deviation", initial_capital=100_000, max_position_weight=1.0)
+    submit_order(db, account_id=account["id"], idempotency_key="order-deviation", code="000001.SZ", side="buy", quantity=100, price=10)
+    mark_to_market(db, account_id=account["id"], prices={"000001.SZ": 10}, valuation_date=date(2024, 1, 1))
+    deviation = record_deviation(db, account_id=account["id"], valuation_date=date(2024, 1, 1), expected_return=0.01)
+    report = build_daily_report(db, account_id=account["id"], report_date=date(2024, 1, 1))
+    reconciliation = reconcile_account(db, account["id"])
+    assert deviation["tracking_error"] < 0
+    assert report["reconciliation_status"] == "ok"
+    assert reconciliation["status"] == "ok"
+
+
+def test_daily_report_is_calculated_as_of_report_date():
+    db = session()
+    account = create_account(db, name="historical-report", initial_capital=100_000, max_position_weight=1.0)
+    # Establish a historical cash-only checkpoint, then create a trade today.
+    # The later trade must not change the historical report's return/counts.
+    mark_to_market(db, account_id=account["id"], prices={}, valuation_date=date(2024, 1, 1))
+    submit_order(db, account_id=account["id"], idempotency_key="order-after-report", code="000001.SZ", side="buy", quantity=100, price=10)
+    report = build_daily_report(db, account_id=account["id"], report_date=date(2024, 1, 1))
+    assert report["total_return"] == pytest.approx(0.0)
+    assert report["max_drawdown"] == pytest.approx(0.0)
+    assert report["order_count"] == 0
+    assert report["fill_count"] == 0
+
+
+def test_daily_report_includes_fractional_second_before_next_midnight():
+    db = session()
+    account = create_account(db, name="report-cutoff", initial_capital=100_000, max_position_weight=1.0)
+    mark_to_market(db, account_id=account["id"], prices={}, valuation_date=date(2024, 1, 1))
+    submit_order(db, account_id=account["id"], idempotency_key="order-cutoff", code="000001.SZ", side="buy", quantity=100, price=10)
+    order = db.query(PaperOrder).filter(PaperOrder.account_id == account["id"]).one()
+    fill = db.query(PaperFill).filter(PaperFill.account_id == account["id"]).one()
+    order.created_at = "2024-01-01T23:59:59.500000"
+    fill.created_at = "2024-01-01T23:59:59.500000"
+    db.commit()
+    report = build_daily_report(db, account_id=account["id"], report_date=date(2024, 1, 1))
+    assert report["order_count"] == 1
+    assert report["fill_count"] == 1
+
+
+def test_file_backed_account_transaction_uses_database_lock(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'paper.db'}")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    account = create_account(db, name="file-lock", initial_capital=10_000, max_position_weight=1.0)
+    result = submit_order(db, account_id=account["id"], idempotency_key="order-file-lock", code="000001.SZ", side="buy", quantity=100, price=10)
+    assert result["status"] == "filled"

@@ -52,6 +52,10 @@ class MarketQuote:
 class LiveMarketDataProvider(ABC):
     """Provider boundary for non-guaranteed, current market quotes."""
 
+    # Live providers return current snapshots.  A provider that can safely
+    # serve an as-of historical date must opt in explicitly.
+    supports_historical_dates = False
+
     @abstractmethod
     def fetch_quotes(
         self, codes: Optional[Sequence[str]] = None
@@ -167,6 +171,11 @@ class AKShareLiveMarketDataProvider(LiveMarketDataProvider):
     def health(self) -> list[dict[str, Any]]:
         with self._lock:
             return [dict(self._health[name]) for name, _ in self._fetchers]
+
+    def close(self) -> None:
+        """Release bounded provider workers during application shutdown."""
+        for executor in self._executors.values():
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _record_success(self, source: str, now: datetime) -> None:
         stamp = now.isoformat()

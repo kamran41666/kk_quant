@@ -24,6 +24,9 @@
         <span>持仓市值 <strong>¥{{ formatNumber(selectedAccount.market_value) }}</strong></span>
         <span>总权益 <strong>¥{{ formatNumber(selectedAccount.equity) }}</strong></span>
       </div>
+      <div v-if="schedulerRun" class="scheduler-status" :class="schedulerRun.status">
+        自动任务：{{ schedulerStatusLabel }}<span v-if="schedulerRun.reason">（{{ schedulerRun.reason }}）</span>
+      </div>
       <form v-if="selectedAccountId" class="order-form" @submit.prevent="submitPersistentOrder">
         <label>方向<select v-model="orderSide"><option value="buy">买入</option><option value="sell">卖出</option></select></label>
         <label>代码<input v-model="orderCode" pattern="\d{6}\.(SH|SZ|BJ)" required /></label>
@@ -116,6 +119,7 @@ const history = ref<any[]>([])
 const status = ref('')
 interface PaperAccountSnapshot { id: string; name: string; initial_capital: number; cash: number; market_value?: number | null; equity?: number | null; daily_return?: number | null; valuation_date?: string | null; positions?: any[] }
 interface RealtimeMessage { account_id?: string; type?: string; data?: any }
+interface SchedulerRun { run_date: string; status: string; reason?: string | null; valuation_count: number }
 const accounts = ref<PaperAccountSnapshot[]>([])
 const selectedAccountId = ref('')
 const selectedAccount = ref<PaperAccountSnapshot | null>(null)
@@ -127,6 +131,11 @@ const orderCode = ref('000001.SZ')
 const orderQuantity = ref(100)
 const orderPrice = ref(10)
 const orderIdempotencyKey = ref<string | null>(null)
+const schedulerRun = ref<SchedulerRun | null>(null)
+const schedulerStatusLabel = computed(() => {
+  const labels: Record<string, string> = { completed: '已完成', skipped: '已跳过', failed: '失败', running: '运行中' }
+  return schedulerRun.value ? `${schedulerRun.value.run_date} · ${labels[schedulerRun.value.status] ?? schedulerRun.value.status}` : ''
+})
 
 watch(lastMessage, (msg) => {
   if (!msg || typeof msg !== 'object') return
@@ -167,6 +176,13 @@ async function loadAccounts() {
   } catch (e) {
     status.value = '持久化账户暂不可用。'
   }
+}
+
+async function loadSchedulerRun() {
+  try {
+    const { data } = await api.get<SchedulerRun[]>('/paper/scheduler/runs', { params: { limit: 1 } })
+    schedulerRun.value = data[0] ?? null
+  } catch (e) { schedulerRun.value = null }
 }
 
 async function loadAccountSnapshot() {
@@ -213,7 +229,7 @@ watch([orderSide, orderCode, orderQuantity, orderPrice], () => {
 })
 watch(selectedAccountId, () => { orderIdempotencyKey.value = null })
 
-onMounted(() => { void loadAccounts() })
+onMounted(() => { void Promise.allSettled([loadAccounts(), loadSchedulerRun()]) })
 </script>
 
 <style scoped>
@@ -245,6 +261,9 @@ onMounted(() => { void loadAccounts() })
 .account-toolbar select { min-width: 260px; }
 .account-summary { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px; color: var(--text-secondary); font-size: 12px; }
 .account-summary strong { margin-left: 5px; color: var(--text-primary); font-family: "SFMono-Regular", Consolas, monospace; }
+.scheduler-status { margin-top: 10px; color: var(--text-secondary); font-size: 12px; }
+.scheduler-status.completed { color: var(--green); }
+.scheduler-status.failed { color: var(--red); }
 .order-form { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px; }
 .order-form input, .order-form select { min-width: 130px; }
 @media (max-width: 700px) { .account-toolbar, .account-summary, .order-form { align-items: stretch; flex-direction: column; } .account-toolbar select, .order-form input, .order-form select { width: 100%; } }

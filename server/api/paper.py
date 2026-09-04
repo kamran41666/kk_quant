@@ -1,6 +1,6 @@
 """Paper trading account endpoints"""
 from datetime import date, datetime
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
@@ -8,10 +8,29 @@ from typing import Optional
 from server.models.database import get_db
 from server.models.schema import PaperSnapshot, PaperPosition as PaperPositionModel
 from server.services.paper_engine import SimulationAccount
-from server.services.paper_trading import account_report, account_snapshot, create_account, list_accounts, list_ledger, list_orders, list_valuations, mark_to_market, submit_order
+from server.services.paper_trading import (account_report, account_snapshot, build_daily_report, create_account,
+    list_accounts, list_daily_reports, list_deviations, list_ledger, list_orders, list_valuations,
+    mark_to_market, record_deviation, reconcile_account, submit_order)
 from server.ws.manager import manager
+from server.services.paper_scheduler import scheduler_runs
 
 router = APIRouter(prefix="/paper", tags=["paper"])
+
+
+@router.get("/scheduler/runs")
+def get_scheduler_runs(limit: int = 30):
+    return scheduler_runs(max(1, min(limit, 100)))
+
+
+@router.post("/scheduler/run")
+def run_scheduler_now(request: Request, run_date: Optional[date] = None):
+    scheduler = getattr(request.app.state, "paper_scheduler", None)
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="paper scheduler is disabled")
+    try:
+        return scheduler.run_once(run_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 class CreatePaperAccountRequest(BaseModel):
@@ -148,6 +167,60 @@ def get_paper_valuations(account_id: str, limit: int = 60, db: Session = Depends
 def get_paper_report(account_id: str, db: Session = Depends(get_db)):
     try:
         return account_report(db, account_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/accounts/{account_id}/reconcile")
+def get_paper_reconciliation(account_id: str, db: Session = Depends(get_db)):
+    try:
+        return reconcile_account(db, account_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class PaperDeviationRequest(BaseModel):
+    valuation_date: date
+    expected_return: float = Field(ge=-0.999, lt=10)
+    source: str = Field(default="manual_plan", min_length=1, max_length=80)
+
+
+@router.post("/accounts/{account_id}/deviations")
+def create_paper_deviation(account_id: str, req: PaperDeviationRequest, db: Session = Depends(get_db)):
+    try:
+        return record_deviation(db, account_id=account_id, valuation_date=req.valuation_date, expected_return=req.expected_return, source=req.source)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/accounts/{account_id}/deviations")
+def get_paper_deviations(account_id: str, limit: int = 60, db: Session = Depends(get_db)):
+    try:
+        return list_deviations(db, account_id, max(1, min(limit, 365)))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class PaperDailyReportRequest(BaseModel):
+    report_date: date
+
+
+@router.post("/accounts/{account_id}/reports/daily")
+def create_paper_daily_report(account_id: str, req: PaperDailyReportRequest, db: Session = Depends(get_db)):
+    try:
+        return build_daily_report(db, account_id=account_id, report_date=req.report_date)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/accounts/{account_id}/reports/daily")
+def get_paper_daily_reports(account_id: str, limit: int = 60, db: Session = Depends(get_db)):
+    try:
+        return list_daily_reports(db, account_id, max(1, min(limit, 365)))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
