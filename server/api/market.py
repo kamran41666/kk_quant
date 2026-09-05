@@ -61,6 +61,8 @@ _CANDLE_CACHE_TTL_SECONDS = 30.0
 _candle_cache: dict[tuple[str, str, str, str, str, str], tuple[float, dict]] = {}
 _candle_cache_lock = threading.Lock()
 _candle_key_locks: dict[tuple[str, str, str, str, str, str], threading.Lock] = {}
+_QUOTE_BATCH_SIZE = 100
+_MAX_QUOTE_CODES = 500
 
 
 @router.get("/stocks")
@@ -487,23 +489,42 @@ def get_quotes(
     both live upstreams fail.
     """
     requested = _parse_codes(codes)
-    try:
-        quotes = live_market_provider.fetch_quotes(requested)
-    except MarketDataUnavailableError as exc:
+    collected: dict[str, Any] = {}
+    attempts: list[dict[str, str]] = []
+    # Public quote endpoints encode every symbol in one request.  Keep each
+    # request bounded so a full-market page cannot exceed provider URL/row
+    # limits, while still allowing the response to be partial when one shard
+    # is unavailable.
+    for offset in range(0, len(requested), _QUOTE_BATCH_SIZE):
+        batch = requested[offset:offset + _QUOTE_BATCH_SIZE]
+        try:
+            quotes = live_market_provider.fetch_quotes(batch)
+        except MarketDataUnavailableError as exc:
+            attempts.extend(exc.attempts)
+            continue
+        except Exception as exc:
+            attempts.append({
+                "source": type(live_market_provider).__name__,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            continue
+        for quote in quotes:
+            collected.setdefault(quote.code, quote)
+
+    if not collected:
         raise HTTPException(
             status_code=503,
             detail={
                 "code": "LIVE_MARKET_DATA_UNAVAILABLE",
                 "message": "No configured live market data provider returned usable quotes.",
-                "attempts": exc.attempts,
+                "attempts": attempts,
             },
-        ) from exc
+        )
 
-    by_code = {quote.code: quote for quote in quotes}
-    data = [by_code[code].to_dict() for code in requested if code in by_code]
-    missing = [code for code in requested if code not in by_code]
+    data = [collected[code].to_dict() for code in requested if code in collected]
+    missing = [code for code in requested if code not in collected]
     sources = sorted({item["source"] for item in data})
-    return {
+    response = {
         "data": data,
         "meta": {
             "requested_count": len(requested),
@@ -514,6 +535,9 @@ def get_quotes(
             "status": "ok" if not missing else "partial",
         },
     }
+    if attempts:
+        response["meta"]["attempts"] = attempts
+    return response
 
 
 @router.get("/overview")
@@ -606,8 +630,8 @@ def _parse_codes(value: str) -> list[str]:
     codes = list(dict.fromkeys(part.strip().upper() for part in value.split(",") if part.strip()))
     if not codes:
         raise HTTPException(status_code=422, detail="At least one stock code is required")
-    if len(codes) > 100:
-        raise HTTPException(status_code=422, detail="At most 100 stock codes may be requested")
+    if len(codes) > _MAX_QUOTE_CODES:
+        raise HTTPException(status_code=422, detail=f"At most {_MAX_QUOTE_CODES} stock codes may be requested")
     invalid = [code for code in codes if not _CODE_PATTERN.fullmatch(code)]
     if invalid:
         raise HTTPException(

@@ -83,6 +83,40 @@ def test_quotes_returns_503_without_fabricated_data(monkeypatch):
         assert "data" not in exc.detail
 
 
+def test_quotes_shards_large_requests_to_bound_provider_payload(monkeypatch):
+    requested = [f"{index:06d}.SZ" for index in range(1, 206)]
+    available = [MarketQuote(**{**quote(code).to_dict(), "code": code}) for code in requested]
+
+    class RecordingProvider(StubProvider):
+        def __init__(self):
+            super().__init__(available)
+            self.calls = []
+
+        def fetch_quotes(self, codes=None):
+            self.calls.append(list(codes or []))
+            return super().fetch_quotes(codes)
+
+    provider = RecordingProvider()
+    monkeypatch.setattr(market, "live_market_provider", provider)
+
+    response = market.get_quotes(",".join(requested))
+
+    assert [len(batch) for batch in provider.calls] == [100, 100, 5]
+    assert response["meta"]["requested_count"] == 205
+    assert response["meta"]["returned_count"] == 205
+    assert response["meta"]["status"] == "ok"
+
+
+def test_quotes_rejects_requests_over_public_limit():
+    requested = ",".join(f"{index:06d}.SZ" for index in range(1, 502))
+
+    with pytest.raises(HTTPException) as raised:
+        market.get_quotes(requested)
+
+    assert raised.value.status_code == 422
+    assert "At most 500" in str(raised.value.detail)
+
+
 def test_market_overview_uses_only_returned_quotes(monkeypatch):
     quotes = [
         quote("000001.SZ"),

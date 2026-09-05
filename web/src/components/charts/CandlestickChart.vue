@@ -1,9 +1,9 @@
 <template>
-  <VChart class="candlestick-chart" :option="option" autoresize />
+  <VChart class="candlestick-chart" :option="option" autoresize @datazoom="onDataZoom" />
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -49,10 +49,45 @@ const indicatorColors: Record<string, string> = {
   macd: '#4d8dff', macd_signal: '#f2b84b', macd_hist: '#69c99e', rsi14: '#bb86fc',
   kdj_k: '#4d8dff', kdj_d: '#f2b84b', kdj_j: '#ef8f6f',
 }
+function readZoomState(title: string): { start: number; end: number } {
+  try {
+    const raw = window.localStorage.getItem(`kk-quant:candle-zoom:${title}`)
+    if (!raw) return { start: 0, end: 100 }
+    const parsed = JSON.parse(raw) as { start?: unknown; end?: unknown }
+    if (typeof parsed.start !== 'number' || typeof parsed.end !== 'number') return { start: 0, end: 100 }
+    return { start: Math.max(0, Math.min(100, parsed.start)), end: Math.max(0, Math.min(100, parsed.end)) }
+  } catch {
+    return { start: 0, end: 100 }
+  }
+}
+const zoomState = ref(readZoomState(props.title))
+
+watch(() => props.title, title => {
+  zoomState.value = readZoomState(title)
+})
+
+function onDataZoom(event: unknown) {
+  if (!event || typeof event !== 'object') return
+  const payload = event as { start?: unknown; end?: unknown; batch?: Array<{ start?: unknown; end?: unknown }> }
+  const source = payload.batch?.[0] ?? payload
+  const start = typeof source.start === 'number' && Number.isFinite(source.start) ? source.start : zoomState.value.start
+  const end = typeof source.end === 'number' && Number.isFinite(source.end) ? source.end : zoomState.value.end
+  const boundedStart = Math.max(0, Math.min(100, start))
+  const boundedEnd = Math.max(0, Math.min(100, end))
+  zoomState.value = boundedStart <= boundedEnd
+    ? { start: boundedStart, end: boundedEnd }
+    : { start: boundedEnd, end: boundedStart }
+  try {
+    window.localStorage.setItem(`kk-quant:candle-zoom:${props.title}`, JSON.stringify(zoomState.value))
+  } catch {
+    // Storage can be disabled in private browsing; in-memory state still works.
+  }
+}
 
 const option = computed(() => {
   const dates = props.data.map(item => item.date)
   const subCharts: Array<{ name: string; fields: string[] }> = []
+  if (props.data.some(item => typeof item.volume === 'number' && Number.isFinite(item.volume))) subCharts.push({ name: '成交量', fields: ['volume'] })
   if (props.indicatorKeys.some(key => ['macd', 'macd_signal', 'macd_hist'].includes(key))) subCharts.push({ name: 'MACD', fields: ['macd', 'macd_signal', 'macd_hist'] })
   if (props.indicatorKeys.includes('rsi14')) subCharts.push({ name: 'RSI14', fields: ['rsi14'] })
   if (props.indicatorKeys.some(key => ['kdj_k', 'kdj_d', 'kdj_j'].includes(key))) subCharts.push({ name: 'KDJ', fields: ['kdj_k', 'kdj_d', 'kdj_j'] })
@@ -69,15 +104,20 @@ const option = computed(() => {
       smooth: false, lineStyle: { width: 1, color: lineDefinitions[key].color }, itemStyle: { color: lineDefinitions[key].color },
     })),
   ]
-  const subHeight = subCharts.length ? Math.max(9, Math.floor(34 / subCharts.length)) : 0
+  const subHeight = subCharts.length ? Math.max(8, Math.floor(38 / subCharts.length)) : 0
   subCharts.forEach((sub, index) => {
     const axisIndex = index + 1
-    grid.push({ left: 10, right: 16, top: `${62 + index * subHeight}%`, height: `${subHeight - 2}%`, containLabel: true })
+    grid.push({ left: 10, right: 16, top: `${54 + index * subHeight}%`, height: `${Math.max(5, subHeight - 2)}%`, containLabel: true })
     xAxis.push({ type: 'category', data: dates, gridIndex: axisIndex, boundaryGap: true, axisLine: { lineStyle: { color: '#2d3a4b' } }, axisTick: { show: false }, axisLabel: { color: '#667386', fontSize: 9, hideOverlap: true, show: index === subCharts.length - 1 } })
     yAxis.push({ type: 'value', gridIndex: axisIndex, scale: true, name: sub.name, nameTextStyle: { color: '#667386', fontSize: 9 }, axisLabel: { color: '#667386', fontSize: 9, formatter: (value: number) => value.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }, splitLine: { lineStyle: { color: '#202b39', type: 'dashed' } } })
     sub.fields.forEach(field => {
-      if (!props.indicatorKeys.includes(field)) return
-      if (field === 'macd_hist') {
+      if (field !== 'volume' && !props.indicatorKeys.includes(field)) return
+      if (field === 'volume') {
+        series.push({ type: 'bar', name: '成交量', xAxisIndex: axisIndex, yAxisIndex: axisIndex, data: props.data.map(item => item.volume ?? null), barWidth: '55%', itemStyle: { color: (params: { dataIndex: number }) => {
+          const point = props.data[params.dataIndex]
+          return point && typeof point.open === 'number' && typeof point.close === 'number' && point.close >= point.open ? '#ef5b64' : '#36b37e'
+        } } })
+      } else if (field === 'macd_hist') {
         series.push({ type: 'bar', name: indicatorNames[field], xAxisIndex: axisIndex, yAxisIndex: axisIndex, data: props.data.map(item => item[field as keyof CandlePoint] ?? null), barWidth: '45%', itemStyle: { color: indicatorColors[field] } })
       } else {
         series.push({ type: 'line', name: indicatorNames[field], xAxisIndex: axisIndex, yAxisIndex: axisIndex, data: props.data.map(item => item[field as keyof CandlePoint] ?? null), showSymbol: false, connectNulls: false, lineStyle: { width: 1, color: indicatorColors[field] }, itemStyle: { color: indicatorColors[field] } })
@@ -95,6 +135,7 @@ const option = computed(() => {
         if (!point) return ''
         const value = (item: unknown) => typeof item !== 'number' || !Number.isFinite(item) ? '—' : item.toFixed(2)
         const values = [`${point.date}<br/>开 ${value(point.open)}　高 ${value(point.high)}<br/>低 ${value(point.low)}　收 ${value(point.close)}`]
+        if (typeof point.volume === 'number' && Number.isFinite(point.volume)) values.push(`成交量 ${point.volume.toLocaleString('zh-CN', { maximumFractionDigits: 0 })}`)
         props.indicatorKeys.forEach(key => {
           const label = lineDefinitions[key]?.name ?? indicatorNames[key]
           if (label) values.push(`${label} ${value(point[key as keyof CandlePoint])}`)
@@ -104,7 +145,7 @@ const option = computed(() => {
     },
     xAxis,
     yAxis,
-    dataZoom: props.zoom ? [{ type: 'inside', xAxisIndex: xAxis.map((_, index) => index), start: 0, end: 100 }, { type: 'slider', xAxisIndex: xAxis.map((_, index) => index), height: 16, bottom: 7, borderColor: 'transparent', backgroundColor: '#111720', fillerColor: 'rgba(77,141,255,.16)', handleStyle: { color: '#4d8dff' }, textStyle: { color: '#667386' } }] : undefined,
+    dataZoom: props.zoom ? [{ type: 'inside', xAxisIndex: xAxis.map((_, index) => index), start: zoomState.value.start, end: zoomState.value.end }, { type: 'slider', xAxisIndex: xAxis.map((_, index) => index), start: zoomState.value.start, end: zoomState.value.end, height: 16, bottom: 7, borderColor: 'transparent', backgroundColor: '#111720', fillerColor: 'rgba(77,141,255,.16)', handleStyle: { color: '#4d8dff' }, textStyle: { color: '#667386' } }] : undefined,
     series,
   }
 })

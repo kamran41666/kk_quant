@@ -2,7 +2,7 @@
   <div class="page market-page">
     <div class="page-header">
       <div><h1>市场行情</h1><p class="page-subtitle">查看 A 股实时快照与历史走势；本地样本不足时自动补充公开行情源。</p></div>
-      <button class="btn-secondary" type="button" :disabled="quotesLoading" @click="loadQuotes">{{ quotesLoading ? '正在刷新' : '刷新行情' }}</button>
+      <button class="btn-secondary" type="button" :disabled="quotesLoading || indexesLoading || breadthLoading || universeQuotesLoading" @click="refreshMarket">{{ quotesLoading || indexesLoading || breadthLoading || universeQuotesLoading ? '正在刷新' : '刷新行情' }}</button>
     </div>
 
     <section class="card overview-panel" aria-labelledby="market-overview-heading">
@@ -42,8 +42,15 @@
       <div v-else class="universe-list">
         <button v-for="item in universe" :key="item.code" type="button" class="universe-item" @click="selectQuote(item.code, item)">
           <span><strong>{{ item.name }}</strong><small>{{ item.code }}</small></span><span><small>{{ item.exchange }} · {{ item.board }}</small><b>查看行情 →</b></span>
+          <span class="universe-quote" aria-label="当前行情">
+            <template v-if="universeQuotes[item.code]"><strong class="numeric">{{ universeQuotes[item.code].price?.toFixed(2) ?? '—' }}</strong><small class="numeric" :class="directionClass(universeQuotes[item.code].change_pct)">{{ formatPercentPoints(universeQuotes[item.code].change_pct) }}</small></template>
+            <small v-else-if="universeQuotesLoading">读取中…</small>
+            <small v-else>—</small>
+          </span>
         </button>
       </div>
+      <p v-if="universeQuoteMeta" class="universe-quote-note">当前页行情：{{ universeQuoteMeta.sources?.join('、') || '来源未知' }}<span v-if="universeQuoteMeta.status === 'partial'"> · 部分证券未返回</span></p>
+      <p v-if="universeQuoteError" class="universe-quote-note warning-text">当前页行情暂不可用：{{ universeQuoteError }}</p>
       <div v-if="universeMeta && (universeMeta.page ?? 1) > 1 || (universeMeta && (universeMeta.page ?? 1) * (universeMeta.page_size ?? 50) < (universeMeta.total_count ?? 0))" class="pagination-row">
         <button class="btn-secondary" type="button" :disabled="universeLoading || universePage <= 1" @click="changeUniversePage(-1)">上一页</button><span>第 {{ universePage }} 页</span><button class="btn-secondary" type="button" :disabled="universeLoading || universePage * (universeMeta?.page_size ?? 50) >= (universeMeta?.total_count ?? 0)" @click="changeUniversePage(1)">下一页</button>
       </div>
@@ -104,6 +111,7 @@
         <CandlestickChart
           v-else
           class="price-chart"
+          :class="{ 'price-chart-expanded': subchartEnabled }"
           :title="`${selectedCode} ${intervalLabel} K 线`"
           :data="candleRows.map(item => ({ ...item, open: item.open ?? null, close: item.close ?? null, low: item.low ?? null, high: item.high ?? null }))"
           :indicator-keys="overlayIndicatorKeys"
@@ -138,7 +146,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import CandlestickChart from '@/components/charts/CandlestickChart.vue'
 import { useApi } from '@/composables/useApi'
 import type { CandleInterval, CandlePoint, CandleResponse, IndexesResponse, MarketOverviewResponse, MarketQuote, QuotesResponse, UniverseResponse, UniverseSecurity } from '@/types/api'
@@ -168,6 +176,10 @@ const universeBoard = ref('')
 const universePage = ref(1)
 const universeLoading = ref(true)
 const universeError = ref('')
+const universeQuotes = ref<Record<string, MarketQuote>>({})
+const universeQuoteMeta = ref<QuotesResponse['meta'] | null>(null)
+const universeQuotesLoading = ref(false)
+const universeQuoteError = ref('')
 const selectedSecurityContext = ref<UniverseSecurity | null>(null)
 const selectedAdHocQuote = ref<MarketQuote | null>(null)
 const selectedQuoteLoading = ref(false)
@@ -176,17 +188,39 @@ const quotesLoading = ref(true)
 const candleLoading = ref(true)
 const quotesError = ref('')
 const candleError = ref('')
-const candleInterval = ref<CandleInterval>('1d')
-const enabledIndicators = ref<string[]>(['ma', 'boll'])
+const indicatorValues = ['ma', 'boll', 'macd', 'rsi14', 'kdj'] as const
+function readCandlePreferences(): { interval: CandleInterval; indicators: string[] } {
+  try {
+    const raw = window.localStorage.getItem('kk-quant:market-preferences')
+    if (!raw) return { interval: '1d', indicators: ['ma', 'boll'] }
+    const parsed = JSON.parse(raw) as { interval?: unknown; indicators?: unknown }
+    const interval = parsed.interval === '1d' || parsed.interval === '1w' || parsed.interval === '1mo' ? parsed.interval : '1d'
+    const indicators = Array.isArray(parsed.indicators) ? parsed.indicators.filter((value): value is string => typeof value === 'string' && indicatorValues.includes(value as typeof indicatorValues[number])) : ['ma', 'boll']
+    return { interval, indicators: indicators.length ? [...new Set(indicators)] : ['ma', 'boll'] }
+  } catch {
+    return { interval: '1d', indicators: ['ma', 'boll'] }
+  }
+}
+const candlePreferences = readCandlePreferences()
+const candleInterval = ref<CandleInterval>(candlePreferences.interval)
+const enabledIndicators = ref<string[]>(candlePreferences.indicators)
 const intervalOptions: Array<{ value: CandleInterval; label: string }> = [
   { value: '1d', label: '日 K' }, { value: '1w', label: '周 K' }, { value: '1mo', label: '月 K' },
 ]
 const indicatorOptions = [
   { value: 'ma', label: '均线' }, { value: 'boll', label: '布林带' }, { value: 'macd', label: 'MACD' }, { value: 'rsi14', label: 'RSI' }, { value: 'kdj', label: 'KDJ' },
 ]
+watch([candleInterval, enabledIndicators], () => {
+  try {
+    window.localStorage.setItem('kk-quant:market-preferences', JSON.stringify({ interval: candleInterval.value, indicators: enabledIndicators.value }))
+  } catch {
+    // Preferences remain available in memory when browser storage is disabled.
+  }
+}, { deep: true })
 let refreshTimer: number | undefined
 let candleRequest = 0
 let selectedQuoteRequest = 0
+let universeQuoteRequest = 0
 let disposed = false
 
 const selectedQuote = computed(() => quotes.value.find(item => item.code === selectedCode.value) ?? indexes.value.find(item => item.code === selectedCode.value) ?? selectedAdHocQuote.value)
@@ -201,6 +235,7 @@ const overlayIndicatorKeys = computed(() => enabledIndicators.value.flatMap(grou
   if (group === 'kdj') return ['kdj_k', 'kdj_d', 'kdj_j']
   return []
 }))
+const subchartEnabled = computed(() => enabledIndicators.value.some(group => ['macd', 'rsi14', 'kdj'].includes(group)))
 const latestIndicatorValues = computed(() => {
   const latest = candleRows.value[candleRows.value.length - 1]
   if (!latest) return []
@@ -244,6 +279,12 @@ async function loadQuotes() {
   } finally {
     quotesLoading.value = false
   }
+}
+
+async function refreshMarket() {
+  const tasks: Promise<unknown>[] = [loadQuotes(), loadIndexes(), loadBreadth()]
+  if (universe.value.length) tasks.push(loadUniverseQuotes(universe.value))
+  await Promise.allSettled(tasks)
 }
 
 async function loadIndexes() {
@@ -307,12 +348,42 @@ async function loadUniverse() {
     const { data } = await api.get<UniverseResponse>('/market/universe', { params })
     universe.value = data.data
     universeMeta.value = data.meta
+    void loadUniverseQuotes(data.data)
   } catch (error: unknown) {
     universeError.value = apiErrorMessage(error, '证券列表源暂不可用。')
     universe.value = []
     universeMeta.value = null
+    universeQuoteRequest += 1
+    universeQuotes.value = {}
+    universeQuoteMeta.value = null
   } finally {
     universeLoading.value = false
+  }
+}
+
+async function loadUniverseQuotes(rows: UniverseSecurity[]) {
+  const request = ++universeQuoteRequest
+  const codes = rows.map(item => item.code)
+  universeQuotesLoading.value = Boolean(codes.length)
+  universeQuoteMeta.value = null
+  universeQuoteError.value = ''
+  universeQuotes.value = {}
+  if (!codes.length) {
+    universeQuotesLoading.value = false
+    return
+  }
+  try {
+    const { data } = await api.get<QuotesResponse>('/market/quotes', { params: { codes: codes.join(',') } })
+    if (disposed || request !== universeQuoteRequest) return
+    universeQuotes.value = Object.fromEntries(data.data.map(item => [item.code, item]))
+    universeQuoteMeta.value = data.meta
+  } catch (error: unknown) {
+    if (disposed || request !== universeQuoteRequest) return
+    universeQuotes.value = {}
+    universeQuoteMeta.value = null
+    universeQuoteError.value = apiErrorMessage(error, '行情源暂不可用。')
+  } finally {
+    if (!disposed && request === universeQuoteRequest) universeQuotesLoading.value = false
   }
 }
 
@@ -394,6 +465,7 @@ onMounted(async () => {
     if (!quotesLoading.value) tasks.push(loadQuotes())
     if (!indexesLoading.value) tasks.push(loadIndexes())
     if (!breadthLoading.value) tasks.push(loadBreadth())
+    if (universe.value.length && !universeQuotesLoading.value) tasks.push(loadUniverseQuotes(universe.value))
     const selectedIsKnown = quotes.value.some(item => item.code === selectedCode.value)
       || indexes.value.some(item => item.code === selectedCode.value)
     if (!selectedIsKnown && !selectedQuoteLoading.value) tasks.push(loadSelectedQuote(selectedCode.value))
@@ -437,6 +509,11 @@ onBeforeUnmount(() => {
 .universe-item span { display: grid; gap: 3px; }
 .universe-item small { color: var(--text-tertiary); font-size: 10px; }
 .universe-item b { color: var(--accent); font-size: 10px; font-weight: 500; }
+.universe-quote { min-width: 68px; justify-items: end; text-align: right; }
+.universe-quote strong { font-size: 12px; }
+.universe-quote small { font-size: 9px; }
+.universe-quote-note { margin: 8px 0 0; color: var(--text-tertiary); font-size: 9px; }
+.warning-text { color: var(--warning); }
 .pagination-row { display: flex; justify-content: center; align-items: center; gap: 12px; margin-top: 10px; color: var(--text-tertiary); font-size: 10px; }
 .state-panel.compact { min-height: 64px; }
 .watch-panel, .chart-panel { min-height: 510px; }
@@ -486,6 +563,7 @@ onBeforeUnmount(() => {
 .indicator-summary small { color: var(--text-tertiary); font-size: 9px; }
 .indicator-summary strong { font-size: 11px; }
 .price-chart { height: 370px; }
+.price-chart-expanded { height: 480px; }
 .chart-state { min-height: 370px; }
 .chart-footnote, .section-description { color: var(--text-tertiary); font-size: 10px; }
 .fallback { display: inline-block; margin-left: 6px; color: var(--warning); font-size: 9px; }
@@ -507,5 +585,6 @@ onBeforeUnmount(() => {
   .source-meta { justify-items: start; }
   .chart-toolbar { align-items: flex-start; flex-direction: column; }
   .price-chart { height: 330px; }
+  .price-chart-expanded { height: 430px; }
 }
 </style>
