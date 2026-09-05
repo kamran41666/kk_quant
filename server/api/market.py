@@ -1,5 +1,6 @@
 """Historical and live market data endpoints."""
 from datetime import date, datetime, timedelta
+from dataclasses import replace
 from pathlib import Path
 import re
 import sqlite3
@@ -17,6 +18,11 @@ from quant_engine.data.live import (
     TencentDailyKlineProvider,
     TencentLiveMarketDataProvider,
 )
+from quant_engine.data.security_master import (
+    SecurityMasterProvider,
+    SecurityMasterUnavailableError,
+)
+from quant_engine.data.store import MetaDB
 from server.config import settings
 
 router = APIRouter(prefix="/market", tags=["market"])
@@ -24,12 +30,25 @@ router = APIRouter(prefix="/market", tags=["market"])
 # AKShare remains the independent Eastmoney/Sina fallback.  Every response
 # keeps its actual source and freshness metadata, and total failure is still a
 # 503 rather than a fabricated quote.
+_tencent_quote_provider = TencentLiveMarketDataProvider()
 live_market_provider = FallbackLiveMarketDataProvider([
-    TencentLiveMarketDataProvider(),
+    _tencent_quote_provider,
     AKShareLiveMarketDataProvider(),
 ])
+index_market_provider = _tencent_quote_provider
+security_master_provider = SecurityMasterProvider(
+    db=MetaDB(db_path=str(Path(settings.data_dir) / "meta.db"))
+)
 tencent_daily_provider = TencentDailyKlineProvider()
 _CODE_PATTERN = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
+_INDEX_SPECS = (
+    ("000001.SH", "上证指数"),
+    ("399001.SZ", "深证成指"),
+    ("399006.SZ", "创业板指"),
+    ("000300.SH", "沪深300"),
+    ("000016.SH", "上证50"),
+    ("000905.SH", "中证500"),
+)
 
 
 @router.get("/stocks")
@@ -48,6 +67,89 @@ def list_stocks(
             or search_lower in s.get("name", "").lower()
         ]
     return stocks[:limit]
+
+
+@router.get("/universe")
+def list_universe(
+    search: Optional[str] = Query(None, description="Search by code or name"),
+    exchange: Optional[str] = Query(None, pattern="^(SH|SZ|BJ)$"),
+    board: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    refresh: bool = Query(False, description="Force a security-master refresh"),
+):
+    """Return the searchable, source-labelled A-share security universe."""
+    # Direct unit callers do not receive FastAPI's Query defaults.
+    search = search if isinstance(search, str) else None
+    exchange = exchange if isinstance(exchange, str) else None
+    board = board if isinstance(board, str) else None
+    page = page if isinstance(page, int) and not isinstance(page, bool) else 1
+    page_size = page_size if isinstance(page_size, int) and not isinstance(page_size, bool) else 50
+    refresh = refresh if isinstance(refresh, bool) else False
+    try:
+        rows, source_meta = security_master_provider.snapshot(force=refresh)
+    except SecurityMasterUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "SECURITY_MASTER_UNAVAILABLE",
+                "message": "No security master source or local cache is available.",
+                "attempts": exc.attempts,
+            },
+        ) from exc
+
+    needle = search.strip().lower() if search else None
+    filtered = [
+        row for row in rows
+        if (not needle or needle in row["code"].lower() or needle in row["name"].lower())
+        and (not exchange or row["exchange"] == exchange)
+        and (not board or row["board"] == board)
+    ]
+    total = len(filtered)
+    offset = (page - 1) * page_size
+    return {
+        "data": filtered[offset:offset + page_size],
+        "meta": {
+            **source_meta,
+            "total_count": total,
+            "page": page,
+            "page_size": page_size,
+            "returned_count": len(filtered[offset:offset + page_size]),
+        },
+    }
+
+
+@router.get("/indexes")
+def list_indexes():
+    """Return the major A-share index snapshot cards."""
+    codes = [code for code, _ in _INDEX_SPECS]
+    try:
+        quotes = index_market_provider.fetch_quotes(codes)
+    except MarketDataUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "INDEX_MARKET_DATA_UNAVAILABLE",
+                "message": "Index snapshots are unavailable from the configured public source.",
+                "attempts": exc.attempts,
+            },
+        ) from exc
+    by_code = {quote.code: quote for quote in quotes}
+    data = [
+        replace(by_code[code], name=name)
+        for code, name in _INDEX_SPECS
+        if code in by_code
+    ]
+    return {
+        "data": [item.to_dict() for item in data],
+        "meta": {
+            "requested_count": len(codes),
+            "returned_count": len(data),
+            "missing_codes": [code for code in codes if code not in by_code],
+            "sources": sorted({item.source for item in data}),
+            "status": "ok" if len(data) == len(codes) else "partial",
+        },
+    }
 
 
 @router.get("/daily/{code}")
@@ -78,6 +180,14 @@ def get_daily(
                 "message": "start_date must not be after end_date.",
             },
         )
+    if (requested_end - requested_start).days + 1 > 1000:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "HISTORICAL_RANGE_TOO_LARGE",
+                "message": "Remote historical fallback supports at most 1000 calendar days.",
+            },
+        )
     api = DataAPI()
     df = api.daily(
         codes=[code],
@@ -99,14 +209,6 @@ def get_daily(
         return result.to_dict(orient="records")
     if not trading_days and _range_is_weekend_only(requested_start, requested_end):
         return []
-    if (requested_end - requested_start).days + 1 > 1000:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "HISTORICAL_RANGE_TOO_LARGE",
-                "message": "Remote historical fallback supports at most 1000 calendar days.",
-            },
-        )
     # The bundled parquet sample is intentionally finite.  When a requested
     # market-page range is outside that local window, fetch a real recent K-line
     # set from the same Tencent source used for the live quote fallback.
@@ -198,28 +300,57 @@ def get_market_overview():
             },
         ) from exc
 
+    if not quotes:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MARKET_BREADTH_EMPTY",
+                "message": "The configured live source returned no usable market rows.",
+            },
+        )
     changes = [quote.change_pct for quote in quotes if quote.change_pct is not None]
     amounts = [quote.amount for quote in quotes if quote.amount is not None]
+    breadth_status = "ok" if changes and amounts else "partial"
     return {
         "data": {
             "quoted_count": len(quotes),
-            "advancers": sum(value > 0 for value in changes),
-            "decliners": sum(value < 0 for value in changes),
-            "unchanged": sum(value == 0 for value in changes),
-            "total_amount": sum(amounts),
+            "advancers": sum(value > 0 for value in changes) if changes else None,
+            "decliners": sum(value < 0 for value in changes) if changes else None,
+            "unchanged": sum(value == 0 for value in changes) if changes else None,
+            "total_amount": sum(amounts) if amounts else None,
+            # Limit-up/down requires a source-specific price-limit rule and is
+            # intentionally left explicit rather than inferred from missing
+            # fields.
+            "limit_up": None,
+            "limit_down": None,
         },
         "meta": {
             "sources": sorted({quote.source for quote in quotes}),
             "fallback_used": any(quote.is_fallback for quote in quotes),
             "received_at": max(quote.received_at for quote in quotes),
+            # This is the provider's returned universe.  It is intentionally
+            # not described as a complete exchange census when a source only
+            # returns a partial snapshot.
+            "coverage": "source_reported",
+            "status": breadth_status,
+            "valid_change_count": len(changes),
+            "valid_amount_count": len(amounts),
+            "unsupported_metrics": ["limit_up", "limit_down"],
         },
     }
+
+
+@router.get("/breadth")
+def get_market_breadth():
+    """Alias exposing the market breadth card under an explicit resource name."""
+    return get_market_overview()
 
 
 @router.get("/health")
 def get_market_health():
     """Report observed upstream state and read-only local data coverage."""
     providers = live_market_provider.health()
+    security_master = security_master_provider.health()
     statuses = {item["status"] for item in providers}
     if providers and providers[0]["status"] == "ok":
         status = "ok"
@@ -229,9 +360,12 @@ def get_market_health():
         status = "unknown"
     else:
         status = "unavailable"
+    if security_master.get("status") == "unavailable" and status == "ok":
+        status = "degraded"
     return {
         "status": status,
         "providers": providers,
+        "security_master": security_master,
         "latest_local_date": _latest_local_market_date(Path(settings.data_dir)),
         "stock_count": _local_stock_count(Path(settings.data_dir)),
     }

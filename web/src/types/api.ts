@@ -84,6 +84,7 @@ export interface WSMessage {
 export interface MarketHealth {
   status: 'ok' | 'unknown' | 'degraded' | 'unavailable' | string
   providers: Record<string, unknown> | unknown[]
+  security_master?: Record<string, unknown>
   latest_local_date: string | null
   stock_count: number
 }
@@ -111,6 +112,59 @@ export interface QuotesResponse {
     sources?: string[]
     fallback_used?: boolean
     status?: 'ok' | 'partial' | string
+    [key: string]: unknown
+  }
+}
+
+export interface UniverseSecurity {
+  code: string
+  name: string
+  exchange: 'SH' | 'SZ' | 'BJ' | string
+  board: string
+  listed_date?: string | null
+  delisted_date?: string | null
+}
+
+export interface UniverseResponse {
+  data: UniverseSecurity[]
+  meta: {
+    source?: string
+    updated_at?: string | null
+    freshness?: string
+    total_count?: number
+    page?: number
+    page_size?: number
+    returned_count?: number
+    [key: string]: unknown
+  }
+}
+
+export interface IndexesResponse {
+  data: MarketQuote[]
+  meta: {
+    requested_count?: number
+    returned_count?: number
+    missing_codes?: string[]
+    sources?: string[]
+    status?: 'ok' | 'partial' | string
+    [key: string]: unknown
+  }
+}
+
+export interface MarketOverviewResponse {
+  data: {
+    quoted_count: number
+    advancers: number | null
+    decliners: number | null
+    unchanged: number | null
+    total_amount: number | null
+    limit_up?: number | null
+    limit_down?: number | null
+  }
+  meta: {
+    sources?: string[]
+    fallback_used?: boolean
+    received_at?: string
     [key: string]: unknown
   }
 }

@@ -213,6 +213,38 @@ class MetaDB:
                 info.delisted_date.isoformat() if info.delisted_date else None,
             ))
 
+    def upsert_stocks(self, infos: list[StockInfo]):
+        """Upsert a security-master batch in one transaction."""
+        if not infos:
+            return
+        rows = [(
+            info.code, info.name, info.exchange, info.board,
+            info.listed_date.isoformat() if info.listed_date else None,
+            info.delisted_date.isoformat() if info.delisted_date else None,
+        ) for info in infos]
+        with self._connect() as conn:
+            conn.executemany("""
+                INSERT OR REPLACE INTO stock_info
+                (code, name, exchange, board, listed_date, delisted_date)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, rows)
+
+    def replace_stocks(self, infos: list[StockInfo]):
+        """Atomically replace the source-of-truth security-master snapshot."""
+        rows = [(
+            info.code, info.name, info.exchange, info.board,
+            info.listed_date.isoformat() if info.listed_date else None,
+            info.delisted_date.isoformat() if info.delisted_date else None,
+        ) for info in infos]
+        with self._connect() as conn:
+            conn.execute("DELETE FROM stock_info")
+            if rows:
+                conn.executemany("""
+                    INSERT INTO stock_info
+                    (code, name, exchange, board, listed_date, delisted_date)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, rows)
+
     def _row_to_stockinfo(self, row) -> StockInfo:
         return StockInfo(
             code=row["code"], name=row["name"],

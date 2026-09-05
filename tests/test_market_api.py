@@ -97,6 +97,36 @@ def test_market_overview_uses_only_returned_quotes(monkeypatch):
     assert response["data"]["decliners"] == 1
 
 
+def test_market_overview_does_not_turn_missing_metrics_into_zero(monkeypatch):
+    incomplete = MarketQuote(**{
+        **quote("000001.SZ").to_dict(),
+        "change_pct": None,
+        "amount": None,
+    })
+    monkeypatch.setattr(market, "live_market_provider", StubProvider([incomplete]))
+
+    response = market.get_market_overview()
+
+    assert response["data"]["advancers"] is None
+    assert response["data"]["decliners"] is None
+    assert response["data"]["unchanged"] is None
+    assert response["data"]["total_amount"] is None
+    assert response["meta"]["status"] == "partial"
+    assert response["meta"]["valid_change_count"] == 0
+    assert response["meta"]["valid_amount_count"] == 0
+    assert response["data"]["limit_up"] is None
+
+
+def test_market_overview_returns_503_for_empty_provider(monkeypatch):
+    monkeypatch.setattr(market, "live_market_provider", StubProvider([]))
+
+    with pytest.raises(HTTPException) as raised:
+        market.get_market_overview()
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail["code"] == "MARKET_BREADTH_EMPTY"
+
+
 def test_health_contract_and_read_only_local_coverage(monkeypatch, tmp_path):
     daily = tmp_path / "raw" / "daily" / "year=2025" / "quarter=1"
     daily.mkdir(parents=True)
@@ -115,6 +145,25 @@ def test_health_contract_and_read_only_local_coverage(monkeypatch, tmp_path):
     assert response["latest_local_date"] == "2025-01-02"
     assert response["stock_count"] == 2
     assert len(response["providers"]) == 2
+
+
+def test_health_degrades_when_security_master_is_unavailable(monkeypatch, tmp_path):
+    class HealthyLiveProvider:
+        def health(self):
+            return [{"name": "tencent:qt", "status": "ok"}]
+
+    class UnavailableSecurityMaster:
+        def health(self):
+            return {"name": "akshare:stock_master", "status": "unavailable"}
+
+    monkeypatch.setattr(market, "live_market_provider", HealthyLiveProvider())
+    monkeypatch.setattr(market, "security_master_provider", UnavailableSecurityMaster())
+    monkeypatch.setattr(market.settings, "data_dir", str(tmp_path))
+
+    response = market.get_market_health()
+
+    assert response["status"] == "degraded"
+    assert response["security_master"]["status"] == "unavailable"
 
 
 def test_daily_falls_back_to_real_tencent_kline_when_local_window_is_empty(monkeypatch):
@@ -145,6 +194,54 @@ def test_daily_falls_back_to_real_tencent_kline_when_local_window_is_empty(monke
 
     assert response[0]["code"] == "000001.SZ"
     assert response[0]["source"] == "tencent:kline"
+
+
+def test_universe_search_is_paginated_and_source_labelled(monkeypatch):
+    class StubSecurityMaster:
+        def snapshot(self, force=False):
+            return [
+                {"code": "000001.SZ", "name": "平安银行", "exchange": "SZ", "board": "主板", "listed_date": None, "delisted_date": None},
+                {"code": "300750.SZ", "name": "宁德时代", "exchange": "SZ", "board": "创业板", "listed_date": None, "delisted_date": None},
+            ], {"source": "test:master", "updated_at": "2026-09-05T00:00:00+00:00", "freshness": "fresh"}
+
+    monkeypatch.setattr(market, "security_master_provider", StubSecurityMaster())
+
+    response = market.list_universe(search="时代", board="创业板", page=1, page_size=1)
+
+    assert response["data"][0]["code"] == "300750.SZ"
+    assert response["meta"]["source"] == "test:master"
+    assert response["meta"]["total_count"] == 1
+    assert response["meta"]["returned_count"] == 1
+
+
+def test_indexes_return_major_index_cards(monkeypatch):
+    class StubIndexProvider:
+        def fetch_quotes(self, codes):
+            return [quote(code) for code in codes]
+
+    monkeypatch.setattr(market, "index_market_provider", StubIndexProvider())
+
+    response = market.list_indexes()
+
+    assert response["meta"]["status"] == "ok"
+    assert len(response["data"]) == 6
+    assert response["data"][0]["name"] == "上证指数"
+
+
+def test_universe_returns_503_when_source_and_cache_are_unavailable(monkeypatch):
+    class UnavailableSecurityMaster:
+        def snapshot(self, force=False):
+            raise market.SecurityMasterUnavailableError([
+                {"source": "akshare:stock_master", "error": "TimeoutError: timeout"}
+            ])
+
+    monkeypatch.setattr(market, "security_master_provider", UnavailableSecurityMaster())
+
+    with pytest.raises(HTTPException) as raised:
+        market.list_universe()
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail["code"] == "SECURITY_MASTER_UNAVAILABLE"
 
 
 def test_daily_falls_back_when_local_window_is_only_partially_covered(monkeypatch):

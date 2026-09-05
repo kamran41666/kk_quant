@@ -8,6 +8,10 @@ from quant_engine.data.live import (
     TencentDailyKlineProvider,
     TencentLiveMarketDataProvider,
 )
+from quant_engine.data.security_master import (
+    SecurityMasterProvider,
+    SecurityMasterUnavailableError,
+)
 
 __all__ = [
     "AKShareLiveMarketDataProvider",
@@ -17,4 +21,6 @@ __all__ = [
     "MarketQuote",
     "TencentDailyKlineProvider",
     "TencentLiveMarketDataProvider",
+    "SecurityMasterProvider",
+    "SecurityMasterUnavailableError",
 ]

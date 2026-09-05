@@ -24,6 +24,10 @@ async def lifespan(app: FastAPI):
             # ``run_forever`` awaits any in-flight ``to_thread`` worker before
             # returning, so shutdown cannot race a database write.
             await task
+        # Security-master fetches use a bounded single-flight worker. Close it
+        # on application shutdown so a graceful restart cannot leave an
+        # executor owned by the previous lifespan.
+        market.security_master_provider.close()
         app.state.paper_scheduler = None
 
 
