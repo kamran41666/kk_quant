@@ -25,4 +25,7 @@ RUN mkdir -p /app/data /app/backtest_result
 
 EXPOSE 8000
 
+# 0.0.0.0 is the container-private bind required by the web service.  The
+# compose deployment publishes this port only on host loopback; do not expose
+# it with an unrestricted host port until Phase 3C authentication is enabled.
 CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

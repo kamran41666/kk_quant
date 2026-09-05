@@ -3,7 +3,9 @@
 from .gateway import (
     AccountSnapshot,
     BrokerGateway,
+    BrokerCapabilities,
     ExecutionReport,
+    LiveBrokerGateway,
     OrderIntent,
     OrderIntentStatus,
     PaperBrokerGateway,
@@ -14,7 +16,9 @@ from .gateway import (
 __all__ = [
     "AccountSnapshot",
     "BrokerGateway",
+    "BrokerCapabilities",
     "ExecutionReport",
+    "LiveBrokerGateway",
     "OrderIntent",
     "OrderIntentStatus",
     "PaperBrokerGateway",

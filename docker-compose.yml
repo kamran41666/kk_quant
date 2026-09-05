@@ -7,7 +7,10 @@ services:
       dockerfile: Dockerfile.server
     container_name: kk_quant_server
     ports:
-      - "8000:8000"
+      # The live control plane has no user-session auth in Phase 3A.  Keep the
+      # host-side API bound to loopback so it cannot be reached from a LAN;
+      # containers still communicate over the private compose network.
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data
       - ./backtest_result:/app/backtest_result
@@ -21,7 +24,9 @@ services:
       dockerfile: Dockerfile.web
     container_name: kk_quant_web
     ports:
-      - "80:80"
+      # Keep the beginner UI and its proxied /api/v1/live control plane local
+      # until Phase 3C authentication is installed.
+      - "127.0.0.1:80:80"
     depends_on:
       - server
     restart: unless-stopped

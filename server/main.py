@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from server.models.database import init_db
-from server.api import strategies, backtest, market, analytics, paper
+from server.api import strategies, backtest, market, analytics, paper, live
 from server.config import settings
 from server.services.paper_scheduler import PaperDailyScheduler
 from quant_engine.data.live import AKShareLiveMarketDataProvider
@@ -62,6 +62,7 @@ app.include_router(backtest.router, prefix="/api/v1")
 app.include_router(market.router, prefix="/api/v1")
 app.include_router(analytics.router, prefix="/api/v1")
 app.include_router(paper.router, prefix="/api/v1")
+app.include_router(live.router, prefix="/api/v1")
 
 
 @app.get("/api/health")

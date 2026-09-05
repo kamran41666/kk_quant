@@ -14,9 +14,13 @@ from typing import Mapping, Optional
 
 
 class OrderIntentStatus(str, Enum):
+    PENDING = "pending"
+    PARTIALLY_FILLED = "partially_filled"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     FILLED = "filled"
+    CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,10 @@ class ExecutionReport:
     fill_price: Optional[float] = None
     reason: Optional[str] = None
     received_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    # Broker order identifiers and cursors are optional for PaperBroker but
+    # mandatory for a concrete live adapter's durable reconciliation path.
+    broker_order_id: Optional[str] = None
+    event_cursor: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +77,51 @@ class BrokerGateway(ABC):
 
     @abstractmethod
     def snapshot(self) -> AccountSnapshot:
+        ...
+
+
+@dataclass(frozen=True)
+class BrokerCapabilities:
+    """Declarative adapter capabilities exposed before any order is sent."""
+
+    provider: str
+    display_name: str
+    supports_sandbox: bool = False
+    supports_live: bool = False
+    supports_cancel: bool = False
+    supports_order_stream: bool = False
+
+
+class LiveBrokerGateway(BrokerGateway):
+    """Explicit extension point for a user-selected broker adapter.
+
+    Phase 3A only defines this boundary.  A concrete adapter must provide its
+    own credentials, connection health, order lifecycle and reconciliation;
+    no fake implementation is registered by default.
+    """
+
+    @property
+    @abstractmethod
+    def capabilities(self) -> BrokerCapabilities:
+        ...
+
+    @abstractmethod
+    def cancel(self, broker_order_id: str) -> ExecutionReport:
+        ...
+
+    @abstractmethod
+    def get_order(self, broker_order_id: str) -> ExecutionReport:
+        """Return the broker's current authoritative state for one order."""
+        ...
+
+    @abstractmethod
+    def open_orders(self) -> tuple[ExecutionReport, ...]:
+        """List non-terminal broker orders after a restart or reconnect."""
+        ...
+
+    @abstractmethod
+    def reconcile(self, since: Optional[str] = None) -> tuple[ExecutionReport, ...]:
+        """Replay execution events from a durable broker cursor."""
         ...
 
 

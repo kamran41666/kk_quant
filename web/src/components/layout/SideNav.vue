@@ -25,7 +25,7 @@
 
     <div class="nav-footer">
       <div class="status-row"><span class="status-dot is-live" aria-hidden="true"></span> 本地服务</div>
-      <span>v0.2 · Phase 1</span>
+      <span>v0.3 · Phase 3A</span>
     </div>
   </aside>
 </template>
@@ -38,6 +38,7 @@ const navItems = [
   { path: '/backtest', label: '回测', icon: 'M12 3a9 9 0 1 0 9 9M12 7v5l3 2m2-10v5h-5' },
   { path: '/paper', label: '模拟交易', icon: 'M4 19V9m5 10V5m6 14v-7m5 7V3' },
   { path: '/analytics', label: '绩效', icon: 'M4 19h16M6 16l4-5 3 3 5-7' },
+  { path: '/live', label: '实盘准备', icon: 'M12 3 4 7v5c0 4.6 3.4 8.6 8 9 4.6-.4 8-4.4 8-9V7l-8-4Zm0 5v4m0 4h.01' },
 ]
 </script>
 
@@ -132,7 +133,7 @@ const navItems = [
     backdrop-filter: blur(12px);
   }
   .brand-block, .nav-footer, .skip-link { display: none; }
-  .nav-list { display: grid; height: 100%; grid-template-columns: repeat(6, 1fr); gap: 2px; }
+  .nav-list { display: grid; height: 100%; grid-template-columns: repeat(7, 1fr); gap: 2px; }
   .nav-item {
     min-width: 0;
     min-height: 0;

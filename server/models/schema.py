@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional
 import uuid
-from sqlalchemy import String, Float, Integer, Text, UniqueConstraint
+from sqlalchemy import Boolean, String, Float, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from server.models.database import Base
 
@@ -238,3 +238,74 @@ class PaperSchedulerRun(Base):
     # Watermark used to decide whether a later order requires a same-day
     # revaluation.  Keep creation time immutable for auditability.
     last_run_at: Mapped[str] = mapped_column(String(40), default=now_str)
+
+
+class BrokerConnection(Base):
+    """A broker profile containing only an opaque credential reference."""
+    __tablename__ = "broker_connection"
+    __table_args__ = (UniqueConstraint("provider", "account_ref", name="uq_broker_provider_account"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    account_ref: Mapped[str] = mapped_column(String(120), nullable=False)
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, default="sandbox")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="disabled")
+    credential_ref: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_str)
+    updated_at: Mapped[str] = mapped_column(String(40), default=now_str)
+
+
+class LiveControl(Base):
+    """Durable global live-trading safety control (fail-closed by default)."""
+    __tablename__ = "live_control"
+
+    id: Mapped[str] = mapped_column(String(20), primary_key=True, default="global")
+    live_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    kill_switch_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_by: Mapped[str] = mapped_column(String(80), default="local-user")
+    updated_at: Mapped[str] = mapped_column(String(40), default=now_str)
+
+
+class LiveOrderDraft(Base):
+    """Pre-trade order proposal; it is never an execution receipt."""
+    __tablename__ = "live_order_draft"
+    __table_args__ = (UniqueConstraint("idempotency_key", name="uq_live_draft_idempotency"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    connection_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    paper_account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    code: Mapped[str] = mapped_column(String(20), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    limit_price: Mapped[float] = mapped_column(Float, nullable=False)
+    price_source: Mapped[str] = mapped_column(String(80), nullable=False)
+    price_as_of: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    price_freshness: Mapped[str] = mapped_column(String(20), nullable=False)
+    notional: Mapped[float] = mapped_column(Float, nullable=False)
+    estimated_fee: Mapped[float] = mapped_column(Float, nullable=False)
+    cash_before: Mapped[float] = mapped_column(Float, nullable=False)
+    cash_after: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    risk_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    confirmed_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_str)
+    updated_at: Mapped[str] = mapped_column(String(40), default=now_str)
+
+
+class AuditEvent(Base):
+    """Append-only local audit record with redacted structured details."""
+    __tablename__ = "audit_event"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    actor: Mapped[str] = mapped_column(String(80), nullable=False, default="local-user")
+    action: Mapped[str] = mapped_column(String(80), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    resource_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    details: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[str] = mapped_column(String(40), default=now_str)
