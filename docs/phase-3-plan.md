@@ -55,3 +55,11 @@ Phase 3A 的控制面仍是本机使用边界：API 路由尚未提供用户会�
 - `GET /api/v1/live/audit`
 
 这些接口只构成“准备和阻断”控制面；在没有真实适配器之前，`confirm` 不会发送订单。
+
+## Phase 3A 验证记录
+
+- 独立审查结论：无 P0、无 P1，Phase 3A 通过；审查未修改工作树。
+- 后端：`python -m pytest -q --basetemp .pytest-phase3a-final3` → **233 passed, 5 warnings**；`compileall` 通过；`from server.main import app` 导入通过。
+- 前端：`npm test` → **6 passed**；`npm run build` 通过（`vue-tsc` + Vite，678 modules transformed）。
+- 运行态：`GET /api/health` 返回 `ok`；`GET /api/v1/live/capabilities` 返回 `phase=3A`、`can_submit_live=false`、`paper_only=true`，并同时报告配置关闭、Kill Switch、无适配器、无启用连接和执行未实现五项阻断原因。
+- 安全反向测试：`password=SUPER_SECRET` 只产生固定原因码 `user_reason_provided` 和 `reason_present=true`，不进入 `LiveControl.reason`、审计详情或 API 响应；Compose 的 8000/80 端口均绑定宿主机 loopback。
