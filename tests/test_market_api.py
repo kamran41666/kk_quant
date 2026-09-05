@@ -270,6 +270,35 @@ def test_daily_falls_back_when_local_window_is_only_partially_covered(monkeypatc
     assert response[0]["source"] == "tencent:kline"
 
 
+def test_daily_does_not_trust_a_truncated_local_calendar(monkeypatch):
+    class TruncatedDataAPI:
+        def daily(self, **kwargs):
+            return pd.DataFrame({
+                "open": [10.0], "high": [10.3], "low": [9.9],
+                "close": [10.2], "volume": [123_400],
+            }, index=pd.MultiIndex.from_tuples(
+                [("000001.SZ", date(2024, 12, 1))], names=["code", "date"]
+            ))
+
+        def get_trading_dates(self, start, end):
+            # The bundled calendar ends in 2024 even though the request ends
+            # in 2026; this must not make the local row look complete.
+            return [date(2024, 12, 1), date(2024, 12, 31)]
+
+    class StubKlineProvider:
+        def fetch_daily(self, code, start, end, adjust):
+            return [{
+                "code": code, "date": "2026-01-02", "open": 11.0,
+                "high": 11.3, "low": 10.9, "close": 11.2,
+                "volume": 12_000, "source": "tencent:kline", "adjust": "qfq",
+            }]
+
+    monkeypatch.setattr(market, "DataAPI", TruncatedDataAPI)
+    monkeypatch.setattr(market, "tencent_daily_provider", StubKlineProvider())
+    response = market.get_daily("000001.SZ", "2024-01-01", "2026-09-05")
+    assert response[0]["source"] == "tencent:kline"
+
+
 def test_daily_keeps_local_data_when_end_date_is_weekend(monkeypatch):
     class LocalDataAPI:
         def daily(self, **kwargs):
@@ -343,3 +372,82 @@ def test_daily_returns_empty_for_weekend_only_window(monkeypatch):
     monkeypatch.setattr(market, "tencent_daily_provider", FailingKlineProvider())
 
     assert market.get_daily("000001.SZ", "2026-09-05", "2026-09-06") == []
+
+
+def test_candles_aggregate_weekly_and_report_source_adjustment(monkeypatch):
+    daily = [
+        {"code": "000001.SZ", "date": "2026-01-02", "open": 10, "high": 12, "low": 9, "close": 11, "volume": 2, "source": "tencent:kline", "adjust": "qfq"},
+        {"code": "000001.SZ", "date": "2026-01-05", "open": 11, "high": 13, "low": 10, "close": 12, "volume": 3, "source": "tencent:kline", "adjust": "qfq"},
+        {"code": "000001.SZ", "date": "2026-01-09", "open": 12, "high": 14, "low": 11, "close": 13, "volume": 4, "source": "tencent:kline", "adjust": "qfq"},
+    ]
+    monkeypatch.setattr(market, "get_daily", lambda *args, **kwargs: daily)
+
+    response = market.get_candles(
+        "000001.SZ", "2026-01-01", "2026-01-31", interval="1w",
+        adjust="event_driven", indicators="ma",
+    )
+
+    assert response["meta"]["interval"] == "1w"
+    assert response["meta"]["adjust_requested"] == "event_driven"
+    assert response["meta"]["adjust_applied"] == "qfq"
+    assert response["meta"]["warning_codes"] == ["ADJUSTMENT_FALLBACK"]
+    assert response["meta"]["source"] == "tencent:kline"
+    assert response["data"][0]["date"] == "2026-01-02"
+    assert response["data"][1]["date"] == "2026-01-09"
+    assert response["data"][1]["volume"] == 7.0
+
+
+def test_candles_reject_invalid_indicator_and_range(monkeypatch):
+    monkeypatch.setattr(market, "get_daily", lambda *args, **kwargs: [])
+    with pytest.raises(HTTPException) as indicator:
+        market.get_candles("000001.SZ", "2026-01-01", "2026-01-31", indicators="not-real")
+    assert indicator.value.status_code == 422
+    assert indicator.value.detail["code"] == "INVALID_CANDLE_REQUEST"
+
+    with pytest.raises(HTTPException) as interval:
+        market.get_candles("000001.SZ", "2026-01-01", "2026-01-31", interval="5m")
+    assert interval.value.status_code == 422
+    assert interval.value.detail["code"] == "INVALID_CANDLE_REQUEST"
+
+    with pytest.raises(HTTPException) as too_large:
+        market.get_candles("000001.SZ", "2020-01-01", "2026-01-31")
+    assert too_large.value.status_code == 422
+    assert too_large.value.detail["code"] == "HISTORICAL_RANGE_TOO_LARGE"
+
+
+def test_candles_empty_result_is_explicit(monkeypatch):
+    monkeypatch.setattr(market, "get_daily", lambda *args, **kwargs: [])
+    response = market.get_candles("000001.SZ", "2026-01-03", "2026-01-04", interval="1mo")
+    assert response["data"] == []
+    assert response["meta"]["status"] == "empty"
+    assert response["meta"]["source"] == "local:parquet"
+
+
+def test_candles_are_cached_for_identical_queries(monkeypatch):
+    rows = [{
+        "code": "600000.SH", "date": "2026-01-02", "open": 10,
+        "high": 11, "low": 9, "close": 10.5, "volume": 100,
+    }]
+    calls = []
+
+    def fetch(*args, **kwargs):
+        calls.append(1)
+        return rows
+
+    market._candle_cache.clear()
+    monkeypatch.setattr(market, "get_daily", fetch)
+    first = market.get_candles("600000.SH", "2026-01-01", "2026-01-31")
+    second = market.get_candles("600000.SH", "2026-01-01", "2026-01-31")
+
+    assert len(calls) == 1
+    assert second["meta"]["cache"] == "memory"
+    assert first["data"] == second["data"]
+
+
+def test_candles_map_storage_or_provider_errors_to_structured_503(monkeypatch):
+    market._candle_cache.clear()
+    monkeypatch.setattr(market, "get_daily", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("broken source")))
+    with pytest.raises(HTTPException) as raised:
+        market.get_candles("600036.SH", "2026-01-01", "2026-01-31")
+    assert raised.value.status_code == 503
+    assert raised.value.detail["code"] == "CANDLE_DATA_UNAVAILABLE"

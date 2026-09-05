@@ -1,9 +1,12 @@
 """Historical and live market data endpoints."""
 from datetime import date, datetime, timedelta
 from dataclasses import replace
+from copy import deepcopy
 from pathlib import Path
 import re
 import sqlite3
+import threading
+import time
 
 import pyarrow.parquet as pq
 import pandas as pd
@@ -23,6 +26,11 @@ from quant_engine.data.security_master import (
     SecurityMasterUnavailableError,
 )
 from quant_engine.data.store import MetaDB
+from quant_engine.analytics.candle_indicators import (
+    CandleDataError,
+    add_indicators,
+    aggregate_candles,
+)
 from server.config import settings
 
 router = APIRouter(prefix="/market", tags=["market"])
@@ -49,6 +57,10 @@ _INDEX_SPECS = (
     ("000016.SH", "上证50"),
     ("000905.SH", "中证500"),
 )
+_CANDLE_CACHE_TTL_SECONDS = 30.0
+_candle_cache: dict[tuple[str, str, str, str, str, str], tuple[float, dict]] = {}
+_candle_cache_lock = threading.Lock()
+_candle_key_locks: dict[tuple[str, str, str, str, str, str], threading.Lock] = {}
 
 
 @router.get("/stocks")
@@ -158,12 +170,211 @@ def get_daily(
     start_date: str,
     end_date: str,
     fields: str = "close",
+    adjust: str = "event_driven",
+    allow_local_long: bool = False,
 ):
     """Get daily OHLCV data for a stock"""
     code = _parse_codes(code)[0]
+    if adjust not in {"event_driven", "none"}:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "UNSUPPORTED_ADJUSTMENT",
+                "message": "adjust must be event_driven or none.",
+            },
+        )
     try:
         requested_start = date.fromisoformat(start_date)
         requested_end = date.fromisoformat(end_date)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_DATE_RANGE",
+                "message": "start_date and end_date must use YYYY-MM-DD.",
+            },
+        ) from exc
+
+    if requested_start > requested_end:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_DATE_RANGE",
+                "message": "start_date must not be after end_date.",
+            },
+        )
+    range_days = (requested_end - requested_start).days + 1
+    if range_days > 1000 and not allow_local_long:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "HISTORICAL_RANGE_TOO_LARGE",
+                "message": "Remote historical fallback supports at most 1000 calendar days.",
+            },
+        )
+    api = DataAPI()
+    df = api.daily(
+        codes=[code],
+        start=requested_start,
+        end=requested_end,
+        fields=fields.split(","),
+        adjust=adjust,
+    )
+    # MultiIndex (code, date) -> reset to columns
+    result = df.reset_index()
+    # Convert Timestamp to string for JSON
+    for col in result.columns:
+        if col == "date" or hasattr(result[col], 'dt'):
+            result[col] = result[col].astype(str)
+    trading_days = _requested_trading_days(api, requested_start, requested_end)
+    if not result.empty and _daily_result_covers(
+        result, requested_start, requested_end, trading_days
+    ):
+        return result.to_dict(orient="records")
+    if range_days > 1000:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "HISTORICAL_RANGE_TOO_LARGE",
+                "message": "The local dataset does not fully cover this long request and public fallback supports at most 1000 calendar days.",
+            },
+        )
+    if not trading_days and _range_is_weekend_only(requested_start, requested_end):
+        return []
+    # The bundled parquet sample is intentionally finite.  When a requested
+    # market-page range is outside that local window, fetch a real recent K-line
+    # set from the same Tencent source used for the live quote fallback.
+    try:
+        return tencent_daily_provider.fetch_daily(
+            code, requested_start, requested_end,
+            adjust=adjust,
+        )
+    except MarketDataUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "HISTORICAL_MARKET_DATA_UNAVAILABLE",
+                "message": "No local or live historical market data is available.",
+                "attempts": exc.attempts,
+            },
+        ) from exc
+
+
+def _candle_lock_for(key: tuple[str, str, str, str, str, str]) -> threading.Lock:
+    with _candle_cache_lock:
+        if len(_candle_key_locks) > 512:
+            for stale_key, stale_lock in list(_candle_key_locks.items()):
+                if stale_key not in _candle_cache and not stale_lock.locked():
+                    _candle_key_locks.pop(stale_key, None)
+                if len(_candle_key_locks) <= 256:
+                    break
+        lock = _candle_key_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _candle_key_locks[key] = lock
+        return lock
+
+
+def _build_candle_payload(
+    code: str,
+    requested_start: date,
+    requested_end: date,
+    interval: str,
+    adjust: str,
+    indicator_values: list[str],
+) -> dict:
+    daily_rows = get_daily(
+        code,
+        requested_start.isoformat(),
+        requested_end.isoformat(),
+        fields="open,high,low,close,volume",
+        adjust=adjust,
+        allow_local_long=True,
+    )
+    candles = aggregate_candles(daily_rows, interval=interval)
+    candles, indicator_fields = add_indicators(candles, indicator_values)
+    sources = sorted({
+        str(row["source"])
+        for row in daily_rows
+        if row.get("source")
+    })
+    source = ",".join(sources) if sources else "local:parquet"
+    remote_adjustments = {
+        str(row.get("adjust"))
+        for row in daily_rows
+        if row.get("adjust")
+    }
+    adjust_applied = next(iter(remote_adjustments), adjust)
+    warning_codes: list[str] = []
+    if adjust == "event_driven" and "qfq" in remote_adjustments:
+        adjust_applied = "qfq"
+        warning_codes.append("ADJUSTMENT_FALLBACK")
+    return {
+        "data": candles,
+        "meta": {
+            "code": code,
+            "interval": interval,
+            "adjust": adjust,
+            "adjust_requested": adjust,
+            "adjust_applied": adjust_applied,
+            "start_date": requested_start.isoformat(),
+            "end_date": requested_end.isoformat(),
+            "source": source,
+            "sources": sources or ["local:parquet"],
+            "returned_count": len(candles),
+            "daily_source_count": len(daily_rows),
+            "indicator_fields": list(indicator_fields),
+            "indicator_definitions": {
+                "ma": "SMA(5,20,60)",
+                "ema": "EMA(12,26), adjust=False",
+                "rsi14": "Wilder RSI(14)",
+                "macd": "DIF=EMA12-EMA26; DEA=EMA9(DIF); histogram=2*(DIF-DEA)",
+                "boll": "SMA20 +/- 2*std20 (ddof=0)",
+                "kdj": "RSV9; K/D EMA(alpha=1/3) seeded by first valid RSV; J=3K-2D; flat window=null",
+            },
+            "as_of": candles[-1]["date"] if candles else None,
+            "freshness": "historical",
+            "warning_codes": warning_codes,
+            "status": "ok" if candles else "empty",
+        },
+    }
+
+
+@router.get("/candles/{code}")
+def get_candles(
+    code: str,
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    interval: str = Query("1d", pattern="^(1d|1w|1mo)$"),
+    adjust: str = Query("event_driven", pattern="^(event_driven|none)$"),
+    indicators: Optional[str] = Query(
+        None,
+        description="Comma-separated groups: ma, ema, rsi14, macd, boll, kdj",
+    ),
+):
+    """Return causal daily/weekly/monthly candles and optional indicators.
+
+    Weekly and monthly bars are aggregated from the same validated daily
+    source rows.  The last actual trading date is used for each bucket, so the
+    API never invents a weekend/month-end price.
+    """
+    code = _parse_codes(code)[0]
+    interval = interval if isinstance(interval, str) else "1d"
+    adjust = adjust if isinstance(adjust, str) else "event_driven"
+    start_date = start_date if isinstance(start_date, str) else None
+    end_date = end_date if isinstance(end_date, str) else None
+    indicator_values = (
+        [item.strip().lower() for item in indicators.split(",") if item.strip()]
+        if isinstance(indicators, str)
+        else []
+    )
+    try:
+        requested_end = date.fromisoformat(end_date) if end_date else date.today()
+        requested_start = (
+            date.fromisoformat(start_date)
+            if start_date
+            else requested_end - timedelta(days=365 if interval == "1d" else 900)
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=422,
@@ -180,52 +391,72 @@ def get_daily(
                 "message": "start_date must not be after end_date.",
             },
         )
-    if (requested_end - requested_start).days + 1 > 1000:
+    if (requested_end - requested_start).days + 1 > 1000 and interval == "1d":
         raise HTTPException(
             status_code=422,
             detail={
                 "code": "HISTORICAL_RANGE_TOO_LARGE",
-                "message": "Remote historical fallback supports at most 1000 calendar days.",
+                "message": "Daily candle requests support at most 1000 calendar days.",
             },
         )
-    api = DataAPI()
-    df = api.daily(
-        codes=[code],
-        start=requested_start,
-        end=requested_end,
-        fields=fields.split(","),
-        adjust="event_driven",
+    indicator_key = ",".join(sorted(set(indicator_values)))
+    cache_key = (
+        code, requested_start.isoformat(), requested_end.isoformat(),
+        interval, adjust, indicator_key,
     )
-    # MultiIndex (code, date) -> reset to columns
-    result = df.reset_index()
-    # Convert Timestamp to string for JSON
-    for col in result.columns:
-        if col == "date" or hasattr(result[col], 'dt'):
-            result[col] = result[col].astype(str)
-    trading_days = _requested_trading_days(api, requested_start, requested_end)
-    if not result.empty and _daily_result_covers(
-        result, requested_start, requested_end, trading_days
-    ):
-        return result.to_dict(orient="records")
-    if not trading_days and _range_is_weekend_only(requested_start, requested_end):
-        return []
-    # The bundled parquet sample is intentionally finite.  When a requested
-    # market-page range is outside that local window, fetch a real recent K-line
-    # set from the same Tencent source used for the live quote fallback.
-    try:
-        return tencent_daily_provider.fetch_daily(
-            code, requested_start, requested_end,
-            adjust="event_driven",
-        )
-    except MarketDataUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "HISTORICAL_MARKET_DATA_UNAVAILABLE",
-                "message": "No local or live historical market data is available.",
-                "attempts": exc.attempts,
-            },
-        ) from exc
+    now_monotonic = time.monotonic()
+    with _candle_cache_lock:
+        cached = _candle_cache.get(cache_key)
+        if cached is not None:
+            cached_at, cached_payload = cached
+            age = now_monotonic - cached_at
+            if age < _CANDLE_CACHE_TTL_SECONDS:
+                result = deepcopy(cached_payload)
+                result["meta"]["cache"] = "memory"
+                result["meta"]["cache_age_seconds"] = round(max(0.0, age), 3)
+                return result
+    # Serialize one request per cache key. This prevents simultaneous refreshes
+    # of the same security/interval from multiplying public-source traffic.
+    with _candle_lock_for(cache_key):
+        with _candle_cache_lock:
+            cached = _candle_cache.get(cache_key)
+            if cached is not None:
+                cached_at, cached_payload = cached
+                age = time.monotonic() - cached_at
+                if age < _CANDLE_CACHE_TTL_SECONDS:
+                    result = deepcopy(cached_payload)
+                    result["meta"]["cache"] = "memory"
+                    result["meta"]["cache_age_seconds"] = round(max(0.0, age), 3)
+                    return result
+        try:
+            payload = _build_candle_payload(
+                code, requested_start, requested_end, interval, adjust, indicator_values,
+            )
+        except CandleDataError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "INVALID_CANDLE_REQUEST", "message": str(exc)},
+            ) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # Treat provider/storage failures as an explicit unavailable
+            # boundary; never turn an exception into a fabricated candle set.
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "CANDLE_DATA_UNAVAILABLE",
+                    "message": "No usable daily data is available for this candle request.",
+                    "error_type": type(exc).__name__,
+                },
+            ) from exc
+        with _candle_cache_lock:
+            _candle_cache[cache_key] = (time.monotonic(), deepcopy(payload))
+            # Keep this bounded even if a user explores many securities/ranges.
+            if len(_candle_cache) > 256:
+                oldest = min(_candle_cache, key=lambda key: _candle_cache[key][0])
+                _candle_cache.pop(oldest, None)
+        return payload
 
 
 @router.get("/calendar")
@@ -422,8 +653,14 @@ def _daily_result_covers(
     if dates.empty:
         return False
     bounds = trading_days or []
-    first_required = bounds[0] if bounds else start
-    last_required = bounds[-1] if bounds else end
+    # A bundled calendar can itself end before the requested range. Do not let
+    # that truncated calendar make a partial local price file look complete.
+    first_required = start
+    if bounds and bounds[0] <= start + timedelta(days=7):
+        first_required = bounds[0]
+    last_required = end
+    if bounds and bounds[-1] >= end - timedelta(days=7):
+        last_required = bounds[-1]
     return dates.min().date() <= first_required and dates.max().date() >= last_required
 
 

@@ -181,3 +181,47 @@ export interface DailyPrice {
   source?: string
   adjust?: string
 }
+
+export type CandleInterval = '1d' | '1w' | '1mo'
+
+export interface CandlePoint extends DailyPrice {
+  period_start?: string
+  period_end?: string
+  ma5?: number | null
+  ma20?: number | null
+  ma60?: number | null
+  ema12?: number | null
+  ema26?: number | null
+  rsi14?: number | null
+  macd?: number | null
+  macd_signal?: number | null
+  macd_hist?: number | null
+  boll_mid?: number | null
+  boll_upper?: number | null
+  boll_lower?: number | null
+  kdj_k?: number | null
+  kdj_d?: number | null
+  kdj_j?: number | null
+}
+
+export interface CandleResponse {
+  data: CandlePoint[]
+  meta: {
+    code: string
+    interval: CandleInterval
+    adjust_requested?: string
+    adjust_applied?: string
+    start_date?: string
+    end_date?: string
+    source?: string
+    sources?: string[]
+    returned_count?: number
+    daily_source_count?: number
+    indicator_fields?: string[]
+    as_of?: string | null
+    freshness?: string
+    warning_codes?: string[]
+    status?: 'ok' | 'empty' | string
+    [key: string]: unknown
+  }
+}

@@ -90,17 +90,29 @@
           </div>
         </div>
 
-        <div v-if="dailyLoading" class="state-panel chart-state" aria-live="polite"><strong>正在加载历史价格</strong><p>读取最近一年的本地复权日线。</p></div>
-        <div v-else-if="dailyError" class="state-panel chart-state"><strong>历史价格不可用</strong><p>{{ dailyError }}</p><button class="btn-secondary" @click="loadDaily">重试</button></div>
-        <div v-else-if="dailyPrices.length === 0" class="state-panel chart-state"><strong>暂无历史价格</strong><p>本地数据尚未包含 {{ selectedCode }} 的日线记录。</p></div>
+        <div class="chart-toolbar" aria-label="K线周期和指标">
+          <div class="interval-tabs" role="tablist" aria-label="K线周期">
+            <button v-for="item in intervalOptions" :key="item.value" type="button" role="tab" :aria-selected="candleInterval === item.value" :class="{ active: candleInterval === item.value }" @click="changeCandleInterval(item.value)">{{ item.label }}</button>
+          </div>
+          <div class="indicator-toggles" aria-label="推荐指标">
+            <button v-for="item in indicatorOptions" :key="item.value" type="button" :class="{ active: enabledIndicators.includes(item.value) }" @click="toggleIndicator(item.value)">{{ item.label }}</button>
+          </div>
+        </div>
+        <div v-if="candleLoading" class="state-panel chart-state" aria-live="polite"><strong>正在加载历史价格</strong><p>读取最近一年的{{ intervalLabel }} K 线。</p></div>
+        <div v-else-if="candleError" class="state-panel chart-state"><strong>历史价格不可用</strong><p>{{ candleError }}</p><button class="btn-secondary" @click="loadCandles">重试</button></div>
+        <div v-else-if="candleRows.length === 0" class="state-panel chart-state"><strong>暂无历史价格</strong><p>数据源尚未包含 {{ selectedCode }} 的{{ intervalLabel }}记录。</p></div>
         <CandlestickChart
           v-else
           class="price-chart"
-          :title="`${selectedCode} 日 K 线`"
-          :data="dailyPrices.map(item => ({ date: item.date, open: item.open ?? null, close: item.close ?? null, low: item.low ?? null, high: item.high ?? null }))"
+          :title="`${selectedCode} ${intervalLabel} K 线`"
+          :data="candleRows.map(item => ({ ...item, open: item.open ?? null, close: item.close ?? null, low: item.low ?? null, high: item.high ?? null }))"
+          :indicator-keys="overlayIndicatorKeys"
           zoom
         />
-        <p class="chart-footnote">数据源：{{ dailySource }} · 复权口径：{{ dailySource === 'tencent:kline' ? 'qfq（前复权）' : 'event_driven' }} · 仅用于研究展示。</p>
+        <div v-if="latestIndicatorValues.length" class="indicator-summary" aria-label="最新指标">
+          <span v-for="item in latestIndicatorValues" :key="item.label"><small>{{ item.label }}</small><strong class="numeric">{{ item.value }}</strong></span>
+        </div>
+        <p class="chart-footnote">数据源：{{ candleMeta?.source || candleSource }} · 复权口径：{{ candleMeta?.adjust_applied || 'event_driven' }}<span v-if="candleMeta?.warning_codes?.includes('ADJUSTMENT_FALLBACK')">（公开源前复权回退）</span> · 截止 {{ candleMeta?.as_of || '未知' }} · 仅用于研究展示。</p>
       </section>
     </div>
 
@@ -129,15 +141,16 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import CandlestickChart from '@/components/charts/CandlestickChart.vue'
 import { useApi } from '@/composables/useApi'
-import type { DailyPrice, IndexesResponse, MarketOverviewResponse, MarketQuote, QuotesResponse, UniverseResponse, UniverseSecurity } from '@/types/api'
+import type { CandleInterval, CandlePoint, CandleResponse, IndexesResponse, MarketOverviewResponse, MarketQuote, QuotesResponse, UniverseResponse, UniverseSecurity } from '@/types/api'
 import { apiErrorMessage, chronological, compactNumber, directionClass, directionLabel, formatPercentPoints, freshnessLabel } from '@/utils/market'
 
 const watchCodes = ['000001.SZ', '600519.SH', '600036.SH']
 const { api } = useApi()
 const quotes = ref<MarketQuote[]>([])
 const selectedCode = ref(watchCodes[0])
-const dailyPrices = ref<DailyPrice[]>([])
-const dailySource = ref('local:parquet')
+const candleRows = ref<CandlePoint[]>([])
+const candleMeta = ref<CandleResponse['meta'] | null>(null)
+const candleSource = ref('local:parquet')
 const quotesMeta = ref<QuotesResponse['meta'] | null>(null)
 const indexes = ref<MarketQuote[]>([])
 const indexesMeta = ref<IndexesResponse['meta'] | null>(null)
@@ -160,16 +173,44 @@ const selectedAdHocQuote = ref<MarketQuote | null>(null)
 const selectedQuoteLoading = ref(false)
 const selectedQuoteError = ref('')
 const quotesLoading = ref(true)
-const dailyLoading = ref(true)
+const candleLoading = ref(true)
 const quotesError = ref('')
-const dailyError = ref('')
+const candleError = ref('')
+const candleInterval = ref<CandleInterval>('1d')
+const enabledIndicators = ref<string[]>(['ma', 'boll'])
+const intervalOptions: Array<{ value: CandleInterval; label: string }> = [
+  { value: '1d', label: '日 K' }, { value: '1w', label: '周 K' }, { value: '1mo', label: '月 K' },
+]
+const indicatorOptions = [
+  { value: 'ma', label: '均线' }, { value: 'boll', label: '布林带' }, { value: 'macd', label: 'MACD' }, { value: 'rsi14', label: 'RSI' }, { value: 'kdj', label: 'KDJ' },
+]
 let refreshTimer: number | undefined
-let dailyRequest = 0
+let candleRequest = 0
 let selectedQuoteRequest = 0
 let disposed = false
 
 const selectedQuote = computed(() => quotes.value.find(item => item.code === selectedCode.value) ?? indexes.value.find(item => item.code === selectedCode.value) ?? selectedAdHocQuote.value)
 const selectedSecurity = computed(() => universe.value.find(item => item.code === selectedCode.value) ?? selectedSecurityContext.value)
+const intervalLabel = computed(() => intervalOptions.find(item => item.value === candleInterval.value)?.label.replace(' K', '') ?? '日')
+const overlayIndicatorKeys = computed(() => enabledIndicators.value.flatMap(group => {
+  if (group === 'ma') return ['ma5', 'ma20', 'ma60']
+  if (group === 'boll') return ['boll_mid', 'boll_upper', 'boll_lower']
+  if (group === 'ema') return ['ema12', 'ema26']
+  if (group === 'macd') return ['macd', 'macd_signal', 'macd_hist']
+  if (group === 'rsi14') return ['rsi14']
+  if (group === 'kdj') return ['kdj_k', 'kdj_d', 'kdj_j']
+  return []
+}))
+const latestIndicatorValues = computed(() => {
+  const latest = candleRows.value[candleRows.value.length - 1]
+  if (!latest) return []
+  const items: Array<{ label: string; value: string }> = []
+  const value = (number: number | null | undefined, digits = 2) => number == null || !Number.isFinite(number) ? '—' : number.toFixed(digits)
+  if (enabledIndicators.value.includes('macd')) items.push({ label: 'MACD', value: value(latest.macd) }, { label: 'DEA', value: value(latest.macd_signal) }, { label: '柱', value: value(latest.macd_hist) })
+  if (enabledIndicators.value.includes('rsi14')) items.push({ label: 'RSI14', value: value(latest.rsi14) })
+  if (enabledIndicators.value.includes('kdj')) items.push({ label: 'KDJ K', value: value(latest.kdj_k) }, { label: 'KDJ D', value: value(latest.kdj_d) }, { label: 'KDJ J', value: value(latest.kdj_j) })
+  return items
+})
 
 function isoDate(date: Date): string {
   const year = date.getFullYear()
@@ -285,28 +326,46 @@ function changeUniversePage(delta: number) {
   loadUniverse()
 }
 
-async function loadDaily() {
-  const request = ++dailyRequest
-  dailyLoading.value = true
-  dailyError.value = ''
+async function loadCandles() {
+  const request = ++candleRequest
+  const code = selectedCode.value
+  const interval = candleInterval.value
+  candleLoading.value = true
+  candleError.value = ''
   const end = new Date()
   const start = new Date(end)
-  start.setFullYear(end.getFullYear() - 1)
+  if (interval === '1d') start.setFullYear(end.getFullYear() - 1)
+  else start.setDate(end.getDate() - 900)
   try {
-    const { data } = await api.get<DailyPrice[]>(`/market/daily/${selectedCode.value}`, {
-      params: { start_date: isoDate(start), end_date: isoDate(end), fields: 'open,high,low,close,volume' },
+    const { data } = await api.get<CandleResponse>(`/market/candles/${code}`, {
+      params: { start_date: isoDate(start), end_date: isoDate(end), interval, adjust: 'event_driven', indicators: enabledIndicators.value.join(',') },
     })
-    if (disposed || request !== dailyRequest) return
-    dailyPrices.value = chronological(data)
-    dailySource.value = data[0]?.source ?? 'local:parquet'
+    if (disposed || request !== candleRequest || code !== selectedCode.value || interval !== candleInterval.value) return
+    candleRows.value = chronological(data.data)
+    candleMeta.value = data.meta
+    candleSource.value = data.meta.source ?? data.data[0]?.source ?? 'local:parquet'
   } catch (error: unknown) {
-    if (disposed || request !== dailyRequest) return
-    dailyError.value = apiErrorMessage(error, '历史行情源暂不可用。')
-    dailyPrices.value = []
-    dailySource.value = 'unavailable'
+    if (disposed || request !== candleRequest) return
+    candleError.value = apiErrorMessage(error, '历史行情源暂不可用。')
+    candleRows.value = []
+    candleMeta.value = null
+    candleSource.value = 'unavailable'
   } finally {
-    if (!disposed && request === dailyRequest) dailyLoading.value = false
+    if (!disposed && request === candleRequest) candleLoading.value = false
   }
+}
+
+function changeCandleInterval(interval: CandleInterval) {
+  if (candleInterval.value === interval && !candleError.value) return
+  candleInterval.value = interval
+  void loadCandles()
+}
+
+function toggleIndicator(indicator: string) {
+  enabledIndicators.value = enabledIndicators.value.includes(indicator)
+    ? enabledIndicators.value.filter(item => item !== indicator)
+    : [...enabledIndicators.value, indicator]
+  void loadCandles()
 }
 
 function selectQuote(code: string, security: UniverseSecurity | null = null) {
@@ -323,11 +382,11 @@ function selectQuote(code: string, security: UniverseSecurity | null = null) {
   selectedQuoteError.value = ''
   selectedQuoteLoading.value = false
   if (!knownQuote) void loadSelectedQuote(code)
-  loadDaily()
+  void loadCandles()
 }
 
 onMounted(async () => {
-  await Promise.allSettled([loadQuotes(), loadDaily(), loadIndexes(), loadBreadth(), loadUniverse()])
+  await Promise.allSettled([loadQuotes(), loadCandles(), loadIndexes(), loadBreadth(), loadUniverse()])
   if (disposed) return
   refreshTimer = window.setInterval(() => {
     if (document.visibilityState !== 'visible') return
@@ -344,7 +403,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   disposed = true
-  dailyRequest += 1
+  candleRequest += 1
   window.clearInterval(refreshTimer)
 })
 </script>
@@ -417,6 +476,15 @@ onBeforeUnmount(() => {
 .source-meta span, .freshness { border: 1px solid rgba(54,179,126,.3); border-radius: 999px; background: var(--down-muted); color: #69c99e; padding: 3px 8px; font-size: 10px; }
 .source-meta span.stale, .freshness.stale { border-color: rgba(228,168,58,.3); background: rgba(228,168,58,.08); color: #edbd62; }
 .source-meta small { font-size: 10px; }
+.chart-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 5px 0 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border-subtle); }
+.interval-tabs, .indicator-toggles { display: flex; flex-wrap: wrap; gap: 4px; }
+.interval-tabs button, .indicator-toggles button { border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text-tertiary); padding: 5px 8px; font: inherit; font-size: 10px; cursor: pointer; }
+.interval-tabs button:hover, .indicator-toggles button:hover { color: var(--text-primary); background: var(--bg-muted); }
+.interval-tabs button.active, .indicator-toggles button.active { border-color: rgba(77,141,255,.35); background: rgba(77,141,255,.12); color: #8bb3ff; }
+.indicator-summary { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; padding: 7px 9px; border-radius: 6px; background: var(--bg-muted); }
+.indicator-summary span { display: inline-flex; align-items: baseline; gap: 5px; }
+.indicator-summary small { color: var(--text-tertiary); font-size: 9px; }
+.indicator-summary strong { font-size: 11px; }
 .price-chart { height: 370px; }
 .chart-state { min-height: 370px; }
 .chart-footnote, .section-description { color: var(--text-tertiary); font-size: 10px; }
@@ -437,6 +505,7 @@ onBeforeUnmount(() => {
   .watch-list { grid-template-columns: 1fr; }
   .chart-header { align-items: stretch; flex-direction: column; }
   .source-meta { justify-items: start; }
+  .chart-toolbar { align-items: flex-start; flex-direction: column; }
   .price-chart { height: 330px; }
 }
 </style>
