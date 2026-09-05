@@ -7,12 +7,14 @@ defined order, and raises an explicit error when no usable quote is available.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
-from datetime import datetime, time, timezone
+from dataclasses import asdict, dataclass, replace
+from datetime import date, datetime, time, timezone
+import json
 import math
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any, Callable, Optional, Sequence
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import akshare as ak
@@ -236,6 +238,274 @@ class AKShareLiveMarketDataProvider(LiveMarketDataProvider):
         return quotes
 
 
+class TencentLiveMarketDataProvider(LiveMarketDataProvider):
+    """Public Tencent Finance quote source used as a lightweight fallback.
+
+    The endpoint returns a GBK-encoded, tilde-separated snapshot and does not
+    require an API key.  It is suitable for a beginner-facing watchlist, not a
+    trading execution feed: every quote carries the upstream timestamp and is
+    marked stale/unknown when that timestamp cannot be trusted.
+    """
+
+    def __init__(
+        self,
+        timeout_seconds: float = 8.0,
+        fetcher: Optional[Callable[[str, float], bytes]] = None,
+    ) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self._timeout_seconds = timeout_seconds
+        self._fetcher = fetcher or self._fetch_http
+        self._lock = threading.Lock()
+        self._health: dict[str, Any] = {
+            "name": "tencent:qt",
+            "status": "unknown",
+            "last_attempt_at": None,
+            "last_success_at": None,
+            "last_error": None,
+        }
+
+    @staticmethod
+    def _fetch_http(url: str, timeout: float) -> bytes:
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; kk-quant/0.3)",
+                "Referer": "https://gu.qq.com/",
+            },
+        )
+        with urlopen(request, timeout=timeout) as response:
+            return response.read()
+
+    def fetch_quotes(
+        self, codes: Optional[Sequence[str]] = None
+    ) -> list[MarketQuote]:
+        if not codes:
+            raise MarketDataUnavailableError([{
+                "source": "tencent:qt",
+                "error": "codes_required_for_tencent_snapshot",
+            }])
+        requested = list(dict.fromkeys(_canonical_code(code) for code in codes))
+        symbols = ",".join(_tencent_symbol(code) for code in requested)
+        url = f"https://qt.gtimg.cn/q={symbols}"
+        received = datetime.now(timezone.utc)
+        try:
+            payload = self._fetcher(url, self._timeout_seconds)
+            if isinstance(payload, bytes):
+                text = payload.decode("gbk", errors="replace")
+            else:
+                text = str(payload)
+            quotes = self._parse(text, set(requested), received)
+            if not quotes:
+                raise ValueError("provider returned no usable requested quotes")
+            self._record_success(received)
+            return quotes
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            self._record_failure(received, message)
+            raise MarketDataUnavailableError([{
+                "source": "tencent:qt",
+                "error": message,
+            }]) from exc
+
+    def health(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(self._health)]
+
+    def _record_success(self, now: datetime) -> None:
+        stamp = now.isoformat()
+        with self._lock:
+            self._health.update(
+                status="ok", last_attempt_at=stamp,
+                last_success_at=stamp, last_error=None,
+            )
+
+    def _record_failure(self, now: datetime, error: str) -> None:
+        with self._lock:
+            self._health.update(
+                status="unavailable", last_attempt_at=now.isoformat(),
+                last_error=error,
+            )
+
+    @staticmethod
+    def _parse(
+        text: str, requested: set[str], received: datetime
+    ) -> list[MarketQuote]:
+        quotes: list[MarketQuote] = []
+        for chunk in text.split(";"):
+            chunk = chunk.strip()
+            if not chunk or "=" not in chunk:
+                continue
+            variable, raw = chunk.split("=", 1)
+            symbol = variable.strip().removeprefix("v_").strip()
+            fields = raw.strip().strip('"').split("~")
+            if len(fields) < 34 or len(symbol) < 8:
+                continue
+            exchange = symbol.lower().replace("s_", "", 1)[:2].upper()
+            if exchange not in {"SH", "SZ", "BJ"}:
+                continue
+            code = _canonical_code(f"{fields[2]}.{exchange}")
+            if code not in requested:
+                continue
+            price = _number(fields[3])
+            if price is None or price <= 0:
+                continue
+            source_time = _tencent_timestamp(fields[30], received)
+            volume = _number(fields[6])
+            amount = _number(fields[37]) if len(fields) > 37 else None
+            quotes.append(MarketQuote(
+                code=code,
+                name=fields[1].strip(),
+                price=price,
+                change_pct=_number(fields[32]),
+                volume=volume * 100 if volume is not None else None,
+                amount=amount * 10_000 if amount is not None else None,
+                source="tencent:qt",
+                as_of=source_time.isoformat() if source_time else None,
+                received_at=received.isoformat(),
+                freshness=_freshness(source_time, received),
+                is_fallback=False,
+            ))
+        return quotes
+
+
+class TencentDailyKlineProvider:
+    """Fetch recent daily K-lines from Tencent's public JSON endpoint."""
+
+    def __init__(
+        self,
+        timeout_seconds: float = 10.0,
+        fetcher: Optional[Callable[[str, float], bytes]] = None,
+    ) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self._timeout_seconds = timeout_seconds
+        self._fetcher = fetcher or TencentLiveMarketDataProvider._fetch_http
+
+    def fetch_daily(
+        self,
+        code: str,
+        start: date,
+        end: date,
+        adjust: str = "event_driven",
+    ) -> list[dict[str, Any]]:
+        if start > end:
+            raise ValueError("start date must not be after end date")
+        if (end - start).days + 1 > 1000:
+            raise MarketDataUnavailableError([{
+                "source": "tencent:kline",
+                "error": "requested_range_exceeds_1000_calendar_days",
+            }])
+        canonical = _canonical_code(code)
+        symbol = _tencent_symbol(canonical)
+        adjust_key = {
+            "event_driven": "qfqday",
+            "qfq": "qfqday",
+            "hfq": "hfqday",
+            "none": "day",
+        }.get(adjust)
+        if adjust_key is None:
+            raise ValueError("unsupported Tencent daily adjustment")
+        count = min(1000, max(320, (end - start).days + 40))
+        adjust_param = "qfq" if adjust_key == "qfqday" else "hfq" if adjust_key == "hfqday" else ""
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={symbol},day,,,{count},{adjust_param}"
+        try:
+            payload = self._fetcher(url, self._timeout_seconds)
+            text = payload.decode("utf-8", errors="replace") if isinstance(payload, bytes) else str(payload)
+            body = json.loads(text)
+            rows = body.get("data", {}).get(symbol, {}).get(adjust_key, [])
+            result: list[dict[str, Any]] = []
+            for raw in rows:
+                if not isinstance(raw, list) or len(raw) < 6:
+                    continue
+                try:
+                    row_date = date.fromisoformat(str(raw[0]))
+                except ValueError:
+                    continue
+                if not start <= row_date <= end:
+                    continue
+                values = [_number(item) for item in raw[1:6]]
+                if any(value is None for value in values[:4]):
+                    continue
+                result.append({
+                    "code": canonical,
+                    "date": row_date.isoformat(),
+                    "open": values[0],
+                    "close": values[1],
+                    "high": values[2],
+                    "low": values[3],
+                    "volume": values[4] * 100 if values[4] is not None else None,
+                    "source": "tencent:kline",
+                    "adjust": "qfq" if adjust_key == "qfqday" else "hfq" if adjust_key == "hfqday" else "none",
+                })
+            if not result:
+                raise ValueError("provider returned no usable daily rows")
+            return sorted(result, key=lambda item: item["date"])
+        except MarketDataUnavailableError:
+            raise
+        except Exception as exc:
+            raise MarketDataUnavailableError([{
+                "source": "tencent:kline",
+                "error": f"{type(exc).__name__}: {exc}",
+            }]) from exc
+
+
+class FallbackLiveMarketDataProvider(LiveMarketDataProvider):
+    """Compose providers while preserving provenance and partial results."""
+
+    def __init__(self, providers: Sequence[LiveMarketDataProvider]) -> None:
+        if not providers:
+            raise ValueError("at least one live market provider is required")
+        self._providers = list(providers)
+
+    def fetch_quotes(
+        self, codes: Optional[Sequence[str]] = None
+    ) -> list[MarketQuote]:
+        requested = list(dict.fromkeys(_canonical_code(code) for code in codes)) if codes else None
+        collected: dict[str, MarketQuote] = {}
+        attempts: list[dict[str, str]] = []
+        for index, provider in enumerate(self._providers):
+            missing = None if requested is None else [code for code in requested if code not in collected]
+            if requested is not None and not missing:
+                break
+            try:
+                quotes = provider.fetch_quotes(missing)
+            except MarketDataUnavailableError as exc:
+                attempts.extend(exc.attempts)
+                continue
+            except Exception as exc:
+                attempts.append({
+                    "source": type(provider).__name__,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                continue
+            for quote in quotes:
+                if quote.code not in collected:
+                    collected[quote.code] = replace(
+                        quote, is_fallback=quote.is_fallback or index > 0
+                    )
+        if not collected:
+            raise MarketDataUnavailableError(attempts or [{
+                "source": type(self).__name__,
+                "error": "no_provider_returned_quotes",
+            }])
+        if requested is None:
+            return list(collected.values())
+        return [collected[code] for code in requested if code in collected]
+
+    def health(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for provider in self._providers:
+            rows.extend(provider.health())
+        return rows
+
+    def close(self) -> None:
+        for provider in self._providers:
+            close = getattr(provider, "close", None)
+            if close:
+                close()
+
+
 def _first(row: pd.Series, aliases: Sequence[str]) -> Any:
     for alias in aliases:
         if alias in row.index:
@@ -287,6 +557,35 @@ def _canonical_code(code: str) -> str:
     else:
         exchange = "SZ"
     return f"{symbol}.{exchange}"
+
+
+def _tencent_symbol(code: str) -> str:
+    symbol, exchange = _canonical_code(code).split(".", 1)
+    prefix = {"SH": "sh", "SZ": "sz", "BJ": "bj"}.get(exchange)
+    if prefix is None:
+        raise ValueError(f"unsupported Tencent exchange: {exchange}")
+    return f"{prefix}{symbol}"
+
+
+def _tencent_timestamp(value: str, received: datetime) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if len(text) == 14 and text.isdigit():
+        try:
+            return datetime.strptime(text, "%Y%m%d%H%M%S").replace(
+                tzinfo=SHANGHAI_TZ
+            ).astimezone(timezone.utc)
+        except ValueError:
+            return None
+    if len(text) != 8 or text.count(":") != 2:
+        return None
+    try:
+        parsed_time = time.fromisoformat(text)
+    except ValueError:
+        return None
+    local_received = received.astimezone(SHANGHAI_TZ)
+    return datetime.combine(
+        local_received.date(), parsed_time, tzinfo=SHANGHAI_TZ
+    ).astimezone(timezone.utc)
 
 
 def _source_timestamp(row: pd.Series, received: datetime) -> Optional[datetime]:

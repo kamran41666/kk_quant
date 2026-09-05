@@ -104,7 +104,15 @@ export interface MarketQuote {
 
 export interface QuotesResponse {
   data: MarketQuote[]
-  meta: Record<string, unknown>
+  meta: {
+    requested_count?: number
+    returned_count?: number
+    missing_codes?: string[]
+    sources?: string[]
+    fallback_used?: boolean
+    status?: 'ok' | 'partial' | string
+    [key: string]: unknown
+  }
 }
 
 export interface DailyPrice {
@@ -116,4 +124,6 @@ export interface DailyPrice {
   close?: number | null
   volume?: number | null
   amount?: number | null
+  source?: string
+  adjust?: string
 }

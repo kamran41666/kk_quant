@@ -1,22 +1,34 @@
 """Historical and live market data endpoints."""
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import re
 import sqlite3
 
 import pyarrow.parquet as pq
+import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 
 from quant_engine.data.api import DataAPI
 from quant_engine.data.live import (
     AKShareLiveMarketDataProvider,
+    FallbackLiveMarketDataProvider,
     MarketDataUnavailableError,
+    TencentDailyKlineProvider,
+    TencentLiveMarketDataProvider,
 )
 from server.config import settings
 
 router = APIRouter(prefix="/market", tags=["market"])
-live_market_provider = AKShareLiveMarketDataProvider()
+# Tencent's public snapshot is fast and keyless for a beginner watchlist;
+# AKShare remains the independent Eastmoney/Sina fallback.  Every response
+# keeps its actual source and freshness metadata, and total failure is still a
+# 503 rather than a fabricated quote.
+live_market_provider = FallbackLiveMarketDataProvider([
+    TencentLiveMarketDataProvider(),
+    AKShareLiveMarketDataProvider(),
+])
+tencent_daily_provider = TencentDailyKlineProvider()
 _CODE_PATTERN = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
 
 
@@ -46,11 +58,31 @@ def get_daily(
     fields: str = "close",
 ):
     """Get daily OHLCV data for a stock"""
+    code = _parse_codes(code)[0]
+    try:
+        requested_start = date.fromisoformat(start_date)
+        requested_end = date.fromisoformat(end_date)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_DATE_RANGE",
+                "message": "start_date and end_date must use YYYY-MM-DD.",
+            },
+        ) from exc
+    if requested_start > requested_end:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_DATE_RANGE",
+                "message": "start_date must not be after end_date.",
+            },
+        )
     api = DataAPI()
     df = api.daily(
         codes=[code],
-        start=date.fromisoformat(start_date),
-        end=date.fromisoformat(end_date),
+        start=requested_start,
+        end=requested_end,
         fields=fields.split(","),
         adjust="event_driven",
     )
@@ -58,9 +90,40 @@ def get_daily(
     result = df.reset_index()
     # Convert Timestamp to string for JSON
     for col in result.columns:
-        if hasattr(result[col], 'dt'):
+        if col == "date" or hasattr(result[col], 'dt'):
             result[col] = result[col].astype(str)
-    return result.to_dict(orient="records")
+    trading_days = _requested_trading_days(api, requested_start, requested_end)
+    if not result.empty and _daily_result_covers(
+        result, requested_start, requested_end, trading_days
+    ):
+        return result.to_dict(orient="records")
+    if not trading_days and _range_is_weekend_only(requested_start, requested_end):
+        return []
+    if (requested_end - requested_start).days + 1 > 1000:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "HISTORICAL_RANGE_TOO_LARGE",
+                "message": "Remote historical fallback supports at most 1000 calendar days.",
+            },
+        )
+    # The bundled parquet sample is intentionally finite.  When a requested
+    # market-page range is outside that local window, fetch a real recent K-line
+    # set from the same Tencent source used for the live quote fallback.
+    try:
+        return tencent_daily_provider.fetch_daily(
+            code, requested_start, requested_end,
+            adjust="event_driven",
+        )
+    except MarketDataUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "HISTORICAL_MARKET_DATA_UNAVAILABLE",
+                "message": "No local or live historical market data is available.",
+                "attempts": exc.attempts,
+            },
+        ) from exc
 
 
 @router.get("/calendar")
@@ -191,6 +254,43 @@ def _parse_codes(value: str) -> list[str]:
             },
         )
     return codes
+
+
+def _requested_trading_days(api, start: date, end: date) -> list[date]:
+    getter = getattr(api, "get_trading_dates", None)
+    if getter is None:
+        return []
+    try:
+        return list(getter(start, end))
+    except Exception:
+        return []
+
+
+def _range_is_weekend_only(start: date, end: date) -> bool:
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            return False
+        current += timedelta(days=1)
+    return True
+
+
+def _daily_result_covers(
+    result, start: date, end: date, trading_days: Optional[list[date]] = None
+) -> bool:
+    """Return whether a local daily result spans the requested date bounds."""
+    if result.empty or "date" not in result.columns:
+        return False
+    values = result["date"].dropna()
+    if values.empty:
+        return False
+    dates = pd.to_datetime(values, errors="coerce").dropna()
+    if dates.empty:
+        return False
+    bounds = trading_days or []
+    first_required = bounds[0] if bounds else start
+    last_required = bounds[-1] if bounds else end
+    return dates.min().date() <= first_required and dates.max().date() >= last_required
 
 
 def _latest_local_market_date(data_dir: Path) -> Optional[str]:

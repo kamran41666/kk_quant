@@ -1,7 +1,7 @@
 <template>
   <div class="page market-page">
     <div class="page-header">
-      <div><h1>市场行情</h1><p class="page-subtitle">查看 A 股价格快照与本地历史走势；所有时间按 Asia/Shanghai 展示。</p></div>
+      <div><h1>市场行情</h1><p class="page-subtitle">查看 A 股实时快照与历史走势；本地样本不足时自动补充公开行情源。</p></div>
       <button class="btn-secondary" type="button" :disabled="quotesLoading" @click="loadQuotes">{{ quotesLoading ? '正在刷新' : '刷新行情' }}</button>
     </div>
 
@@ -11,18 +11,21 @@
         <div v-if="quotesLoading" class="state-panel small" aria-live="polite"><strong>正在读取行情</strong><p>连接可用行情源。</p></div>
         <div v-else-if="quotesError" class="state-panel small"><strong>行情不可用</strong><p>{{ quotesError }}</p><button class="btn-secondary" @click="loadQuotes">重试</button></div>
         <div v-else-if="quotes.length === 0" class="state-panel small"><strong>暂无行情</strong><p>数据源没有返回有效证券。</p></div>
-        <div v-else class="watch-list">
-          <button
-            v-for="quote in quotes"
-            :key="quote.code"
-            type="button"
-            class="watch-item"
-            :class="{ active: selectedCode === quote.code }"
-            @click="selectQuote(quote.code)"
-          >
-            <span><strong>{{ quote.name || quote.code }}</strong><small>{{ quote.code }}</small></span>
-            <span class="quote-numbers"><strong class="numeric">{{ quote.price?.toFixed(2) ?? '—' }}</strong><small class="numeric" :class="directionClass(quote.change_pct)">{{ formatPercentPoints(quote.change_pct) }} · {{ directionLabel(quote.change_pct) }}</small></span>
-          </button>
+        <div v-else>
+          <p v-if="quotesMeta?.status === 'partial'" class="partial-notice">部分行情可用；缺少 {{ quotesMeta.missing_codes?.join('、') || '未知证券' }}。</p>
+          <div class="watch-list">
+            <button
+              v-for="quote in quotes"
+              :key="quote.code"
+              type="button"
+              class="watch-item"
+              :class="{ active: selectedCode === quote.code }"
+              @click="selectQuote(quote.code)"
+            >
+              <span><strong>{{ quote.name || quote.code }}</strong><small>{{ quote.code }}</small></span>
+              <span class="quote-numbers"><strong class="numeric">{{ quote.price?.toFixed(2) ?? '—' }}</strong><small class="numeric" :class="directionClass(quote.change_pct)">{{ formatPercentPoints(quote.change_pct) }} · {{ directionLabel(quote.change_pct) }}</small></span>
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -37,7 +40,7 @@
           </div>
           <div class="source-meta" v-if="selectedQuote">
             <span :class="{ stale: isStale(selectedQuote) }">{{ freshnessLabel(selectedQuote.freshness) }}</span>
-            <small>{{ selectedQuote.source }} · {{ selectedQuote.as_of ?? '源时间未知' }}</small>
+            <small>{{ selectedQuote.source }} · 源时间 {{ selectedQuote.as_of ?? '未知' }} · 接收 {{ formatReceivedAt(selectedQuote.received_at) }}</small>
           </div>
         </div>
 
@@ -51,7 +54,7 @@
           :data="dailyPrices.map(item => ({ date: item.date, open: item.open ?? null, close: item.close ?? null, low: item.low ?? null, high: item.high ?? null }))"
           zoom
         />
-        <p class="chart-footnote">复权口径：event_driven · 曲线仅用于研究展示，不构成委托报价。</p>
+        <p class="chart-footnote">数据源：{{ dailySource }} · 复权口径：{{ dailySource === 'tencent:kline' ? 'qfq（前复权）' : 'event_driven' }} · 仅用于研究展示。</p>
       </section>
     </div>
 
@@ -88,6 +91,8 @@ const { api } = useApi()
 const quotes = ref<MarketQuote[]>([])
 const selectedCode = ref(watchCodes[0])
 const dailyPrices = ref<DailyPrice[]>([])
+const dailySource = ref('local:parquet')
+const quotesMeta = ref<QuotesResponse['meta'] | null>(null)
 const quotesLoading = ref(true)
 const dailyLoading = ref(true)
 const quotesError = ref('')
@@ -109,15 +114,24 @@ function isStale(quote: MarketQuote): boolean {
   return quote.freshness === 'stale' || quote.freshness === 'unknown'
 }
 
+function formatReceivedAt(value: string | null | undefined): string {
+  if (!value) return '未知'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return '未知'
+  return parsed.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
+}
+
 async function loadQuotes() {
   quotesLoading.value = true
   quotesError.value = ''
   try {
     const { data } = await api.get<QuotesResponse>('/market/quotes', { params: { codes: watchCodes.join(',') } })
     quotes.value = data.data
+    quotesMeta.value = data.meta
   } catch (error: unknown) {
     quotesError.value = apiErrorMessage(error, '行情源暂不可用。')
     quotes.value = []
+    quotesMeta.value = null
   } finally {
     quotesLoading.value = false
   }
@@ -136,10 +150,12 @@ async function loadDaily() {
     })
     if (disposed || request !== dailyRequest) return
     dailyPrices.value = chronological(data)
+    dailySource.value = data[0]?.source ?? 'local:parquet'
   } catch (error: unknown) {
     if (disposed || request !== dailyRequest) return
-    dailyError.value = apiErrorMessage(error, '本地历史价格读取失败。')
+    dailyError.value = apiErrorMessage(error, '历史行情源暂不可用。')
     dailyPrices.value = []
+    dailySource.value = 'unavailable'
   } finally {
     if (!disposed && request === dailyRequest) dailyLoading.value = false
   }
@@ -190,6 +206,7 @@ onBeforeUnmount(() => {
 .watch-item:hover { background: var(--bg-secondary); }
 .watch-item.active { border-color: var(--border-strong); background: var(--bg-muted); }
 .watch-item span, .quote-numbers { display: grid; gap: 2px; }
+.partial-notice { margin: 0 0 9px; color: var(--warning); font-size: 10px; }
 .watch-item small { color: var(--text-tertiary); font-size: 10px; }
 .quote-numbers { text-align: right; }
 .chart-header { display: flex; min-height: 76px; align-items: flex-start; justify-content: space-between; gap: 20px; }
