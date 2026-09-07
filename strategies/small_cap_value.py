@@ -31,13 +31,38 @@ import numpy as np
 import pandas as pd
 
 from quant_engine.backtest.strategy import Strategy
+from quant_engine.backtest.protocol import (
+    AnalysisOutputSpec, DataRequirement, ParameterSpec, ParameterType,
+    StrategyOutput, StrategySpec,
+)
 
 
 class SmallCapValueStrategy(Strategy):
     """小盘价值增强策略"""
 
+    SPEC = StrategySpec(
+        id="small-cap-value",
+        name="小盘价值增强",
+        version="2.0.0",
+        description="低波动、短期反转和换手率市值代理的周频等权组合。",
+        markets=("a-share",),
+        parameters=(
+            ParameterSpec("top_n", "持仓数量", ParameterType.INTEGER, 50, minimum=1, maximum=200),
+            ParameterSpec("lookback", "回看交易日", ParameterType.INTEGER, 30, minimum=21, maximum=250),
+            ParameterSpec("avoid_weak_months", "弱势月份空仓", ParameterType.BOOLEAN, True),
+        ),
+        data=(DataRequirement("a_share_daily", ("close", "amount", "turnover_rate"), 30),),
+        rebalance_frequency="weekly",
+        warmup_bars=30,
+        tags=("多因子", "低波", "反转"),
+        analysis_outputs=(AnalysisOutputSpec("selected_count", "入选数量", "integer"),),
+        research_document="strategies/research/small-cap-value.md",
+    )
+
     def initialize(self):
-        self.top_n = 50
+        self.top_n = self.params["top_n"]
+        self.lookback = self.params["lookback"]
+        self.avoid_weak_months = self.params["avoid_weak_months"]
         self.rebalance_freq = "weekly"
         self.rebalance_day = 5  # 周五
 
@@ -53,34 +78,27 @@ class SmallCapValueStrategy(Strategy):
         self.use_factor("momentum_1m")
         self.use_factor("log_market_cap_proxy")
 
-    def generate_signals(self, dt: date) -> dict[str, float]:
+    def generate_signals(self, dt: date) -> StrategyOutput:
         # ---- Calendar effect: empty position ----
-        if dt.month in (1, 4, 12):
+        if self.avoid_weak_months and dt.month in (1, 4, 12):
             self.log(f"[Calendar] month={dt.month}, empty position")
-            return {}
+            return StrategyOutput({}, {"selected_count": 0})
 
         # ---- Access stock pool via engine's data_handler ----
-        ctx = self.ctx
-        dh = getattr(ctx, '_data_handler', None)
-        if dh is None:
-            self.log("[Error] DataHandler not accessible")
-            return {}
-
-        codes = dh.stock_list
+        codes = self.ctx.universe
         if not codes:
             self.log("[Error] Empty stock pool")
-            return {}
+            return StrategyOutput({}, {"selected_count": 0})
 
-        lookback = 30  # need ~30 days to compute 20-day volatility/momentum
-        df = dh.get_history(
+        df = self.ctx.history(
             codes=codes,
-            lookback=lookback,
+            lookback=self.lookback,
             fields=["close", "amount", "turnover_rate"],
         )
 
         if df.empty:
             self.log("[Error] DataAPI returned empty DataFrame")
-            return {}
+            return StrategyOutput({}, {"selected_count": 0})
 
         # ---- Compute factors per stock ----
         close = df["close"].unstack(level="code")  # date x code
@@ -120,11 +138,11 @@ class SmallCapValueStrategy(Strategy):
 
         if len(score) == 0:
             self.log("[Signal] All scores NaN — returning empty")
-            return {}
+            return StrategyOutput({}, {"selected_count": 0})
 
         top_codes = score.nlargest(min(self.top_n, len(score))).index.tolist()
         weight = 1.0 / len(top_codes)
         signals = {code: weight for code in top_codes}
 
         self.log(f"[Signal] {dt} — {len(signals)} stocks, weight={weight:.4f}")
-        return signals
+        return StrategyOutput(signals, {"selected_count": len(signals)})

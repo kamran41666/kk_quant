@@ -15,9 +15,10 @@ from typing import Any, Mapping, Type
 
 import pandas as pd
 
-from quant_engine.backtest.context import StrategyContext
+from quant_engine.backtest.context import FundNavPortal, StrategyContext
 from quant_engine.data.calendar import TradingCalendar
 from quant_engine.backtest.strategy import Strategy
+from quant_engine.backtest.protocol import StrategySpec, normalize_strategy_output
 from quant_engine.backtest.types import OrderSide, Trade
 
 
@@ -116,7 +117,13 @@ class FundNavBacktestEngine:
         # creates its own year-scoped TradingCalendar.  Passing ``None`` here
         # would validate the calendar but still simulate weekends/holidays.
         trading_days, navs = self._rows_by_date(rows, start, end, trading_calendar)
+        canonical_rows = {
+            code: [{"date": day, "nav": value} for day, value in sorted(series.items())]
+            for code, series in navs.items()
+        }
+        data_portal = FundNavPortal(canonical_rows)
         context = StrategyContext(trading_calendar)
+        context.bind_data(data_portal)
         strategy = self.strategy_class(context, **self.strategy_kwargs)
         try:
             strategy.initialize()
@@ -136,12 +143,8 @@ class FundNavBacktestEngine:
         # though that row was excluded from simulated trading.
         allowed_history_dates = {day.isoformat() for day in trading_days}
         strategy._fund_history = {
-            code: [
-                {"date": day, "nav": value}
-                for day, value in sorted(series.items())
-                if day in allowed_history_dates
-            ]
-            for code, series in navs.items()
+            code: [item for item in values if item["date"] in allowed_history_dates]
+            for code, values in canonical_rows.items()
         }
 
         cash = float(initial_capital)
@@ -154,6 +157,8 @@ class FundNavBacktestEngine:
         position_rows: list[dict[str, Any]] = []
         trade_rows: list[dict[str, Any]] = []
         signal_rows: list[dict[str, Any]] = []
+        strategy_output_rows: list[dict[str, Any]] = []
+        spec = getattr(self.strategy_class, "SPEC", None)
 
         def value_at(day: date) -> float:
             return cash + sum(units * navs[code][day.isoformat()] for code, units in positions.items())
@@ -195,6 +200,7 @@ class FundNavBacktestEngine:
             if cancel_check and cancel_check():
                 raise RuntimeError("fund backtest cancelled")
             day_key = day.isoformat()
+            data_portal.set_date(day)
             nav_for_day = {code: series[day_key] for code, series in navs.items()}
             context.set_date(day)
             context.set_portfolio(portfolio_view(day))
@@ -277,22 +283,11 @@ class FundNavBacktestEngine:
 
             total = value_at(day)
             if self._is_rebalance_day(day, rebalance_frequency, last_rebalance):
-                signals = strategy.generate_signals(day)
-                if not isinstance(signals, dict):
-                    raise ValueError("fund strategy returned invalid target weights")
-                normalized: dict[str, float] = {}
-                for code, raw_weight in signals.items():
-                    if not isinstance(code, str):
-                        raise ValueError("fund strategy returned invalid target weights")
-                    try:
-                        weight = float(raw_weight)
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError("fund strategy returned invalid target weights") from exc
-                    if not math.isfinite(weight) or weight < 0:
-                        raise ValueError("fund strategy returned invalid target weights")
-                    normalized[code] = weight
-                if sum(normalized.values()) > 1.0 + 1e-9:
-                    raise ValueError("fund strategy returned invalid target weights")
+                try:
+                    output = normalize_strategy_output(strategy.generate_signals(day), spec=spec)
+                except ValueError as exc:
+                    raise ValueError("fund strategy returned invalid target weights") from exc
+                normalized = dict(output.target_weights)
                 unknown = sorted(set(normalized) - set(navs))
                 if unknown:
                     raise ValueError(f"fund strategy returned unknown fund code(s): {', '.join(unknown)}")
@@ -306,6 +301,9 @@ class FundNavBacktestEngine:
                 last_rebalance = day
                 for code, weight in pending.items():
                     signal_rows.append({"date": day, "code": code, "target_weight": weight})
+                for key, value in output.diagnostics.items():
+                    strategy_output_rows.append({"date": day, "key": key, "value": value})
+                strategy_output_rows.extend(context.drain_diagnostics())
                 # Preserve explicit zero-weight targets in the lifecycle
                 # callback even though the execution proposal only stores
                 # positive positions; this mirrors the A-share contract and
@@ -334,6 +332,8 @@ class FundNavBacktestEngine:
             pd.DataFrame(trade_rows).to_parquet(output / "trades.parquet", index=False)
         if signal_rows:
             pd.DataFrame(signal_rows).to_parquet(output / "signals.parquet", index=False)
+        if strategy_output_rows:
+            pd.DataFrame(strategy_output_rows).to_parquet(output / "strategy_outputs.parquet", index=False)
         final_value = float(portfolio.iloc[-1]["total_value"]) if not portfolio.empty else initial_capital
         summary = {
             "start_date": trading_days[0].isoformat(), "end_date": trading_days[-1].isoformat(),
@@ -350,6 +350,8 @@ class FundNavBacktestEngine:
             "calendar_coverage_end": calendar_report.get("coverage_end"),
             "calendar_verified": bool(calendar_report.get("verified")),
             "fee_model": "fund_nav_configurable_rate-v1", "fee_rate": self.fee_rate,
+            "strategy_spec": spec.as_dict(f"{self.strategy_class.__module__}.{self.strategy_class.__name__}") if isinstance(spec, StrategySpec) else None,
+            "strategy_params": dict(strategy.params),
             "unexecuted_signal_date": pending_date.isoformat() if pending is not None and pending_date else None,
         }
         (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

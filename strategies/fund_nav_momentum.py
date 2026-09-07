@@ -7,30 +7,52 @@ holds the strongest positive fund(s); it never invents an intraday price.
 from __future__ import annotations
 
 from datetime import date
-from typing import Mapping, Sequence
-
 from quant_engine.backtest.strategy import Strategy
+from quant_engine.backtest.protocol import (
+    AnalysisOutputSpec, DataRequirement, ParameterSpec, ParameterType,
+    StrategyOutput, StrategySpec,
+)
 
 
 class FundNavMomentumStrategy(Strategy):
     """Daily/weekly positive-momentum allocation over a supplied fund pool."""
 
-    def initialize(self):
-        self.lookback = max(2, int(self._strategy_kwargs.get("lookback", 20)))
-        self.top_n = max(1, int(self._strategy_kwargs.get("top_n", 1)))
-        self.target_weight = min(1.0, max(0.0, float(self._strategy_kwargs.get("target_weight", 1.0))))
-        self._fund_history: Mapping[str, Sequence[Mapping[str, object]]] = {}
+    SPEC = StrategySpec(
+        id="fund-nav-momentum",
+        name="基金 NAV 动量",
+        version="2.0.0",
+        description="按历史净值收益排序，持有正动量排名靠前的基金。",
+        markets=("cn-fund",),
+        parameters=(
+            ParameterSpec("lookback", "动量周期", ParameterType.INTEGER, 20, minimum=1, maximum=250),
+            ParameterSpec("top_n", "持有数量", ParameterType.INTEGER, 1, minimum=1, maximum=50),
+            ParameterSpec("target_weight", "总目标仓位", ParameterType.NUMBER, 1.0, minimum=0.0, maximum=1.0),
+        ),
+        data=(DataRequirement("cn_fund_nav", ("nav",), 21, adjustment="none"),),
+        rebalance_frequency="daily",
+        warmup_bars=21,
+        tags=("基金", "动量"),
+        analysis_outputs=(AnalysisOutputSpec("positive_candidates", "正动量候选", "integer"),),
+    )
 
-    def generate_signals(self, dt: date) -> dict[str, float]:
-        history = self._fund_history
+    def initialize(self):
+        self.lookback = self.params["lookback"]
+        self.top_n = self.params["top_n"]
+        self.target_weight = self.params["target_weight"]
+
+    def generate_signals(self, dt: date) -> StrategyOutput:
+        history = self.ctx.history(lookback=self.lookback + 1, fields=["nav"])
         scores: list[tuple[str, float]] = []
-        for code, rows in history.items():
-            usable = [row for row in rows if str(row.get("date")) <= dt.isoformat()]
+        for code in self.ctx.universe:
+            try:
+                usable = history.xs(code, level="code").sort_index()
+            except KeyError:
+                continue
             if len(usable) < self.lookback + 1:
                 continue
             try:
-                latest = float(usable[-1].get("nav"))
-                base = float(usable[-1 - self.lookback].get("nav"))
+                latest = float(usable.iloc[-1]["nav"])
+                base = float(usable.iloc[-1 - self.lookback]["nav"])
             except (TypeError, ValueError):
                 continue
             if latest > 0 and base > 0:
@@ -38,6 +60,9 @@ class FundNavMomentumStrategy(Strategy):
         positive = sorted((item for item in scores if item[1] > 0), key=lambda item: item[1], reverse=True)
         selected = positive[: self.top_n]
         if not selected or self.target_weight <= 0:
-            return {}
+            return StrategyOutput({}, {"positive_candidates": len(positive)})
         weight = self.target_weight / len(selected)
-        return {code: weight for code, _ in selected}
+        return StrategyOutput(
+            {code: weight for code, _ in selected},
+            {"positive_candidates": len(positive)},
+        )

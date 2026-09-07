@@ -15,7 +15,8 @@ from quant_engine.data.calendar import TradingCalendar
 from quant_engine.data.api import DataAPI
 from quant_engine.backtest.types import OrderSide
 from quant_engine.backtest.strategy import Strategy
-from quant_engine.backtest.context import StrategyContext
+from quant_engine.backtest.context import DataHandlerPortal, StrategyContext
+from quant_engine.backtest.protocol import StrategySpec, normalize_strategy_output
 from quant_engine.backtest.data_handler import DataHandler
 from quant_engine.backtest.scheduler import RebalanceScheduler
 from quant_engine.backtest.order_manager import OrderManager
@@ -91,12 +92,6 @@ class BacktestEngine:
         stock_list = self._get_stock_pool(trading_days[0])
 
         # 组件初始化
-        context = StrategyContext(calendar)
-        context.stock_list = stock_list
-
-        strategy = self._strategy_class(context, **self._strategy_kwargs)
-        strategy.initialize()
-
         data_handler = DataHandler(
             codes=stock_list,
             start=trading_days[0],
@@ -150,7 +145,10 @@ class BacktestEngine:
                 raise ValueError("daily_data_coverage_hash_invalid")
         elif data_handler.load_error:
             raise ValueError("daily_data_load_failed: " + data_handler.load_error)
-        context._data_handler = data_handler
+        context = StrategyContext(calendar)
+        context.bind_data(DataHandlerPortal(data_handler))
+        strategy = self._strategy_class(context, **self._strategy_kwargs)
+        strategy.initialize()
         scheduler = RebalanceScheduler(
             calendar,
             frequency=rebalance_frequency,
@@ -163,6 +161,10 @@ class BacktestEngine:
         recorder = Recorder(output_dir=output_dir)
 
         recorder.set_meta("strategy", self._strategy_class.__name__)
+        spec = getattr(self._strategy_class, "SPEC", None)
+        if isinstance(spec, StrategySpec):
+            recorder.set_meta("strategy_spec", spec.as_dict(f"{self._strategy_class.__module__}.{self._strategy_class.__name__}"))
+            recorder.set_meta("strategy_params", dict(strategy.params))
         recorder.set_meta("start_date", str(start))
         recorder.set_meta("end_date", str(end))
         recorder.set_meta("initial_capital", initial_capital)
@@ -232,16 +234,8 @@ class BacktestEngine:
             # Rebalance day: generate a target for the *next* trading day.  An empty
             # mapping is a valid target and means liquidate all sellable holdings.
             if scheduler.is_rebalance_day(day):
-                target = strategy.generate_signals(day)
-                if not isinstance(target, dict):
-                    raise TypeError("generate_signals() must return dict[str, float]")
-                invalid = {
-                    code: weight for code, weight in target.items()
-                    if not isinstance(code, str) or not isinstance(weight, (int, float))
-                    or pd.isna(weight) or weight < 0
-                }
-                if invalid or sum(target.values()) > 1.0 + 1e-9:
-                    raise ValueError(f"Invalid target weights: {invalid or target}")
+                output = normalize_strategy_output(strategy.generate_signals(day), spec=spec)
+                target = dict(output.target_weights)
 
                 total_val = portfolio.total_value
                 old_weights = {}
@@ -251,6 +245,9 @@ class BacktestEngine:
                             old_weights[code] = pos.market_value / total_val
                 strategy.on_rebalance(day, old_weights, target)
                 recorder.record_signal(day, target)
+                recorder.record_strategy_output(day, output.diagnostics)
+                for row in context.drain_diagnostics():
+                    recorder.record_strategy_output(row["date"] or day, {row["key"]: row["value"]})
                 pending_target = dict(target)
                 pending_signal_date = day
 

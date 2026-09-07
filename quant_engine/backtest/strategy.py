@@ -1,9 +1,16 @@
 """Strategy 基类 — 用户策略通过继承此类并重写钩子方法来实现"""
 from abc import ABC, abstractmethod
 from datetime import date
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from quant_engine.backtest.context import StrategyContext
 from quant_engine.backtest.types import Trade
+from quant_engine.backtest.protocol import (
+    STRATEGY_PROTOCOL as STRATEGY_PROTOCOL_V2,
+    StrategyOutput,
+    StrategySpec,
+)
 
 
 # Versioned contract shared by the backtest engine, paper observer and the UI.
@@ -45,6 +52,10 @@ STRATEGY_PROTOCOL_V1 = {
     "lifecycle": ["initialize", "before_trading", "generate_signals", "on_rebalance", "on_order_filled", "teardown"],
 }
 
+# Current API contract.  The v1 constant remains importable for old clients,
+# but all built-in strategies and discovery use the typed v2 declaration.
+STRATEGY_PROTOCOL = STRATEGY_PROTOCOL_V2
+
 
 class Strategy(ABC):
     """策略基类
@@ -62,10 +73,16 @@ class Strategy(ABC):
         teardown() — 结束处理
     """
 
+    SPEC: StrategySpec | None = None
+
     def __init__(self, context: StrategyContext, **kwargs):
         self.ctx = context
         self._initialized = False
-        self._strategy_kwargs = kwargs
+        spec = getattr(type(self), "SPEC", None)
+        resolved = spec.validate_params(kwargs) if isinstance(spec, StrategySpec) else dict(kwargs)
+        self.params: Mapping[str, Any] = MappingProxyType(resolved)
+        # Transitional alias for v1 strategies. New code must use self.params.
+        self._strategy_kwargs = dict(resolved)
 
     # ===== 必须重写 =====
 
@@ -80,7 +97,7 @@ class Strategy(ABC):
         ...
 
     @abstractmethod
-    def generate_signals(self, dt: date) -> dict[str, float]:
+    def generate_signals(self, dt: date) -> StrategyOutput | dict[str, float]:
         """生成调仓信号
 
         仅在调仓日被引擎调用（默认每周五）。

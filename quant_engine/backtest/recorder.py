@@ -29,6 +29,7 @@ class Recorder:
         self._trades: list[dict] = []
         self._orders: list[dict] = []
         self._signals: list[dict] = []
+        self._strategy_outputs: list[dict] = []
 
         # 元信息
         self._start_date: Optional[date] = None
@@ -105,6 +106,10 @@ class Recorder:
                 "target_weight": weight,
             })
 
+    def record_strategy_output(self, dt: date, diagnostics) -> None:
+        for key, value in dict(diagnostics or {}).items():
+            self._strategy_outputs.append({"date": dt, "key": str(key), "value": value})
+
     def save(self):
         """保存所有记录到磁盘"""
         # 持仓
@@ -148,6 +153,11 @@ class Recorder:
             df_signals = pd.DataFrame(self._signals)
             df_signals.to_parquet(
                 self._output_dir / "signals.parquet", index=False
+            )
+
+        if self._strategy_outputs:
+            pd.DataFrame(self._strategy_outputs).to_parquet(
+                self._output_dir / "strategy_outputs.parquet", index=False
             )
 
         # 摘要
