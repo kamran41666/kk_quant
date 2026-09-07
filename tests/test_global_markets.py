@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from quant_engine.data.global_markets import EastmoneyFundDataProvider, YahooUSMarketDataProvider
+from quant_engine.data.global_markets import EastmoneyFundDataProvider, GoldMarketDataProvider, YahooUSMarketDataProvider
 from quant_engine.data.live import MarketDataUnavailableError
 from server.api import market
 
@@ -94,14 +94,44 @@ def test_fund_provider_uses_public_chart_script_when_json_endpoint_is_empty():
     assert quote.change_pct == pytest.approx(1.82)
 
 
+def test_gold_provider_falls_back_to_explicit_comex_reference_for_stale_domestic_history():
+    yahoo = YahooUSMarketDataProvider(fetcher=lambda url, timeout: _yahoo_payload())
+    provider = GoldMarketDataProvider(
+        yahoo_provider=yahoo,
+        text_fetcher=lambda url, timeout: "[]",
+    )
+    rows = provider.fetch_daily("AU0", date(2026, 9, 3), date(2026, 9, 4))
+    assert len(rows) == 2
+    assert {row["code"] for row in rows} == {"AU0"}
+    assert {row["reference_symbol"] for row in rows} == {"GC=F"}
+    assert all(row["reference_only"] is True for row in rows)
+
+
+def test_gold_provider_uses_comex_reference_when_xau_spot_history_is_unavailable():
+    def fetcher(url, timeout):
+        if "/XAU?" in url:
+            return {"chart": {"result": []}}
+        return _yahoo_payload()
+    yahoo = YahooUSMarketDataProvider(fetcher=fetcher)
+    provider = GoldMarketDataProvider(yahoo_provider=yahoo)
+    rows = provider.fetch_daily("XAU", date(2026, 9, 3), date(2026, 9, 4))
+    assert {row["code"] for row in rows} == {"XAU"}
+    assert {row["reference_symbol"] for row in rows} == {"GC=F"}
+
+
 def test_cross_market_routes_keep_market_metadata(monkeypatch):
     us = YahooUSMarketDataProvider(fetcher=lambda url, timeout: _yahoo_payload())
     fund = EastmoneyFundDataProvider(fetcher=lambda url, timeout: _fund_payload())
+    gold = GoldMarketDataProvider(
+        yahoo_provider=YahooUSMarketDataProvider(fetcher=lambda url, timeout: _yahoo_payload()),
+        text_fetcher=lambda url, timeout: "[]",
+    )
     monkeypatch.setitem(market._cross_market_providers, "us-equity", us)
     monkeypatch.setitem(market._cross_market_providers, "cn-fund", fund)
+    monkeypatch.setitem(market._cross_market_providers, "gold", gold)
 
     markets = market.list_supported_markets()
-    assert [item["id"] for item in markets["data"]] == ["a-share", "cn-fund", "us-equity"]
+    assert [item["id"] for item in markets["data"]] == ["a-share", "cn-fund", "us-equity", "gold"]
     quotes = market.get_cross_market_quotes("us-equity", "AAPL")
     assert quotes["data"][0]["currency"] == "USD"
     candles = market.get_cross_market_candles(
@@ -109,6 +139,10 @@ def test_cross_market_routes_keep_market_metadata(monkeypatch):
     )
     assert candles["meta"]["market"] == "cn-fund"
     assert candles["meta"]["note"].startswith("基金净值")
+    gold_candles = market.get_cross_market_candles(
+        "gold", "AU0", "2026-09-03", "2026-09-04", "1d", None
+    )
+    assert "GC=F" in gold_candles["meta"]["note"]
 
 
 def test_cross_market_route_rejects_unknown_market():

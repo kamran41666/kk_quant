@@ -5,6 +5,7 @@ export interface Strategy {
   strategy_class: string
   params: Record<string, any>
   market?: 'a-share' | 'cn-fund' | 'us-equity'
+  protocol_version?: string
   created_at: string
   updated_at: string
 }

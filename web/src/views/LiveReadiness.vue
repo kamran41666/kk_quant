@@ -2,16 +2,19 @@
   <div class="page">
     <div class="page-header">
       <div>
-        <h1>实盘准备</h1>
-        <p class="page-note">Phase 3A 只准备连接、风控和订单草案；当前不会向任何真实券商发送委托。</p>
+        <h1>账户接入</h1>
+        <p class="page-note">连接账户后查看余额、持仓和资产状态；当前仅支持研究与模拟，不会发送真实委托。</p>
       </div>
       <button class="btn-secondary" type="button" @click="refreshAll" :disabled="loading">{{ loading ? '刷新中...' : '刷新状态' }}</button>
     </div>
 
-    <section class="operator-token-row" aria-label="操作员令牌">
-      <label>操作员令牌（可选，仅当前标签页）<input v-model="operatorToken" type="password" autocomplete="off" placeholder="设置 QUANT_OPERATOR_TOKEN 后填写" /></label>
-      <div class="operator-token-actions"><button class="btn-secondary" type="button" @click="applyOperatorToken">{{ operatorToken ? '应用令牌' : '清除令牌' }}</button><small>令牌不会写入项目或 localStorage。</small></div>
-    </section>
+    <details class="advanced-settings">
+      <summary>高级设置：操作员令牌</summary>
+      <div class="operator-token-row" aria-label="操作员令牌">
+        <label>当前标签页令牌<input v-model="operatorToken" type="password" autocomplete="off" placeholder="设置 QUANT_OPERATOR_TOKEN 后填写" /></label>
+        <div class="operator-token-actions"><button class="btn-secondary" type="button" @click="applyOperatorToken">{{ operatorToken ? '应用令牌' : '清除令牌' }}</button><small>令牌不会写入项目或 localStorage。</small></div>
+      </div>
+    </details>
 
     <section class="card safety-banner" :class="{ safe: !capabilities.can_submit_live }" aria-labelledby="live-safety-title">
       <div class="safety-icon" aria-hidden="true">!</div>
@@ -31,6 +34,18 @@
       </div>
     </section>
     <div v-if="opsStatus.alerts.length" class="ops-alerts" role="status"><span v-for="alert in opsStatus.alerts.slice(0, 3)" :key="alert.code">{{ alert.message }}</span></div>
+
+    <section class="card account-overview" aria-labelledby="account-overview-title">
+      <div class="section-header compact"><div><h2 id="account-overview-title">账户概览</h2><p>余额、持仓和资产状态集中展示。</p></div><span class="sandbox-badge">连接后同步</span></div>
+      <div v-if="accounts.length" class="account-grid">
+        <article v-for="account in accounts" :key="account.id" class="account-card">
+          <div class="account-card-head"><div><strong>{{ account.name }}</strong><span>{{ account.market === 'us-equity' ? '美股 · USD' : account.market === 'cn-fund' ? '国内基金 · CNY' : 'A股 · CNY' }}</span></div><span class="status-text">模拟账户</span></div>
+          <div class="account-metrics"><div><span>总权益</span><strong>¥{{ money(account.equity ?? account.initial_capital) }}</strong></div><div><span>可用现金</span><strong>¥{{ money(account.cash) }}</strong></div><div><span>持仓市值</span><strong>¥{{ money(account.market_value) }}</strong></div><div><span>持仓数量</span><strong>{{ account.positions?.length ?? 0 }}</strong></div></div>
+          <button class="link-button" type="button" @click="router.push({ name: 'Paper', query: { account_id: account.id } })">查看模拟账户详情 →</button>
+        </article>
+      </div>
+      <div v-else class="account-empty"><strong>尚未加载账户</strong><span>连接后将在这里显示余额与持仓；当前可先创建模拟账户。</span><button class="btn-secondary" type="button" @click="router.push({ name: 'Paper' })">进入模拟账户</button></div>
+    </section>
 
     <section class="card sandbox-card" aria-labelledby="sandbox-title">
       <div class="section-header compact">
@@ -79,8 +94,7 @@
       <p v-if="sandboxStatus" class="page-status" role="status">{{ sandboxStatus }}</p>
     </section>
 
-    <div class="two-column">
-      <section class="card" aria-labelledby="connection-title">
+    <section class="card connection-card" aria-labelledby="connection-title">
         <div class="section-header compact">
           <div><h2 id="connection-title">券商连接登记</h2><p>只登记连接信息，不保存 API 密钥本身。</p></div>
         </div>
@@ -103,33 +117,6 @@
           </article>
         </div>
         <p v-else class="empty-note">尚未登记券商连接。</p>
-      </section>
-
-      <section class="card" aria-labelledby="draft-title">
-        <div class="section-header compact">
-          <div><h2 id="draft-title">订单草案预检</h2><p>服务端会重新计算金额、费用、风控和安全阻断原因。</p></div>
-        </div>
-        <form class="stack-form" @submit.prevent="createDraft">
-          <label>模拟账户<select v-model="draftForm.paper_account_id" required><option value="" disabled>选择用于风险影子计算的账户</option><option v-for="account in accounts" :key="account.id" :value="account.id">{{ account.name }} · ¥{{ money(account.cash) }}</option></select></label>
-          <label>券商连接<select v-model="draftForm.connection_id" required><option value="" disabled>选择已登记连接</option><option v-for="connection in connections" :key="connection.id" :value="connection.id">{{ connection.provider }} · {{ connection.account_ref }}</option></select></label>
-          <div class="inline-fields"><label>代码<input v-model="draftForm.code" pattern="\d{6}\.(SH|SZ|BJ)" required /></label><label>方向<select v-model="draftForm.side"><option value="buy">买入</option><option value="sell">卖出</option></select></label></div>
-          <div class="inline-fields"><label>股数<input v-model.number="draftForm.quantity" type="number" min="100" step="100" required /></label><label>限价<input v-model.number="draftForm.limit_price" type="number" min="0.01" step="0.01" required /></label></div>
-          <button class="btn-accent" type="submit" :disabled="saving || !accounts.length || !connections.length">生成草案</button>
-        </form>
-        <p class="form-note">手动输入价格会被明确标记为 manual_input；实时价格必须同时提供时间戳和新鲜度。</p>
-      </section>
-    </div>
-
-    <section class="card section" aria-labelledby="draft-history-title">
-      <div class="section-header compact"><div><h2 id="draft-history-title">订单草案记录</h2><p>草案与真实成交严格分开；取消不会产生订单。</p></div></div>
-      <div v-if="drafts.length === 0" class="empty-note">暂无订单草案。</div>
-      <div v-else class="draft-list">
-        <article v-for="draft in drafts" :key="draft.id" class="draft-row">
-          <div class="draft-main"><strong>{{ draft.side === 'buy' ? '买入' : '卖出' }} {{ draft.code }}</strong><span>{{ draft.quantity.toLocaleString('zh-CN') }} 股 · ¥{{ money(draft.limit_price) }} · 预计费用 ¥{{ money(draft.estimated_fee) }}</span></div>
-          <div class="draft-risk" :class="draft.risk_status"><span>{{ draft.risk_status === 'approved' ? '风控通过' : '已阻断' }}</span><small v-if="draft.risk_reason">{{ draft.risk_reason }}</small></div>
-          <div class="draft-actions"><button v-if="draft.status === 'draft'" class="btn-secondary" type="button" @click="confirmDraft(draft.id)">确认草案</button><button v-if="!['cancelled', 'submitted', 'filled'].includes(draft.status)" class="link-button" type="button" @click="cancelDraft(draft.id)">取消</button><span v-else class="status-text">{{ draftStatus(draft.status) }}</span></div>
-        </article>
-      </div>
     </section>
 
     <section class="card section" aria-labelledby="audit-title">
@@ -144,9 +131,11 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { useApi } from '@/composables/useApi'
 
 const { api } = useApi()
+const router = useRouter()
 const loading = ref(false)
 const saving = ref(false)
 const status = ref('')
@@ -158,7 +147,6 @@ const capabilities = reactive({ can_submit_live: false, kill_switch_active: true
 const opsStatus = reactive({ status: 'unknown', alerts: [] as Array<{ code: string; severity: string; message: string }> })
 const connections = ref<any[]>([])
 const accounts = ref<any[]>([])
-const drafts = ref<any[]>([])
 const audits = ref<any[]>([])
 const sandboxSession = ref<any | null>(null)
 const sandboxOrders = ref<any[]>([])
@@ -169,7 +157,6 @@ const auditExporting = ref(false)
 const connectionForm = reactive({ provider: 'ibkr', account_ref: 'sandbox-account', mode: 'sandbox', credential_ref: '' })
 const rotatingConnectionId = ref<string | null>(null)
 const rotationCredentialRef = ref('')
-const draftForm = reactive({ connection_id: '', paper_account_id: '', code: '000001.SZ', side: 'buy', quantity: 100, limit_price: 10 })
 const sandboxForm = reactive({ initial_cash: 100_000, initial_fill_ratio: 1, code: '000001.SZ', price: 10, order_side: 'buy', order_quantity: 100 })
 const sandboxFaultForm = reactive({ operation: 'submit', active: false })
 
@@ -185,7 +172,6 @@ const blockedReasonsText = computed(() => capabilities.blocked_reasons.map(reaso
 
 function money(value: number | null | undefined) { return value == null || !Number.isFinite(value) ? '—' : value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }
 function connectionStatus(value: string) { return ({ disabled: '未启用', unavailable: '不可用', ready: '已就绪' } as Record<string, string>)[value] ?? value }
-function draftStatus(value: string) { return ({ confirmed: '已确认（未提交）', cancelled: '已取消', submitted: '已提交', filled: '已成交' } as Record<string, string>)[value] ?? value }
 function sandboxStatusText(value: string) { return ({ accepted: '已接收', partially_filled: '部分成交', filled: '已成交', rejected: '已拒绝', cancelled: '已撤单' } as Record<string, string>)[value] ?? value }
 
 async function refreshAll() {
@@ -193,21 +179,17 @@ async function refreshAll() {
   const results = await Promise.allSettled([
     api.get('/live/capabilities'),
     api.get('/live/connections'),
-    api.get('/live/drafts', { params: { limit: 50 } }),
     api.get('/live/audit', { params: { limit: 50 } }),
     api.get('/paper/accounts'),
     api.get('/live/ops/status'),
   ])
-  const [capabilityResult, connectionResult, draftResult, auditResult, accountResult, opsResult] = results
+  const [capabilityResult, connectionResult, auditResult, accountResult, opsResult] = results
   if (capabilityResult.status === 'fulfilled') Object.assign(capabilities, capabilityResult.value.data)
   if (capabilityResult.status === 'rejected' && capabilityResult.reason?.response?.status === 401) status.value = '当前部署要求操作员令牌，请在上方输入后应用。'
   if (connectionResult.status === 'fulfilled') connections.value = connectionResult.value.data
-  if (draftResult.status === 'fulfilled') drafts.value = draftResult.value.data
   if (auditResult.status === 'fulfilled') audits.value = auditResult.value.data
   if (accountResult.status === 'fulfilled') accounts.value = accountResult.value.data
   if (opsResult.status === 'fulfilled') Object.assign(opsStatus, opsResult.value.data)
-  if (!draftForm.paper_account_id && accounts.value[0]) draftForm.paper_account_id = accounts.value[0].id
-  if (!draftForm.connection_id && connections.value[0]) draftForm.connection_id = connections.value[0].id
   if (sandboxSession.value) await refreshSandbox()
   loading.value = false
 }
@@ -366,23 +348,6 @@ async function rotateCredentialReference(id: string) {
   } catch (error: any) { status.value = `更新失败：${error.response?.data?.detail ?? error.message}` } finally { saving.value = false }
 }
 
-async function createDraft() {
-  saving.value = true
-  try {
-    await api.post('/live/drafts', { ...draftForm, idempotency_key: `live-ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, price_source: 'manual_input', price_freshness: 'manual' })
-    status.value = '订单草案已生成，未创建模拟成交，也未发送真实委托。'
-    await refreshAll()
-  } catch (error: any) { status.value = `草案失败：${error.response?.data?.detail ?? error.message}` } finally { saving.value = false }
-}
-
-async function confirmDraft(id: string) {
-  try { await api.post(`/live/drafts/${id}/confirm`, { confirmation_phrase: 'CONFIRM LIVE ORDER' }); status.value = '确认结果已返回。'; await refreshAll() } catch (error: any) { status.value = `确认被阻断：${error.response?.data?.detail ?? error.message}` }
-}
-
-async function cancelDraft(id: string) {
-  try { await api.post(`/live/drafts/${id}/cancel`, { reason: 'cancelled_by_user' }); status.value = '订单草案已取消。'; await refreshAll() } catch (error: any) { status.value = `取消失败：${error.response?.data?.detail ?? error.message}` }
-}
-
 async function lockLive() {
   try { await api.post('/live/control/kill-switch', { active: true, reason: 'user_relocked_from_phase3_ui' }); status.value = 'Kill Switch 已重新开启。'; await refreshAll() } catch (error: any) { status.value = `操作失败：${error.response?.data?.detail ?? error.message}` }
 }
@@ -393,6 +358,10 @@ onMounted(() => { void refreshAll() })
 <style scoped>
 .page-header { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; margin-bottom:20px; }
 .page-note { margin:4px 0 0; color:var(--text-secondary); font-size:13px; }
+.advanced-settings { margin-bottom:12px; border:1px solid var(--border); border-radius:6px; background:rgba(15,22,34,.2); }
+.advanced-settings summary { padding:10px 12px; color:var(--text-secondary); font-size:11px; cursor:pointer; }
+.advanced-settings[open] summary { border-bottom:1px solid var(--border); color:var(--text-primary); }
+.advanced-settings .operator-token-row { margin:0; border:0; border-radius:0; background:transparent; }
 .operator-token-row { display:flex; align-items:flex-end; gap:12px; margin-bottom:12px; padding:10px 12px; border:1px solid var(--border); border-radius:6px; background:rgba(15,22,34,.2); }
 .operator-token-row label { display:grid; flex:1; gap:5px; color:var(--text-secondary); font-size:11px; }
 .operator-token-row input { width:100%; min-height:34px; border:1px solid var(--border-strong); border-radius:5px; background:var(--bg-secondary); color:var(--text-primary); padding:7px 10px; }
@@ -442,6 +411,21 @@ onMounted(() => { void refreshAll() })
 .page-status { margin-top:14px; color:var(--text-secondary); font-size:12px; }
 .sandbox-card { margin-top:12px; border-color:rgba(86,151,224,.28); background:linear-gradient(135deg,rgba(86,151,224,.06),rgba(54,179,126,.035)); }
 .ops-alerts { display:grid; gap:5px; margin-top:8px; color:var(--text-tertiary); font-size:11px; }
+.account-overview { margin-top:12px; }
+.account-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.account-card { display:grid; gap:12px; min-width:0; padding:13px; border:1px solid var(--border); border-radius:7px; background:rgba(15,22,34,.24); }
+.account-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+.account-card-head > div { display:grid; gap:4px; min-width:0; }
+.account-card-head strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+.account-card-head span { color:var(--text-tertiary); font-size:10px; }
+.account-metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
+.account-metrics > div { display:grid; gap:4px; min-width:0; }
+.account-metrics span { color:var(--text-tertiary); font-size:9px; }
+.account-metrics strong { overflow:hidden; color:var(--text-primary); font-family:"SFMono-Regular",Consolas,monospace; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+.account-empty { display:flex; align-items:center; flex-wrap:wrap; gap:12px; padding:13px; border:1px dashed var(--border-strong); border-radius:7px; color:var(--text-secondary); font-size:11px; }
+.account-empty strong { color:var(--text-primary); }
+.account-empty span { flex:1; min-width:220px; color:var(--text-tertiary); }
+.connection-card { margin-top:12px; }
 .sandbox-badge { flex:0 0 auto; border:1px solid rgba(86,151,224,.32); border-radius:999px; padding:4px 9px; color:#8bb9ec; font-size:10px; }
 .sandbox-grid { display:grid; grid-template-columns:minmax(260px, .9fr) minmax(0, 1.1fr); gap:14px; align-items:start; }
 .sandbox-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
@@ -471,6 +455,7 @@ onMounted(() => { void refreshAll() })
 .sandbox-order-row strong.rejected, .sandbox-order-row strong.cancelled { color:#f5838a; }
 .sandbox-event-list { display:flex; flex-wrap:wrap; gap:6px 12px; padding-top:9px; color:var(--text-tertiary); font-family:"SFMono-Regular",Consolas,monospace; font-size:10px; }
 @media (max-width:860px) { .two-column { grid-template-columns:1fr; } .safety-banner { align-items:flex-start; flex-wrap:wrap; } .safety-actions { width:100%; justify-content:flex-start; margin-left:46px; } }
+@media (max-width:860px) { .account-grid { grid-template-columns:1fr; } }
 @media (max-width:860px) { .sandbox-grid { grid-template-columns:1fr; } .sandbox-summary { grid-template-columns:repeat(2,minmax(0,1fr)); } .sandbox-fields { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width:620px) { .page-header { flex-direction:column; } .operator-token-row { align-items:stretch; flex-direction:column; } .operator-token-actions { justify-items:stretch; } .inline-fields { grid-template-columns:1fr; } .connection-row, .draft-row { align-items:flex-start; flex-direction:column; } .connection-actions, .draft-actions { width:100%; justify-content:space-between; } .draft-risk { min-width:0; text-align:left; } .audit-row { align-items:flex-start; flex-direction:column; gap:4px; } .audit-time, .audit-row strong { min-width:0; } .sandbox-fields { grid-template-columns:1fr; } .sandbox-summary { grid-template-columns:1fr 1fr; } }
 </style>

@@ -6,6 +6,46 @@ from quant_engine.backtest.context import StrategyContext
 from quant_engine.backtest.types import Trade
 
 
+# Versioned contract shared by the backtest engine, paper observer and the UI.
+# A user strategy only needs to implement the two required hooks; optional
+# hooks are deliberately kept compatible across all supported markets.
+STRATEGY_PROTOCOL_V1 = {
+    "version": "1.0",
+    "id": "kk-quant-strategy-v1",
+    "name": "统一策略协议",
+    "supported_markets": ["a-share", "cn-fund"],
+    "required_hooks": [
+        {"name": "initialize", "purpose": "读取并校验参数，声明因子和内部状态"},
+        {"name": "generate_signals", "purpose": "按交易日输出目标权重"},
+    ],
+    "optional_hooks": [
+        {"name": "before_trading", "purpose": "盘前准备"},
+        {"name": "on_rebalance", "purpose": "调仓回调"},
+        {"name": "on_order_filled", "purpose": "成交回调"},
+        {"name": "teardown", "purpose": "运行结束清理"},
+    ],
+    "input_contract": {
+        "context": "StrategyContext",
+        "date": "datetime.date",
+        "history": "通过 self.ctx 或引擎数据处理器读取，不直接访问网络",
+    },
+    "signal_contract": {
+        "type": "dict[str, float]",
+        "meaning": "证券代码到目标组合权重",
+        "rules": [
+            "权重必须为有限数且不小于 0",
+            "空字典表示空仓",
+            "引擎负责归一化、交易日、费用和成交约束",
+        ],
+    },
+    "parameter_contract": {
+        "type": "JSON object",
+        "rule": "参数必须可序列化；策略在 initialize 中读取 self._strategy_kwargs",
+    },
+    "lifecycle": ["initialize", "before_trading", "generate_signals", "on_rebalance", "on_order_filled", "teardown"],
+}
+
+
 class Strategy(ABC):
     """策略基类
 

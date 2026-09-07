@@ -33,7 +33,7 @@ from quant_engine.data.security_master import (
 from quant_engine.data.store import MetaDB
 from quant_engine.data.calendar import TradingCalendar
 from quant_engine.data.fetcher.akshare_adapter import AKShareAdapter
-from quant_engine.data.global_markets import EastmoneyFundDataProvider, YahooUSMarketDataProvider
+from quant_engine.data.global_markets import EastmoneyFundDataProvider, GoldMarketDataProvider, YahooUSMarketDataProvider
 from server.models.database import get_db
 from server.services.fund_nav_registry import register_fund_nav
 from server.services.fund_nav_archive import (
@@ -93,11 +93,13 @@ _overview_cache_lock = threading.Lock()
 _cross_market_providers = {
     "cn-fund": EastmoneyFundDataProvider(),
     "us-equity": YahooUSMarketDataProvider(),
+    "gold": GoldMarketDataProvider(),
 }
 _cross_market_specs = (
     {"id": "a-share", "name": "A 股", "asset_type": "equity", "currency": "CNY", "source": "tencent:qt / AKShare"},
     {"id": "cn-fund", "name": "国内基金", "asset_type": "fund", "currency": "CNY", "source": "eastmoney:fund_nav"},
     {"id": "us-equity", "name": "美股", "asset_type": "equity", "currency": "USD", "source": "yahoo:chart"},
+    {"id": "gold", "name": "黄金", "asset_type": "commodity", "currency": "CNY/USD", "source": "sina:gold + yahoo:chart"},
 )
 
 
@@ -310,7 +312,7 @@ def _cross_market_provider(market: str):
             status_code=422,
             detail={
                 "code": "UNSUPPORTED_MARKET",
-                "message": "market must be cn-fund or us-equity",
+                "message": "market must be cn-fund, us-equity or gold",
                 "market": market,
             },
         )
@@ -404,6 +406,7 @@ def get_cross_market_candles(
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     source_values = sorted({str(item.get("source")) for item in daily_rows if item.get("source")})
+    reference_symbols = sorted({str(item.get("reference_symbol")) for item in daily_rows if item.get("reference_symbol")})
     spec = next(item for item in _cross_market_specs if item["id"] == market)
     return {
         "data": candles,
@@ -422,7 +425,11 @@ def get_cross_market_candles(
             "freshness": "historical",
             "status": "ok" if candles else "empty",
             "research_only": True,
-            "note": "基金净值按平值日线展示；不代表交易所 OHLC。" if market == "cn-fund" else "公开源低频研究数据。",
+            "note": (
+                f"历史源不可用，显示 {', '.join(reference_symbols)} 参考走势；不代表 {symbol.upper()} 的本地报价。"
+                if market == "gold" and reference_symbols
+                else "基金净值按平值日线展示；不代表交易所 OHLC。" if market == "cn-fund" else "公开源低频研究数据。"
+            ),
         },
     }
 

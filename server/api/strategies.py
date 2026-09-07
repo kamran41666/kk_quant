@@ -3,12 +3,13 @@ import json
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional
 
 from server.models.database import get_db
 from server.models.schema import Strategy
 from server.services.paper_market_rules import normalize_market
+from quant_engine.backtest.strategy import STRATEGY_PROTOCOL_V1
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -21,12 +22,26 @@ class StrategyCreate(BaseModel):
     params: dict = Field(default_factory=dict)
     market: str = Field(default="a-share", pattern=r"^(a-share|cn-fund|us-equity)$")
 
+    @field_validator("strategy_class")
+    @classmethod
+    def local_protocol_class(cls, value: str) -> str:
+        if not value.startswith("strategies.") or "." not in value[len("strategies."):]:
+            raise ValueError("strategy_class must use the local strategies.<module>.<ClassName> protocol")
+        return value
+
 class StrategyUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     strategy_class: Optional[str] = None
     params: Optional[dict] = None
     market: Optional[str] = Field(default=None, pattern=r"^(a-share|cn-fund|us-equity)$")
+
+    @field_validator("strategy_class")
+    @classmethod
+    def local_protocol_class(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and (not value.startswith("strategies.") or "." not in value[len("strategies."):]):
+            raise ValueError("strategy_class must use the local strategies.<module>.<ClassName> protocol")
+        return value
 
 class StrategyResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -37,6 +52,7 @@ class StrategyResponse(BaseModel):
     strategy_class: str
     params: dict
     market: str = "a-share"
+    protocol_version: str = STRATEGY_PROTOCOL_V1["version"]
     created_at: str
     updated_at: str
 
@@ -63,10 +79,17 @@ def list_strategies(
             strategy_class=s.strategy_class,
             params=json.loads(s.params) if s.params else {},
             market=normalize_market(getattr(s, "market", "a-share")),
+            protocol_version=STRATEGY_PROTOCOL_V1["version"],
             created_at=s.created_at, updated_at=s.updated_at,
         )
         result.append(d)
     return result
+
+
+@router.get("/protocol")
+def get_strategy_protocol():
+    """Return the versioned strategy contract used by backtest and paper flows."""
+    return STRATEGY_PROTOCOL_V1
 
 
 @router.post("", response_model=StrategyResponse, status_code=201)
@@ -82,6 +105,7 @@ def create_strategy(
         strategy_class=data.strategy_class,
         params=json.dumps(data.params),
         market=normalize_market(data.market),
+        protocol_version=STRATEGY_PROTOCOL_V1["version"],
         created_at=now,
         updated_at=now,
     )
@@ -94,6 +118,7 @@ def create_strategy(
         strategy_class=strategy.strategy_class,
         params=json.loads(strategy.params) if strategy.params else {},
         market=normalize_market(getattr(strategy, "market", "a-share")),
+        protocol_version=STRATEGY_PROTOCOL_V1["version"],
         created_at=strategy.created_at, updated_at=strategy.updated_at,
     )
 
@@ -113,6 +138,7 @@ def get_strategy(
         strategy_class=strategy.strategy_class,
         params=json.loads(strategy.params) if strategy.params else {},
         market=normalize_market(getattr(strategy, "market", "a-share")),
+        protocol_version=STRATEGY_PROTOCOL_V1["version"],
         created_at=strategy.created_at, updated_at=strategy.updated_at,
     )
 

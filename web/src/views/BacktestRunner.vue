@@ -92,6 +92,8 @@
       </div>
       <p v-if="!selectedRun.eligible_for_observation" class="hint">该记录缺少完整证据或尚未完成，不能授权跨市场或自动策略观察。</p>
     </section>
+
+    <PerformanceAnalysisPanel :runs="runs" />
   </div>
 </template>
 
@@ -100,6 +102,7 @@ import { ref, onMounted, computed, watch } from 'vue'
 import { useApi } from '@/composables/useApi'
 import type { Strategy, RunSummary } from '@/types/api'
 import DateRangePicker from '@/components/common/DateRangePicker.vue'
+import PerformanceAnalysisPanel from '@/components/backtest/PerformanceAnalysisPanel.vue'
 
 const { api } = useApi()
 const strategies = ref<Strategy[]>([])

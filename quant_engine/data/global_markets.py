@@ -9,6 +9,7 @@ brokerage execution source.
 from __future__ import annotations
 
 from datetime import date, datetime, time, timezone
+from dataclasses import replace
 import json
 import math
 import re
@@ -69,6 +70,15 @@ def _http_text(url: str, timeout: float) -> str:
         return response.read().decode("utf-8-sig", errors="replace")
 
 
+def _sina_text(url: str, timeout: float) -> str:
+    request = Request(url, headers={
+        "User-Agent": "kk-quant-research/0.3",
+        "Referer": "https://finance.sina.com.cn/",
+    })
+    with urlopen(request, timeout=timeout) as response:
+        return response.read().decode("gbk", errors="replace")
+
+
 class YahooUSMarketDataProvider:
     """Yahoo Finance chart endpoint for US equity research snapshots."""
 
@@ -79,7 +89,7 @@ class YahooUSMarketDataProvider:
     # Yahoo uses a leading caret for broad indices (for example ``^NDX``).
     # Keep the rest of the symbol contract strict so arbitrary URL/path
     # fragments cannot be passed through to the public provider.
-    _symbol_pattern = re.compile(r"^\^?[A-Z][A-Z0-9.\-]{0,11}$")
+    _symbol_pattern = re.compile(r"^\^?[A-Z][A-Z0-9.\-=]{0,11}$")
     _index_names = {
         "^NDX": "纳斯达克100",
         "^DJI": "道琼斯工业指数",
@@ -116,7 +126,7 @@ class YahooUSMarketDataProvider:
 
     def _chart(self, symbol: str, start: Optional[date] = None,
                end: Optional[date] = None, range_: str = "5d") -> dict[str, Any]:
-        encoded = url_quote(symbol, safe=".-")
+        encoded = url_quote(symbol, safe=".-=")
         if start is not None and end is not None:
             period1 = int(datetime.combine(start, time.min, timezone.utc).timestamp())
             period2 = int(datetime.combine(end, time.min, timezone.utc).timestamp()) + 86_400
@@ -239,6 +249,163 @@ class YahooUSMarketDataProvider:
             else:
                 self._health["status"] = "unavailable"
                 self._health["last_error"] = error
+
+    def health(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(self._health)]
+
+
+class GoldMarketDataProvider:
+    """Public gold quote/history adapter for the research-only gold board."""
+
+    supports_historical_dates = False
+    _symbol_pattern = re.compile(r"^(AU0|XAU|GC=F|GLD|IAU)$")
+    _sina_symbols = {"AU0": "nf_AU0", "XAU": "hf_XAU"}
+    _names = {
+        "AU0": "沪金主连",
+        "XAU": "国际现货黄金",
+        "GC=F": "COMEX黄金期货",
+        "GLD": "SPDR黄金ETF",
+        "IAU": "iShares黄金ETF",
+    }
+    _currencies = {"AU0": "CNY/g", "XAU": "USD/oz", "GC=F": "USD/oz", "GLD": "USD", "IAU": "USD"}
+    _asset_types = {"AU0": "commodity", "XAU": "commodity", "GC=F": "commodity", "GLD": "etf", "IAU": "etf"}
+
+    def __init__(self, timeout_seconds: float = 8.0,
+                 text_fetcher: Optional[Callable[[str, float], str]] = None,
+                 yahoo_provider: Optional[YahooUSMarketDataProvider] = None) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self._timeout_seconds = float(timeout_seconds)
+        self._text_fetcher = text_fetcher or _sina_text
+        self._yahoo = yahoo_provider or YahooUSMarketDataProvider(timeout_seconds=timeout_seconds)
+        self._lock = Lock()
+        self._health = {"name": "sina:gold + yahoo:chart", "status": "unknown", "last_attempt_at": None, "last_success_at": None, "last_error": None}
+
+    @property
+    def source_name(self) -> str:
+        return "sina:gold + yahoo:chart"
+
+    @classmethod
+    def normalize_symbol(cls, symbol: str) -> str:
+        normalized = str(symbol).strip().upper()
+        if not cls._symbol_pattern.fullmatch(normalized):
+            raise ValueError(f"invalid gold symbol: {symbol}")
+        return normalized
+
+    @staticmethod
+    def _source_time(date_value: Optional[str], time_value: Optional[str]) -> Optional[datetime]:
+        if not date_value:
+            return None
+        text = date_value.strip()
+        if time_value:
+            raw_time = time_value.strip().replace(":", "")
+            if raw_time.isdigit() and len(raw_time) <= 6:
+                text = f"{text} {raw_time.zfill(6)[:2]}:{raw_time.zfill(6)[2:4]}:{raw_time.zfill(6)[4:]}"
+            else:
+                text = f"{text} {time_value.strip()}"
+        try:
+            return datetime.fromisoformat(text).replace(tzinfo=SHANGHAI_TZ)
+        except ValueError:
+            return None
+
+    def _fetch_sina_quote(self, symbol: str, received: datetime) -> MarketQuote:
+        endpoint = self._sina_symbols[symbol]
+        payload = self._text_fetcher(f"https://hq.sinajs.cn/list={endpoint}", self._timeout_seconds)
+        match = re.search(r'=\"([^\"]*)\"', payload)
+        if not match:
+            raise ValueError("Sina gold response is empty")
+        fields = match.group(1).split(",")
+        if symbol == "AU0":
+            price = _number(fields[2] if len(fields) > 2 else None)
+            previous = _number(fields[10] if len(fields) > 10 else None)
+            volume = _number(fields[13] if len(fields) > 13 else None)
+            source_time = self._source_time(fields[17] if len(fields) > 17 else None, fields[1] if len(fields) > 1 else None)
+        else:
+            price = _number(fields[0] if fields else None)
+            previous = _number(fields[8] if len(fields) > 8 else None)
+            volume = None
+            source_time = self._source_time(fields[12] if len(fields) > 12 else None, fields[6] if len(fields) > 6 else None)
+        if price is None or price <= 0:
+            raise ValueError("Sina gold response has no positive price")
+        change_pct = ((price - previous) / previous * 100.0) if previous and previous > 0 else None
+        return MarketQuote(code=symbol, name=self._names[symbol], price=price, change_pct=change_pct,
+                           volume=volume, amount=None, source="sina:gold", as_of=source_time.isoformat() if source_time else None,
+                           received_at=received.isoformat(), freshness=_freshness(source_time, received), is_fallback=False,
+                           asset_type=self._asset_types[symbol], market="GOLD", currency=self._currencies[symbol])
+
+    def fetch_quotes(self, symbols: Sequence[str]) -> list[MarketQuote]:
+        requested = list(dict.fromkeys(self.normalize_symbol(symbol) for symbol in symbols))
+        if not requested:
+            raise ValueError("at least one gold symbol is required")
+        received = _now()
+        collected: list[MarketQuote] = []
+        attempts: list[dict[str, str]] = []
+        for symbol in requested:
+            try:
+                if symbol in self._sina_symbols:
+                    collected.append(self._fetch_sina_quote(symbol, received))
+                else:
+                    yahoo_quote = self._yahoo.fetch_quotes([symbol])[0]
+                    collected.append(replace(yahoo_quote, name=self._names[symbol], source="yahoo:chart", asset_type=self._asset_types[symbol], market="GOLD", currency=self._currencies[symbol]))
+            except Exception as exc:
+                attempts.append({"source": self.source_name, "symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
+        self._record_health(received, bool(collected), attempts[-1]["error"] if attempts and not collected else None)
+        if not collected:
+            raise MarketDataUnavailableError(attempts or [{"source": self.source_name, "error": "no_symbols"}])
+        return collected
+
+    def fetch_daily(self, symbol: str, start: date, end: date) -> list[dict[str, Any]]:
+        if start > end:
+            raise ValueError("start date must not be after end date")
+        normalized = self.normalize_symbol(symbol)
+        if normalized != "AU0":
+            try:
+                rows = self._yahoo.fetch_daily(normalized, start, end)
+                for row in rows:
+                    row["source"] = "yahoo:chart"
+                return rows
+            except MarketDataUnavailableError:
+                if normalized != "XAU":
+                    raise
+                # Yahoo does not expose XAU spot history consistently. Use the
+                # liquid COMEX contract as an explicitly labelled reference.
+                rows = self._yahoo.fetch_daily("GC=F", start, end)
+                return [dict(row, code="XAU", source="yahoo:chart", reference_symbol="GC=F", reference_only=True) for row in rows]
+        try:
+            raw_payload = self._text_fetcher("https://stock2.finance.sina.com.cn/futures/api/json.php/IndexService.getInnerFuturesDailyKLine?symbol=AU0", self._timeout_seconds)
+            payload = json.loads(raw_payload)
+            if not isinstance(payload, list):
+                raise ValueError("Sina gold history response is invalid")
+            rows: list[dict[str, Any]] = []
+            for item in payload:
+                if not isinstance(item, list) or len(item) < 6 or not isinstance(item[0], str):
+                    continue
+                if not (start.isoformat() <= item[0] <= end.isoformat()):
+                    continue
+                values = [_number(item[index]) for index in range(1, 5)]
+                if any(value is None for value in values):
+                    continue
+                rows.append({"code": "AU0", "date": item[0], "open": values[0], "high": values[1], "low": values[2], "close": values[3], "volume": _number(item[5]), "source": "sina:gold", "adjust": "none"})
+            if not rows:
+                raise ValueError("Sina gold history has no usable rows")
+            return rows
+        except Exception as exc:
+            try:
+                # The domestic continuous contract endpoint can lag for long
+                # periods. Keep the chart usable with a transparent COMEX
+                # reference rather than presenting an empty detail page.
+                rows = self._yahoo.fetch_daily("GC=F", start, end)
+                return [dict(row, code="AU0", source="yahoo:chart", reference_symbol="GC=F", reference_only=True) for row in rows]
+            except MarketDataUnavailableError:
+                raise MarketDataUnavailableError([{"source": "sina:gold", "symbol": normalized, "error": f"{type(exc).__name__}: {exc}"}]) from exc
+
+    def _record_health(self, attempted: datetime, success: bool, error: Optional[str]) -> None:
+        with self._lock:
+            self._health["last_attempt_at"] = attempted.isoformat()
+            self._health["status"] = "ok" if success else "unavailable"
+            self._health["last_success_at"] = attempted.isoformat() if success else self._health.get("last_success_at")
+            self._health["last_error"] = error
 
     def health(self) -> list[dict[str, Any]]:
         with self._lock:

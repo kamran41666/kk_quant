@@ -89,23 +89,19 @@
       </div>
     </section>
 
-    <section class="section card" aria-labelledby="snapshot-heading">
-      <div class="section-header"><div><h2 id="snapshot-heading">行情快照明细</h2><p class="section-description">明确标注来源、接收时间和回退状态。</p></div></div>
-      <div v-if="quotes.length" class="data-table-wrap">
-        <table class="data-table">
-          <thead><tr><th>证券</th><th>最新价</th><th>涨跌幅</th><th>成交量</th><th>成交额</th><th>状态</th><th>来源</th></tr></thead>
-          <tbody><tr v-for="quote in quotes" :key="quote.code" class="snapshot-row" tabindex="0" @click="openDetail(quote.code, quote.name)" @keydown.enter="openDetail(quote.code, quote.name)">
-            <td><strong>{{ quote.name }}</strong> <code>{{ quote.code }}</code></td>
-            <td class="numeric">{{ quote.price?.toFixed(2) ?? '—' }}</td>
-            <td class="numeric" :class="directionClass(quote.change_pct)">{{ formatPercentPoints(quote.change_pct) }} {{ directionLabel(quote.change_pct) }}</td>
-            <td class="numeric">{{ compactNumber(quote.volume) }}</td>
-            <td class="numeric">{{ compactNumber(quote.amount) }}</td>
-            <td><span class="freshness" :class="{ stale: isStale(quote) }">{{ freshnessLabel(quote.freshness) }}</span></td>
-            <td>{{ quote.source }}<small v-if="quote.is_fallback" class="fallback">回退源</small></td>
-          </tr></tbody>
-        </table>
+    <section class="section card watch-panel" aria-labelledby="watch-heading">
+      <div class="section-header"><div><h2 id="watch-heading">自选快速追踪</h2><p class="section-description">实时查看自选标的，点击卡片进入详情。</p></div><span v-if="quotesMeta" class="overview-source">{{ quotes.length }} 个 · {{ quotesMeta.sources?.join('、') || '来源未知' }}</span></div>
+      <div v-if="quotesLoading" class="state-panel compact" aria-live="polite"><strong>正在读取自选行情</strong></div>
+      <div v-else-if="quotesError" class="state-panel compact"><strong>自选行情暂不可用</strong><p>{{ quotesError }}</p><button class="btn-secondary" type="button" @click="loadQuotes">重试</button></div>
+      <div v-else-if="quotes.length" class="watch-grid">
+        <button v-for="quote in quotes" :key="quote.code" type="button" class="watch-card" @click="openDetail(quote.code, quote.name)">
+          <div class="watch-card-head"><span><strong>{{ quote.name }}</strong><code>{{ quote.code }}</code></span><span class="freshness" :class="{ stale: isStale(quote) }">{{ freshnessLabel(quote.freshness) }}</span></div>
+          <div class="watch-card-price"><strong class="numeric">{{ quote.price?.toFixed(2) ?? '—' }}</strong><span class="numeric" :class="directionClass(quote.change_pct)">{{ formatPercentPoints(quote.change_pct) }} {{ directionLabel(quote.change_pct) }}</span></div>
+          <div class="watch-card-meta"><span>成交额 <b class="numeric">{{ compactNumber(quote.amount) }}</b></span><span>成交量 <b class="numeric">{{ compactNumber(quote.volume) }}</b></span></div>
+          <span class="watch-card-action">查看详情 →</span>
+        </button>
       </div>
-      <div v-else class="state-panel"><strong>无快照数据</strong><p>刷新后仍无数据，请先检查数据健康页。</p></div>
+      <div v-else class="state-panel compact"><strong>暂无自选行情</strong><p>刷新后仍无数据，请检查数据源。</p></div>
     </section>
     </template>
 
@@ -114,23 +110,30 @@
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 const CrossMarketPanel = defineAsyncComponent(() => import('@/components/market/CrossMarketPanel.vue'))
 import { useApi } from '@/composables/useApi'
 import type { IndexesResponse, MarketOverviewResponse, MarketQuote, QuotesResponse, UniverseResponse, UniverseSecurity } from '@/types/api'
 import { apiErrorMessage, compactNumber, directionClass, directionLabel, formatPercentPoints, freshnessLabel } from '@/utils/market'
 
 const watchCodes = ['000001.SZ', '600519.SH', '600036.SH']
-type MarketId = 'a-share' | 'cn-fund' | 'us-equity'
+type MarketId = 'a-share' | 'cn-fund' | 'us-equity' | 'gold'
 const marketOptions: Array<{ id: MarketId; label: string; currency: string }> = [
   { id: 'a-share', label: 'A 股', currency: 'CNY' },
   { id: 'cn-fund', label: '国内基金', currency: 'CNY' },
   { id: 'us-equity', label: '美股', currency: 'USD' },
+  { id: 'gold', label: '黄金', currency: 'CNY/USD' },
 ]
-const activeMarket = ref<MarketId>('a-share')
-const { api } = useApi()
+const route = useRoute()
 const router = useRouter()
+const validMarkets: MarketId[] = ['a-share', 'cn-fund', 'us-equity', 'gold']
+function marketFromQuery(value: unknown): MarketId {
+  const normalized = String(value || '')
+  return validMarkets.includes(normalized as MarketId) ? normalized as MarketId : 'a-share'
+}
+const activeMarket = ref<MarketId>(marketFromQuery(route.query.market))
+const { api } = useApi()
 const quotes = ref<MarketQuote[]>([])
 const quotesMeta = ref<QuotesResponse['meta'] | null>(null)
 const indexes = ref<MarketQuote[]>([])
@@ -202,8 +205,14 @@ async function refreshMarket() {
 
 function changeMarket(market: MarketId) {
   activeMarket.value = market
+  void router.replace({ name: 'Market', query: market === 'a-share' ? {} : { market } })
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
+
+watch(() => route.query.market, (value) => {
+  const next = marketFromQuery(value)
+  if (next !== activeMarket.value) activeMarket.value = next
+})
 
 function openDetail(code: string, name?: string) {
   void router.push({ name: 'MarketDetail', query: { market: activeMarket.value, symbol: code, ...(name ? { name } : {}) } })
@@ -327,8 +336,19 @@ onBeforeUnmount(() => {
 .market-switcher button small { color: var(--text-tertiary); font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; font-weight: 500; }
 .market-switcher button:hover { color: var(--text-primary); background: var(--bg-muted); }
 .market-switcher button.active { border-color: rgba(77,141,255,.35); background: rgba(77,141,255,.14); color: #a9c5ff; }
-.snapshot-row { cursor: pointer; }
-.snapshot-row:hover, .snapshot-row:focus-visible { background: rgba(77,141,255,.08); outline: none; }
+.watch-panel { min-width: 0; }
+.watch-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.watch-card { display: grid; gap: 10px; min-width: 0; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-muted); color: var(--text-primary); padding: 12px; text-align: left; cursor: pointer; transition: border-color .15s ease, background .15s ease, transform .15s ease; }
+.watch-card:hover, .watch-card:focus-visible { border-color: rgba(77,141,255,.45); background: var(--bg-secondary); outline: none; transform: translateY(-1px); }
+.watch-card-head, .watch-card-price, .watch-card-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.watch-card-head > span:first-child { display: grid; gap: 3px; min-width: 0; }
+.watch-card-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.watch-card-head code { color: var(--text-tertiary); font-size: 9px; }
+.watch-card-price strong { font-size: 22px; letter-spacing: -.03em; }
+.watch-card-price > span { font-size: 11px; }
+.watch-card-meta { padding-top: 8px; border-top: 1px solid var(--border-subtle); color: var(--text-tertiary); font-size: 9px; }
+.watch-card-meta b { color: var(--text-secondary); font-weight: 550; }
+.watch-card-action { color: var(--accent-hover); font-size: 10px; }
 .market-primary-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); gap: 12px; align-items: start; }
 .overview-panel, .universe-panel { margin-bottom: 12px; }
 .ranking-panel { margin-bottom: 12px; }
@@ -387,6 +407,7 @@ onBeforeUnmount(() => {
 @media (max-width: 900px) {
   .market-primary-grid { grid-template-columns: 1fr; }
   .index-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .watch-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .universe-item { grid-template-columns: minmax(140px, 1.2fr) minmax(120px, 1fr) minmax(82px, .6fr); }
 }
 @media (max-width: 620px) {
@@ -395,6 +416,7 @@ onBeforeUnmount(() => {
   .index-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .breadth-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ranking-grid { grid-template-columns: 1fr; }
+  .watch-grid { grid-template-columns: 1fr; }
   .universe-toolbar { flex-wrap: wrap; }
   .search-box { flex-basis: 100%; }
   .universe-toolbar select { max-width: none; flex: 1; }

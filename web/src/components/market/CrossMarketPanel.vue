@@ -1,5 +1,5 @@
 <template>
-  <section class="cross-market" aria-labelledby="cross-market-title">
+  <section class="cross-market" :class="{ 'cross-market--us': marketId === 'us-equity' }" aria-labelledby="cross-market-title">
     <div class="cross-market-head">
       <div>
         <p class="eyebrow">研究行情 · {{ marketLabel }}</p>
@@ -19,8 +19,8 @@
       </div>
     </section>
 
-    <section v-if="marketId === 'us-equity'" class="card global-index-card" aria-labelledby="global-index-title">
-      <div class="section-header compact"><div><h3 id="global-index-title">主要指数</h3><p>点击指数查看详情。</p></div><span class="source-note">{{ indexMeta?.sources?.join('、') || sourceLabel }}</span></div>
+    <section v-if="marketId === 'us-equity' || marketId === 'gold'" class="card global-index-card" aria-labelledby="global-index-title">
+        <div class="section-header compact"><div><h3 id="global-index-title">{{ marketId === 'gold' ? '金价基准' : '主要指数' }}</h3><p>点击标的查看详情。</p></div><span class="source-note">{{ indexMeta?.sources?.join('、') || sourceLabel }}</span></div>
       <div v-if="indexLoading" class="state-panel compact" aria-live="polite"><strong>正在读取指数</strong><p>连接 Yahoo 公开行情源。</p></div>
       <div v-else-if="indexError" class="state-panel compact"><strong>指数暂不可用</strong><p>{{ indexError }}</p><button class="btn-secondary" type="button" @click="loadIndexQuotes">重试</button></div>
       <div v-else class="global-index-grid">
@@ -57,7 +57,7 @@
     <section class="card global-watch-card" aria-labelledby="global-watch-title">
       <div class="section-header compact"><div><h3 id="global-watch-title">关注列表</h3><p>点击任意标的立即打开详情。</p></div><span class="source-note">{{ sourceLabel }}</span></div>
       <form class="symbol-form" @submit.prevent="addSymbol">
-        <label class="global-symbol-input"><span class="sr-only">添加标的</span><input v-model="symbolInput" :placeholder="marketId === 'us-equity' ? '输入美股代码，如 AAPL' : '输入基金代码，如 110022'" autocomplete="off" /></label>
+        <label class="global-symbol-input"><span class="sr-only">添加标的</span><input v-model="symbolInput" :placeholder="marketId === 'us-equity' ? '输入美股代码，如 AAPL' : marketId === 'gold' ? '输入黄金代码，如 GLD' : '输入基金代码，如 110022'" autocomplete="off" /></label>
         <button class="btn-primary" type="submit" :disabled="loading || !symbolInput.trim()">添加并查询</button>
       </form>
       <p v-if="error" class="global-error" role="alert">{{ error }}</p>
@@ -102,7 +102,7 @@ import { useApi } from '@/composables/useApi'
 import type { CandleInterval, CandlePoint, CandleResponse, MarketQuote, QuotesResponse } from '@/types/api'
 import { apiErrorMessage, chronological, directionClass, formatPercentPoints, freshnessLabel } from '@/utils/market'
 
-type MarketId = 'cn-fund' | 'us-equity'
+type MarketId = 'cn-fund' | 'us-equity' | 'gold'
 const props = defineProps<{ marketId: MarketId }>()
 const { api } = useApi()
 const router = useRouter()
@@ -118,6 +118,13 @@ const catalogs: Record<MarketId, Array<{ code: string; name: string }>> = {
     { code: 'NVDA', name: 'NVIDIA' },
     { code: 'SPY', name: 'SPDR S&P 500 ETF' },
   ],
+  gold: [
+    { code: 'AU0', name: '沪金主连' },
+    { code: 'XAU', name: '国际现货黄金' },
+    { code: 'GC=F', name: 'COMEX黄金期货' },
+    { code: 'GLD', name: 'SPDR黄金ETF' },
+    { code: 'IAU', name: 'iShares黄金ETF' },
+  ],
 }
 const usIndexCatalog = [
   { code: '^NDX', name: '纳斯达克100' },
@@ -127,7 +134,9 @@ const usIndexCatalog = [
 const intervalOptions: Array<{ value: CandleInterval; label: string }> = [
   { value: '1d', label: '日 K' }, { value: '1w', label: '周 K' }, { value: '1mo', label: '月 K' },
 ]
-const initialCatalogItem = catalogs[props.marketId][0]
+const initialCatalogItem = props.marketId === 'gold'
+  ? catalogs.gold.find(item => item.code === 'GC=F') || catalogs.gold[0]
+  : catalogs[props.marketId][0]
 const initialCode = initialCatalogItem.code
 const initialName = initialCatalogItem.name
 const quotes = ref<MarketQuote[]>([])
@@ -152,10 +161,10 @@ let indexRequest = 0
 let candleRequest = 0
 let disposed = false
 
-const marketLabel = computed(() => props.marketId === 'us-equity' ? '美股' : '国内基金')
-const currency = computed(() => props.marketId === 'us-equity' ? 'USD' : 'CNY')
-const sourceLabel = computed(() => props.marketId === 'us-equity' ? 'yahoo:chart' : 'eastmoney:fund_nav')
-const selectedQuote = computed(() => quotes.value.find(item => item.code === selectedSymbol.value) ?? { code: selectedSymbol.value, name: selectedName.value, price: null, change_pct: null, volume: null, amount: null, source: sourceLabel.value, as_of: null, received_at: '', freshness: 'unknown', is_fallback: false, currency: currency.value, market: props.marketId, asset_type: props.marketId === 'us-equity' ? 'equity' : 'fund' } as MarketQuote)
+const marketLabel = computed(() => props.marketId === 'us-equity' ? '美股' : props.marketId === 'gold' ? '黄金' : '国内基金')
+const currency = computed(() => props.marketId === 'us-equity' ? 'USD' : props.marketId === 'gold' ? 'CNY/USD' : 'CNY')
+const sourceLabel = computed(() => props.marketId === 'us-equity' ? 'yahoo:chart' : props.marketId === 'gold' ? 'sina:gold + yahoo:chart' : 'eastmoney:fund_nav')
+const selectedQuote = computed(() => quotes.value.find(item => item.code === selectedSymbol.value) ?? { code: selectedSymbol.value, name: selectedName.value, price: null, change_pct: null, volume: null, amount: null, source: sourceLabel.value, as_of: null, received_at: '', freshness: 'unknown', is_fallback: false, currency: currency.value, market: props.marketId, asset_type: props.marketId === 'us-equity' ? 'equity' : props.marketId === 'gold' ? 'commodity' : 'fund' } as MarketQuote)
 const intervalLabel = computed(() => intervalOptions.find(item => item.value === interval.value)?.label.replace(' K', '') ?? '日')
 const activeRankings = computed(() => [...quotes.value].sort((left, right) => (right.amount ?? right.volume ?? right.change_pct ?? -Infinity) - (left.amount ?? left.volume ?? left.change_pct ?? -Infinity)).slice(0, 5))
 const gainRankings = computed(() => [...quotes.value].filter(item => item.change_pct != null).sort((left, right) => (right.change_pct ?? -Infinity) - (left.change_pct ?? -Infinity)).slice(0, 5))
@@ -168,7 +177,7 @@ function formatPrice(value: number | null | undefined): string {
 }
 
 function rankingMetricValue(quote: MarketQuote): string {
-  const value = props.marketId === 'us-equity' ? quote.volume : quote.amount ?? quote.volume
+  const value = props.marketId === 'us-equity' || props.marketId === 'gold' ? quote.volume : quote.amount ?? quote.volume
   if (value == null || !Number.isFinite(value)) return formatPercentPoints(quote.change_pct)
   return value >= 1_000_000_000 ? `${(value / 1_000_000_000).toFixed(2)}B` : value >= 1_000_000 ? `${(value / 1_000_000).toFixed(2)}M` : value.toLocaleString('en-US', { maximumFractionDigits: 0 })
 }
@@ -195,7 +204,7 @@ async function loadQuotes() {
 }
 
 async function loadIndexQuotes() {
-  if (props.marketId !== 'us-equity') {
+  if (props.marketId !== 'us-equity' && props.marketId !== 'gold') {
     indexQuotes.value = []
     indexMeta.value = null
     indexError.value = ''
@@ -205,7 +214,9 @@ async function loadIndexQuotes() {
   indexLoading.value = true
   indexError.value = ''
   try {
-    const { data } = await api.get<QuotesResponse>('/market/markets/us-equity/quotes', { params: { symbols: usIndexCatalog.map(item => item.code).join(',') } })
+    const indexSymbols = props.marketId === 'gold' ? catalogs.gold.slice(0, 3).map(item => item.code) : usIndexCatalog.map(item => item.code)
+    const indexMarket = props.marketId === 'gold' ? 'gold' : 'us-equity'
+    const { data } = await api.get<QuotesResponse>(`/market/markets/${indexMarket}/quotes`, { params: { symbols: indexSymbols.join(',') } })
     if (disposed || request !== indexRequest) return
     indexQuotes.value = data.data
     indexMeta.value = data.meta
@@ -213,7 +224,7 @@ async function loadIndexQuotes() {
     if (disposed || request !== indexRequest) return
     indexQuotes.value = []
     indexMeta.value = null
-    indexError.value = apiErrorMessage(err, '美股指数行情暂不可用。')
+    indexError.value = apiErrorMessage(err, props.marketId === 'gold' ? '金价基准暂不可用。' : '美股指数行情暂不可用。')
   } finally {
     if (!disposed && request === indexRequest) indexLoading.value = false
   }
@@ -289,6 +300,13 @@ onBeforeUnmount(() => { disposed = true; quoteRequest += 1; indexRequest += 1; c
 
 <style scoped>
 .cross-market { display: grid; gap: 12px; }
+.cross-market--us { grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr); align-items: start; }
+.cross-market--us .cross-market-head,
+.cross-market--us .global-watch-card,
+.cross-market--us .global-detail-card { grid-column: 1 / -1; }
+.cross-market--us .cross-overview-card,
+.cross-market--us .global-index-card { grid-column: 1; }
+.cross-market--us .cross-ranking-card { grid-column: 2; grid-row: 2 / span 2; }
 .cross-market-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; }
 .eyebrow { color: var(--accent-hover); font-size: 10px; font-weight: 680; letter-spacing: .08em; text-transform: uppercase; }
 .cross-market-head h2 { margin-top: 3px; font-size: 19px; letter-spacing: -.02em; }
@@ -354,6 +372,6 @@ onBeforeUnmount(() => { disposed = true; quoteRequest += 1; indexRequest += 1; c
 .global-chart { height: 500px; }
 .global-note { margin-top: 8px; color: var(--warning); }
 .global-footnote { margin-top: 7px; line-height: 1.5; }
-@media (max-width: 900px) { .global-watch-grid, .global-index-grid, .cross-ranking-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 900px) { .cross-market--us { grid-template-columns: 1fr; } .cross-market--us .cross-market-head, .cross-market--us .cross-overview-card, .cross-market--us .global-index-card, .cross-market--us .cross-ranking-card, .cross-market--us .global-watch-card, .cross-market--us .global-detail-card { grid-column: 1; grid-row: auto; } .global-watch-grid, .global-index-grid, .cross-ranking-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 620px) { .cross-market-head, .global-detail-head, .global-chart-toolbar { align-items: stretch; flex-direction: column; } .cross-market-head .btn-secondary { width: 100%; } .global-detail-price { justify-items: start; } .global-watch-grid, .global-index-grid, .cross-ranking-grid { grid-template-columns: 1fr; } .cross-overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } .global-chart { height: 430px; } }
 </style>
