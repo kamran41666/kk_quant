@@ -13,6 +13,13 @@
       <div class="form-grid">
         <label>名称 <input v-model="form.name" placeholder="均线动量策略" /></label>
         <label>策略类 <input v-model="form.strategy_class" placeholder="my_strategies.Momentum" /></label>
+        <label>适用市场
+          <select v-model="form.market">
+            <option value="a-share">A 股</option>
+            <option value="cn-fund">国内基金</option>
+            <option value="us-equity">美股（策略回测暂未开放）</option>
+          </select>
+        </label>
         <label>描述 <textarea v-model="form.description" rows="2" placeholder="策略描述..."></textarea></label>
         <label>参数 (JSON) <textarea v-model="form.paramsStr" rows="3" placeholder='{"top_n": 50, "lookback": 60}'></textarea></label>
       </div>
@@ -23,11 +30,12 @@
     <!-- List -->
     <table class="data-table" v-if="strategies.length > 0">
       <thead>
-        <tr><th>名称</th><th>策略类</th><th>参数</th><th>更新时间</th><th>操作</th></tr>
+        <tr><th>名称</th><th>市场</th><th>策略类</th><th>参数</th><th>更新时间</th><th>操作</th></tr>
       </thead>
       <tbody>
         <tr v-for="s in strategies" :key="s.id">
           <td>{{ s.name }}</td>
+          <td>{{ marketLabel(s.market) }}</td>
           <td><code>{{ s.strategy_class }}</code></td>
           <td>{{ JSON.stringify(s.params) }}</td>
           <td>{{ s.updated_at?.slice(0, 10) }}</td>
@@ -55,6 +63,7 @@ const form = ref({
   name: '',
   strategy_class: '',
   description: '',
+  market: 'a-share' as 'a-share' | 'cn-fund' | 'us-equity',
   paramsStr: '{}',
 })
 
@@ -75,10 +84,11 @@ async function createStrategy() {
       name: form.value.name,
       strategy_class: form.value.strategy_class,
       description: form.value.description,
+      market: form.value.market,
       params,
     })
     showForm.value = false
-    form.value = { name: '', strategy_class: '', description: '', paramsStr: '{}' }
+    form.value = { name: '', strategy_class: '', description: '', market: 'a-share', paramsStr: '{}' }
     await loadStrategies()
   } catch (e: any) {
     error.value = e.response?.data?.detail || e.message
@@ -95,6 +105,10 @@ async function deleteStrategy(id: string) {
 }
 
 onMounted(loadStrategies)
+
+function marketLabel(market?: string) {
+  return ({ 'a-share': 'A 股', 'cn-fund': '国内基金', 'us-equity': '美股' } as Record<string, string>)[market || 'a-share'] || 'A 股'
+}
 </script>
 
 <style scoped>

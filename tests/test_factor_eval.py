@@ -11,6 +11,16 @@ from quant_engine.factor.evaluation import (
     factor_correlation_matrix,
     fama_macbeth,
 )
+from quant_engine.factor.builtin.value import LogMarketCap, LogMarketCapProxy
+
+
+def test_market_cap_factor_requires_real_field_and_proxy_is_explicit():
+    with pytest.raises(ValueError, match="point-in-time market_cap"):
+        LogMarketCap().compute(pd.DataFrame({"close": [10.0], "volume": [100.0]}))
+    values = LogMarketCapProxy().compute(pd.DataFrame({"amount": [1000.0], "turnover_rate": [10.0]}))
+    assert values.iloc[0] == pytest.approx(np.log(10_000.0))
+    assert LogMarketCap.is_proxy is False
+    assert LogMarketCapProxy.is_proxy is True
 
 
 # ============================================================================

@@ -131,6 +131,14 @@ class TestMetrics:
         plr = profit_loss_ratio(pd.DataFrame())
         assert plr == 0.0
 
+    def test_fund_nav_trade_schema_is_explicitly_unavailable(self):
+        fund_trades = pd.DataFrame({
+            "date": ["2025-01-02"], "code": ["110022"], "side": ["sell"],
+            "units": [100.0], "price": [3.5], "amount": [350.0], "fee": [0.0],
+        })
+        assert win_rate(fund_trades) is None
+        assert profit_loss_ratio(fund_trades) is None
+
 
 class TestMaxDrawdownEdgeCases:
     """针对 max_drawdown 的边界场景测试"""

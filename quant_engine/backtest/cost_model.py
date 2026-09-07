@@ -6,7 +6,44 @@ A股实际费率:
   - 滑点: 模拟市场冲击成本, 默认千1
 """
 import warnings
+import math
 from quant_engine.backtest.types import Trade, OrderSide
+
+
+# These are explicitly named research assumptions, not broker quotations.
+# Keeping the registry in code makes the selected scenario reproducible and
+# prevents a UI from silently inventing a fee schedule.
+COST_SCENARIOS = {
+    "paper_baseline_v1": {
+        "label": "纸面基线（敏感性假设）",
+        "commission_rate": 0.00025,
+        "stamp_duty_rate": 0.001,
+        "min_commission": 5.0,
+        "slippage_rate": 0.001,
+    },
+    "paper_low_impact_v1": {
+        "label": "纸面低冲击（敏感性假设）",
+        "commission_rate": 0.00025,
+        "stamp_duty_rate": 0.001,
+        "min_commission": 5.0,
+        "slippage_rate": 0.0005,
+    },
+    "paper_high_impact_v1": {
+        "label": "纸面高冲击（敏感性假设）",
+        "commission_rate": 0.00025,
+        "stamp_duty_rate": 0.001,
+        "min_commission": 5.0,
+        "slippage_rate": 0.0025,
+    },
+}
+
+
+def cost_scenario_catalog() -> list[dict]:
+    """Return a JSON-safe copy of the registered research scenarios."""
+    return [
+        {"id": scenario_id, **dict(config)}
+        for scenario_id, config in COST_SCENARIOS.items()
+    ]
 
 
 class CostModel:
@@ -18,11 +55,46 @@ class CostModel:
         stamp_duty_rate: float = 0.001,
         min_commission: float = 5.0,
         slippage_rate: float = 0.001,
+        *,
+        scenario: str = "paper_baseline_v1",
     ):
-        self.commission_rate = commission_rate
-        self.stamp_duty_rate = stamp_duty_rate
-        self.min_commission = min_commission
-        self.slippage_rate = slippage_rate
+        if scenario not in COST_SCENARIOS:
+            raise ValueError(f"unknown cost scenario: {scenario}")
+        values = (commission_rate, stamp_duty_rate, min_commission, slippage_rate)
+        if any(not isinstance(value, (int, float)) or not math.isfinite(float(value)) or float(value) < 0 for value in values):
+            raise ValueError("cost model rates must be finite and non-negative")
+        self.scenario = scenario
+        self.scenario_label = str(COST_SCENARIOS[scenario]["label"])
+        self.commission_rate = float(commission_rate)
+        self.stamp_duty_rate = float(stamp_duty_rate)
+        self.min_commission = float(min_commission)
+        self.slippage_rate = float(slippage_rate)
+
+    @classmethod
+    def from_scenario(cls, scenario: str = "paper_baseline_v1") -> "CostModel":
+        """Create a model from the immutable registered scenario catalog."""
+        config = COST_SCENARIOS.get(scenario)
+        if config is None:
+            raise ValueError(f"unknown cost scenario: {scenario}")
+        return cls(
+            commission_rate=config["commission_rate"],
+            stamp_duty_rate=config["stamp_duty_rate"],
+            min_commission=config["min_commission"],
+            slippage_rate=config["slippage_rate"],
+            scenario=scenario,
+        )
+
+    def as_manifest(self) -> dict:
+        """Return the exact assumptions used by a run."""
+        return {
+            "scenario": self.scenario,
+            "label": self.scenario_label,
+            "commission_rate": self.commission_rate,
+            "stamp_duty_rate": self.stamp_duty_rate,
+            "min_commission": self.min_commission,
+            "slippage_rate": self.slippage_rate,
+            "research_only": True,
+        }
 
     def calc_cost(self, trade: Trade) -> tuple[float, float, float]:
         """计算交易成本

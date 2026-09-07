@@ -93,6 +93,88 @@ class TestBacktestEngine:
         assert (result_path / "daily_portfolio.parquet").exists()
         assert (result_path / "summary.json").exists()
 
+    def test_engine_fails_closed_when_calendar_is_unverified(self, monkeypatch):
+        class UnverifiedCalendar:
+            def __init__(self, start_year, end_year):
+                pass
+
+            def ensure_coverage(self, start, end):
+                return {
+                    "calendar_version": "trading-calendar-v1",
+                    "source": "fallback:business-days",
+                    "content_hash": "c" * 64,
+                    "coverage_start": start.isoformat(),
+                    "coverage_end": end.isoformat(),
+                    "verified": False,
+                    "complete": False,
+                }
+
+        monkeypatch.setattr("quant_engine.backtest.engine.TradingCalendar", UnverifiedCalendar)
+        with pytest.raises(ValueError, match="trading_calendar_coverage_insufficient"):
+            BacktestEngine(SimpleTestStrategy, stock_list=["000001.SZ"]).run(
+                start=date(2024, 1, 2), end=date(2024, 1, 3),
+                output_dir="backtest_result/test_unverified_calendar",
+            )
+
+    def test_engine_fails_closed_when_daily_coverage_is_incomplete(self, mock_data_api):
+        mock_data_api.daily_coverage.return_value = {
+            "coverage_version": "daily-coverage-v1",
+            "market": "a-share",
+            "source": "local:parquet",
+            "start_date": "2024-01-02",
+            "end_date": "2024-01-03",
+            "requested_codes": ["000001.SZ"],
+            "expected_trading_days": 2,
+            "complete": False,
+            "items": [{
+                "code": "000001.SZ", "status": "partial",
+                "missing_count": 1, "missing_dates": ["2024-01-03"],
+            }],
+            "coverage_hash": "d" * 64,
+        }
+        with pytest.raises(ValueError, match="daily_data_coverage_insufficient"):
+            BacktestEngine(SimpleTestStrategy, stock_list=["000001.SZ"]).run(
+                start=date(2024, 1, 2), end=date(2024, 1, 3),
+                output_dir="backtest_result/test_incomplete_daily_coverage",
+            )
+
+    @staticmethod
+    def _complete_daily_coverage(calendar_hash="c" * 64):
+        return {
+            "coverage_version": "daily-coverage-v1",
+            "market": "a-share",
+            "source": "local:parquet",
+            "start_date": "2024-01-02",
+            "end_date": "2024-01-03",
+            "requested_codes": ["000001.SZ"],
+            "expected_trading_days": 2,
+            "complete": True,
+            "calendar_content_hash": calendar_hash,
+            "items": [{
+                "code": "000001.SZ", "status": "complete", "content_hash": "d" * 64,
+                "missing_count": 0, "missing_dates": [],
+            }],
+            "dataset_hash": "e" * 64,
+            "coverage_hash": "f" * 64,
+        }
+
+    def test_engine_fails_closed_when_daily_read_fails_after_complete_coverage(self, mock_data_api):
+        mock_data_api.daily_coverage.return_value = self._complete_daily_coverage()
+        mock_data_api.daily.side_effect = RuntimeError("parquet read failed")
+        with pytest.raises(ValueError, match="daily_data_load_failed"):
+            BacktestEngine(SimpleTestStrategy, stock_list=["000001.SZ"]).run(
+                start=date(2024, 1, 2), end=date(2024, 1, 3),
+                output_dir="backtest_result/test_daily_read_failure",
+            )
+
+    def test_engine_blocks_when_coverage_uses_a_different_calendar(self, mock_data_api):
+        mock_data_api.daily_coverage.return_value = self._complete_daily_coverage("a" * 64)
+        with pytest.raises(ValueError, match="daily_data_calendar_mismatch"):
+            BacktestEngine(SimpleTestStrategy, stock_list=["000001.SZ"]).run(
+                start=date(2024, 1, 2), end=date(2024, 1, 3),
+                output_dir="backtest_result/test_daily_calendar_mismatch",
+            )
+
     def test_engine_with_weekly_rebalance(self, mock_data_api):
         """周频调仓也应该能运行"""
         engine = BacktestEngine(
@@ -130,8 +212,29 @@ class TestBacktestEngine:
 
         assert "start_date" in summary
         assert "end_date" in summary
+        assert summary["data_available_start"] == "2024-01-02"
+        assert summary["data_available_end"] == "2024-01-31"
+        assert summary["execution_model"] == "next_trading_day_open-v1"
         assert "final_value" in summary
         assert "total_return" in summary
+
+    def test_summary_records_registered_cost_scenario(self, mock_data_api):
+        engine = BacktestEngine(
+            SimpleTestStrategy,
+            stock_list=['000001.SZ'],
+            cost_scenario="paper_high_impact_v1",
+        )
+        result_dir = engine.run(
+            start=date(2024, 1, 2), end=date(2024, 1, 12),
+            initial_capital=100_000.0,
+            rebalance_frequency="daily",
+            output_dir="backtest_result/test_cost_scenario",
+        )
+        with open(Path(result_dir) / "summary.json") as f:
+            summary = json.load(f)
+        assert summary["cost_scenario"] == "paper_high_impact_v1"
+        assert summary["cost_model"]["research_only"] is True
+        assert summary["cost_model"]["slippage_rate"] == pytest.approx(0.0025)
 
     def test_daily_rebalance(self, mock_data_api):
         """日频调仓也能运行"""
@@ -152,21 +255,19 @@ class TestBacktestEngine:
         assert result_path.exists()
         assert (result_path / "daily_portfolio.parquet").exists()
 
-    def test_default_stock_pool_fallback(self, mock_data_api):
-        """没有 stock_list kwargs 时，应使用兜底股票池"""
+    def test_default_stock_pool_requires_point_in_time_snapshot(self, mock_data_api):
+        """缺少历史成分时必须停止，不能静默使用生存者股票池"""
         # Make DataAPI index_components return empty list
         mock_data_api.index_components.return_value = []
 
         engine = BacktestEngine(SimpleTestStrategy)
-        result_dir = engine.run(
-            start=date(2024, 1, 2),
-            end=date(2024, 1, 12),
-            initial_capital=1_000_000.0,
-            output_dir='backtest_result/test_fallback_pool',
-        )
-
-        result_path = Path(result_dir)
-        assert result_path.exists()
+        with pytest.raises(RuntimeError, match="Point-in-time stock pool unavailable"):
+            engine.run(
+                start=date(2024, 1, 2),
+                end=date(2024, 1, 12),
+                initial_capital=1_000_000.0,
+                output_dir='backtest_result/test_fallback_pool',
+            )
 
     def test_signals_to_orders_buy_new_position(self, mock_data_api):
         """信号转订单: 新买入一只股票"""

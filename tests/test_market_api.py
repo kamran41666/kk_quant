@@ -1,5 +1,6 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 import sqlite3
+import time
 
 from fastapi import HTTPException
 import pandas as pd
@@ -117,6 +118,72 @@ def test_quotes_rejects_requests_over_public_limit():
     assert "At most 500" in str(raised.value.detail)
 
 
+def test_daily_coverage_endpoint_returns_machine_readable_report(monkeypatch):
+    class StubDataAPI:
+        def daily_coverage(self, codes, start, end, fields):
+            return {
+                "coverage_version": "daily-coverage-v1",
+                "market": "a-share",
+                "source": "local:parquet",
+                "start_date": start.isoformat(),
+                "end_date": end.isoformat(),
+                "expected_trading_days": 2,
+                "requested_codes": codes,
+                "items": [{"code": codes[0], "status": "complete"}],
+                "complete": True,
+                "coverage_hash": "a" * 64,
+            }
+
+    monkeypatch.setattr(market, "DataAPI", lambda: StubDataAPI())
+    result = market.get_daily_coverage(
+        codes="000001.SZ", start_date="2024-01-02", end_date="2024-01-03"
+    )
+    assert result["complete"] is True
+    assert result["meta"] == {"research_only": True, "calendar": "TradingCalendar", "adjustment": "none"}
+
+
+def test_daily_coverage_endpoint_rejects_invalid_codes():
+    with pytest.raises(HTTPException) as raised:
+        market.get_daily_coverage(codes="000001", start_date="2024-01-02", end_date="2024-01-03")
+    assert raised.value.status_code == 422
+
+
+def test_calendar_coverage_endpoint_returns_strict_provenance(monkeypatch):
+    class StubCalendar:
+        def __init__(self, start_year, end_year):
+            assert (start_year, end_year) == (2024, 2024)
+
+        def ensure_coverage(self, start, end):
+            return {
+                "calendar_version": "trading-calendar-v1",
+                "source": "akshare:test",
+                "content_hash": "b" * 64,
+                "coverage_start": "2024-01-02",
+                "coverage_end": "2024-12-31",
+                "requested_start": start.isoformat(),
+                "requested_end": end.isoformat(),
+                "trading_days": [start, end],
+                "verified": True,
+                "complete": True,
+            }
+
+    monkeypatch.setattr(market, "TradingCalendar", StubCalendar)
+    result = market.get_calendar_coverage(
+        start_date="2024-01-02", end_date="2024-01-03", refresh=True
+    )
+    assert result["complete"] is True
+    assert result["content_hash"] == "b" * 64
+    assert result["meta"]["fail_closed"] is True
+
+
+def test_calendar_coverage_endpoint_rejects_reversed_dates():
+    with pytest.raises(HTTPException) as raised:
+        market.get_calendar_coverage(
+            start_date="2024-01-03", end_date="2024-01-02", refresh=False
+        )
+    assert raised.value.status_code == 422
+
+
 def test_market_overview_uses_only_returned_quotes(monkeypatch):
     quotes = [
         quote("000001.SZ"),
@@ -148,7 +215,39 @@ def test_market_overview_does_not_turn_missing_metrics_into_zero(monkeypatch):
     assert response["meta"]["status"] == "partial"
     assert response["meta"]["valid_change_count"] == 0
     assert response["meta"]["valid_amount_count"] == 0
+    assert response["meta"]["freshness"] == "fresh"
     assert response["data"]["limit_up"] is None
+
+
+def test_market_overview_marks_partial_when_metric_coverage_is_incomplete(monkeypatch):
+    incomplete = MarketQuote(**{
+        **quote("600000.SH").to_dict(),
+        "change_pct": None,
+        "amount": None,
+    })
+    provider = StubProvider([quote("000001.SZ"), incomplete])
+    monkeypatch.setattr(market, "live_market_provider", provider)
+    monkeypatch.setattr(market, "_overview_cache", None)
+
+    response = market.get_market_overview()
+
+    assert response["data"]["quoted_count"] == 2
+    assert response["meta"]["valid_change_count"] == 1
+    assert response["meta"]["valid_amount_count"] == 1
+    assert response["meta"]["status"] == "partial"
+
+
+def test_market_overview_preserves_delayed_freshness(monkeypatch):
+    delayed = MarketQuote(**{
+        **quote("000001.SZ").to_dict(),
+        "freshness": "delayed",
+    })
+    monkeypatch.setattr(market, "live_market_provider", StubProvider([delayed]))
+    monkeypatch.setattr(market, "_overview_cache", None)
+
+    response = market.get_market_overview()
+
+    assert response["meta"]["freshness"] == "delayed"
 
 
 def test_market_overview_returns_503_for_empty_provider(monkeypatch):
@@ -159,6 +258,69 @@ def test_market_overview_returns_503_for_empty_provider(monkeypatch):
 
     assert raised.value.status_code == 503
     assert raised.value.detail["code"] == "MARKET_BREADTH_EMPTY"
+
+
+def test_default_market_overview_batches_security_master_and_caches(monkeypatch):
+    requested = [f"{index:06d}.SZ" for index in range(1, 206)]
+    available = [MarketQuote(**{**quote(code).to_dict(), "code": code}) for code in requested]
+
+    class RecordingProvider(StubProvider):
+        def __init__(self):
+            super().__init__(available)
+            self.calls = []
+
+        def fetch_quotes(self, codes=None):
+            self.calls.append(list(codes or []))
+            return super().fetch_quotes(codes)
+
+    class StubSecurityMaster:
+        def snapshot(self, force=False):
+            return ([{"code": code} for code in requested], {
+                "source": "test:master", "freshness": "fresh",
+            })
+
+    provider = RecordingProvider()
+    monkeypatch.setattr(market, "live_market_provider", provider)
+    monkeypatch.setattr(market, "_DEFAULT_LIVE_MARKET_PROVIDER", provider)
+    monkeypatch.setattr(market, "security_master_provider", StubSecurityMaster())
+    monkeypatch.setattr(market, "_overview_cache", None)
+
+    response = market.get_market_overview()
+    assert sorted(len(batch) for batch in provider.calls) == [5, 100, 100]
+    assert response["data"]["quoted_count"] == 205
+    assert response["meta"]["requested_count"] == 205
+    assert response["meta"]["coverage"] == "security_master_requested"
+    assert response["meta"]["status"] == "ok"
+
+    # A second read within the TTL is served from an isolated copy, avoiding
+    # another full-universe provider fan-out.
+    cached = market.get_market_overview()
+    assert cached == response
+    assert len(provider.calls) == 3
+
+
+def test_market_overview_serves_stale_snapshot_while_refresh_lock_is_busy(monkeypatch):
+    provider = StubProvider([quote("000001.SZ")])
+    monkeypatch.setattr(market, "live_market_provider", provider)
+    cached_response = {
+        "data": {"quoted_count": 1, "advancers": 1, "decliners": 0,
+                 "unchanged": 0, "total_amount": 10000.0,
+                 "limit_up": None, "limit_down": None},
+        "meta": {"sources": ["test"], "freshness": "fresh"},
+    }
+    monkeypatch.setattr(
+        market,
+        "_overview_cache",
+        (time.monotonic() - market._OVERVIEW_CACHE_TTL_SECONDS - 1, provider, cached_response),
+    )
+    assert market._overview_cache_lock.acquire(blocking=False)
+    try:
+        response = market.get_market_overview()
+    finally:
+        market._overview_cache_lock.release()
+
+    assert response["meta"]["cache_state"] == "stale"
+    assert response["data"]["quoted_count"] == 1
 
 
 def test_health_contract_and_read_only_local_coverage(monkeypatch, tmp_path):
@@ -248,6 +410,100 @@ def test_universe_search_is_paginated_and_source_labelled(monkeypatch):
     assert response["meta"]["returned_count"] == 1
 
 
+def test_index_snapshot_archive_and_future_guard(monkeypatch):
+    captured = {}
+
+    class StubAPI:
+        def archive_index_components(self, index_code, as_of, rows, source):
+            captured.update(index_code=index_code, as_of=as_of, rows=rows, source=source)
+            return len(rows)
+
+    monkeypatch.setattr(market, "DataAPI", lambda: StubAPI())
+    request = market.IndexSnapshotRequest(
+        index_code="000300.SH",
+        as_of=date(2024, 1, 31),
+        rows=[market.IndexSnapshotRow(code="000001.SZ", name="平安银行", weight=1.2)],
+        source="test:snapshot",
+    )
+
+    response = market.archive_index_snapshot(request)
+
+    assert response["stored_count"] == 1
+    assert captured["as_of"] == date(2024, 1, 31)
+    with pytest.raises(HTTPException) as raised:
+        market.archive_index_snapshot(market.IndexSnapshotRequest(
+            index_code="000300.SH", as_of=date.today() + timedelta(days=1),
+            rows=[market.IndexSnapshotRow(code="000001.SZ", name="平安银行")],
+        ))
+    assert raised.value.status_code == 422
+    with pytest.raises(ValueError, match="conflicts"):
+        market.IndexSnapshotRow(code="600519.BJ", name="贵州茅台")
+
+
+def test_index_snapshot_import_dry_run_never_writes(monkeypatch):
+    calls = []
+
+    class StubAPI:
+        def validate_index_components_batch(self, snapshots):
+            calls.append(("validate", snapshots))
+            return [{"index_code": "999999.SH", "as_of": "2024-01-31",
+                     "source": "test", "constituent_count": 1}]
+
+        def archive_index_components_batch(self, snapshots):
+            calls.append(("write", snapshots))
+            return 1
+
+    monkeypatch.setattr(market, "DataAPI", lambda: StubAPI())
+    request = market.IndexSnapshotImportRequest(
+        dry_run=True,
+        snapshots=[market.IndexSnapshotRequest(
+            index_code="999999.SH", as_of=date(2024, 1, 31),
+            rows=[market.IndexSnapshotRow(code="000001.SZ", name="平安银行")],
+            source="test",
+        )],
+    )
+
+    response = market.import_index_snapshots(request)
+
+    assert response["status"] == "validated"
+    assert response["total_constituents"] == 1
+    assert [kind for kind, _ in calls] == ["validate"]
+
+
+def test_index_snapshot_import_rejects_duplicate_period_before_validation(monkeypatch):
+    class ShouldNotBeCalled:
+        def validate_index_components_batch(self, _snapshots):
+            raise AssertionError("duplicate periods must fail before storage validation")
+
+    monkeypatch.setattr(market, "DataAPI", lambda: ShouldNotBeCalled())
+    snapshot = market.IndexSnapshotRequest(
+        index_code="999999.SH", as_of=date(2024, 1, 31),
+        rows=[market.IndexSnapshotRow(code="000001.SZ", name="平安银行")],
+    )
+    with pytest.raises(HTTPException) as raised:
+        market.import_index_snapshots(market.IndexSnapshotImportRequest(
+            snapshots=[snapshot, snapshot],
+        ))
+    assert raised.value.status_code == 422
+    assert "duplicate" in str(raised.value.detail).lower()
+
+
+def test_index_snapshot_coverage_reports_available_periods(monkeypatch):
+    class StubAPI:
+        def index_snapshot_coverage(self, index_code):
+            assert index_code == "999999.SH"
+            return [
+                {"as_of": "2024-01-31", "constituent_count": 1},
+                {"as_of": "2024-02-29", "constituent_count": 2},
+            ]
+
+    monkeypatch.setattr(market, "DataAPI", lambda: StubAPI())
+    response = market.get_index_snapshot_coverage("999999.SH")
+    assert response["meta"]["snapshot_count"] == 2
+    assert response["meta"]["first_as_of"] == "2024-01-31"
+    assert response["meta"]["latest_as_of"] == "2024-02-29"
+
+
 def test_indexes_return_major_index_cards(monkeypatch):
     class StubIndexProvider:
         def fetch_quotes(self, codes):
@@ -260,6 +516,8 @@ def test_indexes_return_major_index_cards(monkeypatch):
     assert response["meta"]["status"] == "ok"
     assert len(response["data"]) == 6
     assert response["data"][0]["name"] == "上证指数"
+    assert response["data"][0]["asset_type"] == "index"
+    assert response["data"][0]["currency"] == "CNY"
 
 
 def test_universe_returns_503_when_source_and_cache_are_unavailable(monkeypatch):

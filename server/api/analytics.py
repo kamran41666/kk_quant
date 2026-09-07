@@ -1,12 +1,77 @@
 """Analytics endpoints — reuse quant_engine.analytics"""
+import json
+import hashlib
 from datetime import date
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from server.models.database import get_db
 from server.models.schema import Run
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
+
+
+def _run_evidence(run: Run) -> dict:
+    try:
+        manifest = json.loads(run.data_manifest or "{}")
+    except (TypeError, ValueError):
+        manifest = {}
+    if not isinstance(manifest, dict):
+        manifest = {}
+    coverage = manifest.get("daily_data_coverage")
+    if not isinstance(coverage, dict):
+        coverage = None
+    dataset_manifests = manifest.get("dataset_manifests")
+    fund_dataset_hashes = []
+    fund_coverage_complete = None
+    if isinstance(dataset_manifests, list):
+        for item in dataset_manifests:
+            if isinstance(item, dict) and isinstance(item.get("content_hash"), str) and item.get("content_hash"):
+                fund_dataset_hashes.append(item["content_hash"])
+        if dataset_manifests:
+            def has_rows(item: object) -> bool:
+                if not isinstance(item, dict):
+                    return False
+                try:
+                    return float(item.get("row_count", 0) or 0) > 0
+                except (TypeError, ValueError):
+                    return False
+
+            fund_coverage_complete = all(
+                isinstance(item, dict)
+                and isinstance(item.get("content_hash"), str)
+                and bool(item.get("content_hash"))
+                and has_rows(item)
+                for item in dataset_manifests
+            )
+    data_content_hash = manifest.get("daily_data_content_hash") or (coverage or {}).get("dataset_hash")
+    if not data_content_hash and fund_dataset_hashes:
+        # A stable aggregate lets the compare table identify a multi-fund
+        # archive without pretending it is one provider-issued hash.
+        data_content_hash = (
+            fund_dataset_hashes[0]
+            if len(fund_dataset_hashes) == 1
+            else hashlib.sha256(
+                json.dumps(sorted(fund_dataset_hashes), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+        )
+    market = getattr(run, "market", None)
+    return {
+        "market": market,
+        "strategy_fingerprint": getattr(run, "strategy_fingerprint", None),
+        "data_end": getattr(run, "data_end", None),
+        "calendar_version": getattr(run, "calendar_version", None),
+        "execution_model": getattr(run, "execution_model", None),
+        "data_content_hash": data_content_hash,
+        "dataset_hashes": fund_dataset_hashes,
+        "coverage_complete": (coverage or {}).get("complete") if coverage else fund_coverage_complete,
+        # A-share runs use the registered CostModel scenarios. Domestic fund
+        # runs use their separate NAV fee sensitivity; never label one as the
+        # other in a cross-run comparison.
+        "cost_scenario": manifest.get("cost_scenario") if market == "a-share" else None,
+        "cost_model": manifest.get("cost_model") if market == "a-share" else None,
+        "fund_fee_rate": manifest.get("fund_fee_rate") if market == "cn-fund" else None,
+    }
 
 
 @router.get("/metrics/{run_id}")
@@ -111,3 +176,41 @@ def get_attribution(run_id: str, benchmark: str = "000300.SH", db: Session = Dep
         pass
 
     return {"error": "Could not compute attribution — benchmark data unavailable"}
+
+
+@router.get("/compare")
+def compare_runs(
+    run_ids: str = Query(..., description="Comma-separated completed backtest ids (2-8)"),
+    db: Session = Depends(get_db),
+):
+    """Compare completed research runs without treating one metric as proof."""
+    requested = list(dict.fromkeys(item.strip() for item in str(run_ids).split(",") if item.strip()))
+    if len(requested) < 2 or len(requested) > 8:
+        raise HTTPException(status_code=422, detail="compare requires 2-8 unique run ids")
+    rows = db.query(Run).filter(Run.id.in_(requested)).all()
+    by_id = {row.id: row for row in rows}
+    missing = [run_id for run_id in requested if run_id not in by_id]
+    if missing:
+        raise HTTPException(status_code=404, detail={"code": "RUN_NOT_FOUND", "ids": missing})
+    result = []
+    for run_id in requested:
+        run = by_id[run_id]
+        if run.status != "completed" or not run.result_dir:
+            raise HTTPException(status_code=400, detail={"code": "RUN_NOT_COMPLETED", "id": run_id})
+        metrics = get_metrics(run_id, db)
+        result.append({
+            "run_id": run.id,
+            "strategy_id": run.strategy_id,
+            "created_at": run.created_at,
+            "total_return": run.total_return,
+            "metrics": metrics,
+            "evidence": _run_evidence(run),
+        })
+    return {
+        "data": result,
+        "meta": {
+            "research_only": True,
+            "comparison_count": len(result),
+            "same_market": len({item["evidence"].get("market") for item in result}) == 1,
+        },
+    }

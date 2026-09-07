@@ -127,8 +127,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
-import LineChart from '@/components/charts/LineChart.vue'
+import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
+const LineChart = defineAsyncComponent(() => import('@/components/charts/LineChart.vue'))
 import { useApi } from '@/composables/useApi'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useDashboardStore } from '@/stores/dashboard'

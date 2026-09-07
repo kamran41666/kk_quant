@@ -1,12 +1,34 @@
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from server.models.database import Base
-from server.models.schema import PaperFill, PaperLot, PaperOrder
+from server.models.schema import PaperFill, PaperLedgerEvent, PaperLot, PaperOrder
 from server.services.paper_trading import account_report, account_snapshot, build_daily_report, create_account, list_ledger, list_orders, mark_to_market, record_deviation, reconcile_account, submit_order
+
+
+def test_paper_calendar_fails_closed_when_public_calendar_is_unverified(monkeypatch):
+    class UnverifiedCalendar:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def ensure_coverage(self, start, end):
+            return {"source": "fallback:business-days", "verified": False, "complete": False}
+
+        def next_trading_day(self, value):
+            raise AssertionError("unverified calendars must not be used")
+
+        def is_trading_day(self, value):
+            raise AssertionError("unverified calendars must not be used")
+
+    monkeypatch.setattr("quant_engine.data.calendar.TradingCalendar", UnverifiedCalendar)
+    from server.services.paper_market_rules import is_market_trading_day, unlock_date
+
+    assert is_market_trading_day("a-share", date(2024, 6, 14)) is False
+    with pytest.raises(ValueError, match="trading_calendar_unavailable"):
+        unlock_date("a-share", date(2024, 6, 14))
 
 
 def session():
@@ -29,6 +51,44 @@ def test_persistent_paper_order_is_idempotent_and_balanced():
     assert snapshot["positions"][0]["shares"] == 1_000
     assert len(list_orders(db, account["id"])) == 1
     assert list_ledger(db, account["id"])[0]["event_type"] == "fill"
+
+
+def test_explicit_historical_trade_date_propagates_to_order_fill_and_lot():
+    db = session()
+    account = create_account(db, name="historical-order", initial_capital=100_000, max_position_weight=1.0)
+    trade_day = date(2024, 6, 14)
+    result = submit_order(
+        db,
+        account_id=account["id"],
+        idempotency_key="historical-order-1",
+        code="000001.SZ",
+        side="buy",
+        quantity=100,
+        price=10,
+        trade_date=trade_day,
+    )
+
+    assert result["status"] == "filled"
+    order = db.query(PaperOrder).one()
+    fill = db.query(PaperFill).one()
+    lot = db.query(PaperLot).one()
+    ledger = db.query(PaperLedgerEvent).one()
+    assert order.created_at.startswith("2024-06-14T")
+    assert fill.created_at == order.created_at
+    assert ledger.created_at == order.created_at
+    assert lot.buy_at == order.created_at
+    assert lot.unlock_date == "2024-06-17"
+
+
+def test_trade_date_rejects_future_and_datetime_values():
+    db = session()
+    account = create_account(db, name="trade-date-validation", initial_capital=100_000, max_position_weight=1.0)
+    with pytest.raises(ValueError, match="trade_date_in_future"):
+        submit_order(db, account_id=account["id"], idempotency_key="future-trade-date", code="000001.SZ",
+                     side="buy", quantity=100, price=10, trade_date=date.today() + timedelta(days=1))
+    with pytest.raises(ValueError, match="trade_date must be a date"):
+        submit_order(db, account_id=account["id"], idempotency_key="datetime-trade-date", code="000001.SZ",
+                     side="buy", quantity=100, price=10, trade_date=datetime.now())
 
 
 def test_persistent_paper_order_rejects_risk_without_cash_change():

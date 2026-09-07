@@ -30,7 +30,7 @@ class OrderIntent:
     intent_id: str
     code: str
     side: str
-    quantity: int
+    quantity: float
     limit_price: Optional[float] = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -49,8 +49,8 @@ class ExecutionReport:
     status: OrderIntentStatus
     code: str
     side: str
-    requested_quantity: int
-    filled_quantity: int = 0
+    requested_quantity: float
+    filled_quantity: float = 0.0
     fill_price: Optional[float] = None
     reason: Optional[str] = None
     received_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -65,7 +65,7 @@ class AccountSnapshot:
     cash: float
     market_value: float
     equity: float
-    positions: Mapping[str, int]
+    positions: Mapping[str, float]
 
 
 class BrokerGateway(ABC):
@@ -176,7 +176,7 @@ class PaperBrokerGateway(BrokerGateway):
         if initial_cash < 0:
             raise ValueError("initial_cash must be non-negative")
         self._cash = float(initial_cash)
-        self._positions: dict[str, int] = {}
+        self._positions: dict[str, float] = {}
         self._prices: dict[str, float] = {}
         self._reports: dict[str, ExecutionReport] = {}
         self._risk = risk or RiskEngine()
@@ -186,11 +186,11 @@ class PaperBrokerGateway(BrokerGateway):
             raise ValueError("price must be positive")
         self._prices[code] = float(price)
 
-    def set_position(self, code: str, quantity: int, price: float) -> None:
+    def set_position(self, code: str, quantity: float, price: float) -> None:
         """Restore a persisted position before processing the next intent."""
         if quantity < 0 or price <= 0:
             raise ValueError("position quantity must be non-negative and price positive")
-        self._positions[code] = int(quantity)
+        self._positions[code] = float(quantity)
         self._prices[code] = float(price)
 
     def submit(self, intent: OrderIntent) -> ExecutionReport:

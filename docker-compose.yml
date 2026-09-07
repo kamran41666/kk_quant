@@ -7,15 +7,18 @@ services:
       dockerfile: Dockerfile.server
     container_name: kk_quant_server
     ports:
-      # The live control plane has no user-session auth in Phase 3A.  Keep the
-      # host-side API bound to loopback so it cannot be reached from a LAN;
-      # containers still communicate over the private compose network.
+      # Keep the host-side API bound to loopback so it cannot be reached from a
+      # LAN; containers still communicate over the private compose network.
       - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data
       - ./backtest_result:/app/backtest_result
     environment:
       - PYTHONUNBUFFERED=1
+      # Compose traffic reaches FastAPI from the web container, not loopback.
+      # Require an explicit operator token so the live control plane cannot be
+      # accidentally exposed with the empty-token development mode.
+      - QUANT_OPERATOR_TOKEN=${QUANT_OPERATOR_TOKEN:?Set QUANT_OPERATOR_TOKEN before starting Compose}
     restart: unless-stopped
 
   web:
@@ -24,8 +27,7 @@ services:
       dockerfile: Dockerfile.web
     container_name: kk_quant_web
     ports:
-      # Keep the beginner UI and its proxied /api/v1/live control plane local
-      # until Phase 3C authentication is installed.
+      # Keep the beginner UI and its proxied /api/v1/live control plane local.
       - "127.0.0.1:80:80"
     depends_on:
       - server

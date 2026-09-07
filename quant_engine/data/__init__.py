@@ -12,6 +12,10 @@ from quant_engine.data.security_master import (
     SecurityMasterProvider,
     SecurityMasterUnavailableError,
 )
+from quant_engine.data.global_markets import (
+    EastmoneyFundDataProvider,
+    YahooUSMarketDataProvider,
+)
 
 __all__ = [
     "AKShareLiveMarketDataProvider",
@@ -23,4 +27,6 @@ __all__ = [
     "TencentLiveMarketDataProvider",
     "SecurityMasterProvider",
     "SecurityMasterUnavailableError",
+    "EastmoneyFundDataProvider",
+    "YahooUSMarketDataProvider",
 ]

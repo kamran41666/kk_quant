@@ -3,11 +3,12 @@ import json
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 
 from server.models.database import get_db
 from server.models.schema import Strategy
+from server.services.paper_market_rules import normalize_market
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -18,24 +19,26 @@ class StrategyCreate(BaseModel):
     description: Optional[str] = None
     strategy_class: str = Field(..., min_length=1, max_length=255)
     params: dict = Field(default_factory=dict)
+    market: str = Field(default="a-share", pattern=r"^(a-share|cn-fund|us-equity)$")
 
 class StrategyUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     strategy_class: Optional[str] = None
     params: Optional[dict] = None
+    market: Optional[str] = Field(default=None, pattern=r"^(a-share|cn-fund|us-equity)$")
 
 class StrategyResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     name: str
     description: Optional[str] = None
     strategy_class: str
     params: dict
+    market: str = "a-share"
     created_at: str
     updated_at: str
-
-    class Config:
-        from_attributes = True
 
 # ---- Endpoints ----
 
@@ -59,6 +62,7 @@ def list_strategies(
             id=s.id, name=s.name, description=s.description,
             strategy_class=s.strategy_class,
             params=json.loads(s.params) if s.params else {},
+            market=normalize_market(getattr(s, "market", "a-share")),
             created_at=s.created_at, updated_at=s.updated_at,
         )
         result.append(d)
@@ -77,6 +81,7 @@ def create_strategy(
         description=data.description,
         strategy_class=data.strategy_class,
         params=json.dumps(data.params),
+        market=normalize_market(data.market),
         created_at=now,
         updated_at=now,
     )
@@ -88,6 +93,7 @@ def create_strategy(
         id=strategy.id, name=strategy.name, description=strategy.description,
         strategy_class=strategy.strategy_class,
         params=json.loads(strategy.params) if strategy.params else {},
+        market=normalize_market(getattr(strategy, "market", "a-share")),
         created_at=strategy.created_at, updated_at=strategy.updated_at,
     )
 
@@ -106,6 +112,7 @@ def get_strategy(
         id=strategy.id, name=strategy.name, description=strategy.description,
         strategy_class=strategy.strategy_class,
         params=json.loads(strategy.params) if strategy.params else {},
+        market=normalize_market(getattr(strategy, "market", "a-share")),
         created_at=strategy.created_at, updated_at=strategy.updated_at,
     )
 
@@ -124,6 +131,8 @@ def update_strategy(
     update_data = data.model_dump(exclude_unset=True)
     if 'params' in update_data:
         update_data['params'] = json.dumps(update_data['params'])
+    if 'market' in update_data:
+        update_data['market'] = normalize_market(update_data['market'])
 
     update_data['updated_at'] = datetime.now().isoformat()
 
@@ -137,6 +146,7 @@ def update_strategy(
         id=strategy.id, name=strategy.name, description=strategy.description,
         strategy_class=strategy.strategy_class,
         params=json.loads(strategy.params) if strategy.params else {},
+        market=normalize_market(getattr(strategy, "market", "a-share")),
         created_at=strategy.created_at, updated_at=strategy.updated_at,
     )
 

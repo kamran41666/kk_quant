@@ -12,6 +12,10 @@ class Settings:
     # Phase 3 remains fail-closed until a reviewed broker adapter and user
     # account have been explicitly configured.
     live_trading_enabled: bool = os.getenv("QUANT_LIVE_TRADING_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+    # Optional high-entropy operator token.  Empty keeps the loopback-only
+    # developer experience; setting it protects all /live and /live/sandbox
+    # routes via X-Operator-Token.
+    operator_token: str = os.getenv("QUANT_OPERATOR_TOKEN", "").strip()
 
 
 settings = Settings()

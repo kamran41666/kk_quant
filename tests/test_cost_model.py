@@ -1,7 +1,7 @@
 import pytest
 from datetime import date
 from quant_engine.backtest.types import Trade, OrderSide
-from quant_engine.backtest.cost_model import CostModel
+from quant_engine.backtest.cost_model import CostModel, cost_scenario_catalog
 
 
 class TestCostModel:
@@ -83,3 +83,18 @@ class TestCostModel:
             commission=5.0, stamp_duty=0.0, slippage=10.0,
         )
         assert model.total_cost(t) == pytest.approx(15.0)
+
+    def test_registered_scenarios_are_explicit_and_reproducible(self):
+        catalog = cost_scenario_catalog()
+        assert [item["id"] for item in catalog] == [
+            "paper_baseline_v1", "paper_low_impact_v1", "paper_high_impact_v1",
+        ]
+        baseline = CostModel.from_scenario("paper_baseline_v1")
+        high = CostModel.from_scenario("paper_high_impact_v1")
+        assert baseline.as_manifest()["research_only"] is True
+        assert high.slippage_rate > baseline.slippage_rate
+        assert high.as_manifest()["scenario"] == "paper_high_impact_v1"
+
+    def test_unknown_scenario_fails_closed(self):
+        with pytest.raises(ValueError, match="unknown cost scenario"):
+            CostModel.from_scenario("broker_default")

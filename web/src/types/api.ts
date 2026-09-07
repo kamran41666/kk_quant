@@ -4,6 +4,7 @@ export interface Strategy {
   description?: string
   strategy_class: string
   params: Record<string, any>
+  market?: 'a-share' | 'cn-fund' | 'us-equity'
   created_at: string
   updated_at: string
 }
@@ -13,6 +14,7 @@ export interface StrategyCreate {
   description?: string
   strategy_class: string
   params: Record<string, any>
+  market?: 'a-share' | 'cn-fund' | 'us-equity'
 }
 
 export interface RunSummary {
@@ -27,15 +29,26 @@ export interface RunSummary {
   total_return?: number
   sharpe_ratio?: number
   max_drawdown?: number
+  market?: string
+  strategy_fingerprint?: string
+  data_manifest?: Record<string, unknown>
+  data_end?: string
+  calendar_version?: string
+  execution_model?: string
+  eligible_for_observation?: boolean
   created_at: string
   completed_at?: string
 }
 
 export interface BacktestRunRequest {
   strategy_id: string
+  market?: 'a-share' | 'cn-fund' | 'us-equity'
+  symbols?: string[]
   start_date: string
   end_date: string
   initial_capital?: number
+  /** Paper-only fund cost assumption, e.g. 0.001 = 0.1%. */
+  fund_fee_rate?: number
   benchmark?: string
   rebalance_frequency?: 'daily' | 'weekly' | 'monthly'
 }
@@ -101,6 +114,10 @@ export interface MarketQuote {
   received_at: string
   freshness: 'fresh' | 'realtime' | 'delayed' | 'stale' | 'unknown' | string
   is_fallback: boolean
+  /** Cross-market descriptors; A-share responses may omit these on older caches. */
+  asset_type?: string
+  market?: string
+  currency?: string
 }
 
 export interface QuotesResponse {
@@ -160,11 +177,14 @@ export interface MarketOverviewResponse {
     total_amount: number | null
     limit_up?: number | null
     limit_down?: number | null
+    top_active?: MarketQuote[]
+    top_gainers?: MarketQuote[]
   }
   meta: {
     sources?: string[]
     fallback_used?: boolean
     received_at?: string
+    freshness?: string
     [key: string]: unknown
   }
 }
@@ -208,6 +228,8 @@ export interface CandleResponse {
   data: CandlePoint[]
   meta: {
     code: string
+    market?: string
+    symbol?: string
     interval: CandleInterval
     adjust_requested?: string
     adjust_applied?: string
@@ -221,6 +243,8 @@ export interface CandleResponse {
     as_of?: string | null
     freshness?: string
     warning_codes?: string[]
+    research_only?: boolean
+    note?: string
     status?: 'ok' | 'empty' | string
     [key: string]: unknown
   }

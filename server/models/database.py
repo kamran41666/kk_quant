@@ -33,13 +33,58 @@ def init_db():
     if engine.dialect.name != "sqlite":
         return
     additive = {
+        "paper_account": {
+            "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",
+        },
+        "paper_account_position": {
+            "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",
+            "last_price_source": "VARCHAR(80) NOT NULL DEFAULT 'manual_input'",
+            "last_price_as_of": "VARCHAR(40)",
+            "last_price_freshness": "VARCHAR(20) NOT NULL DEFAULT 'manual'",
+        },
+        "paper_lot": {
+            "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",
+            "owner": "VARCHAR(20) NOT NULL DEFAULT 'manual'",
+            "owner_id": "VARCHAR(36)",
+        },
         "paper_order": {
+            "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",
             "price_source": "VARCHAR(80) NOT NULL DEFAULT 'manual_input'",
             "price_as_of": "VARCHAR(40)",
             "price_freshness": "VARCHAR(20) NOT NULL DEFAULT 'manual'",
         },
         "paper_scheduler_run": {
             "last_run_at": "VARCHAR(40) NOT NULL DEFAULT ''",
+        },
+        "paper_valuation": {
+            "price_metadata": "TEXT NOT NULL DEFAULT '{}'",
+        },
+        "strategy_observation": {
+            "managed_codes": "TEXT NOT NULL DEFAULT '[]'",
+            "backtest_run_id": "VARCHAR(36)",
+            "market": "VARCHAR(20)",
+            "strategy_fingerprint": "VARCHAR(64)",
+            "pending_signals": "TEXT NOT NULL DEFAULT '{}'",
+            "pending_signal_date": "VARCHAR(10)",
+        },
+        "paper_fill": {
+            "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",
+        },
+        "run": {
+            "market": "VARCHAR(20)",
+            "strategy_fingerprint": "VARCHAR(64)",
+            "data_manifest": "TEXT",
+            "data_end": "VARCHAR(10)",
+            "calendar_version": "VARCHAR(80)",
+            "execution_model": "VARCHAR(80)",
+            "eligible_for_observation": "BOOLEAN NOT NULL DEFAULT 0",
+        },
+        "paper_rebalance_plan": {
+            "lease_owner": "VARCHAR(80)",
+            "lease_until": "VARCHAR(40)",
+        },
+        "strategy": {
+            "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",
         },
     }
     inspector = inspect(engine)

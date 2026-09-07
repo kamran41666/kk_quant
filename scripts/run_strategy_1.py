@@ -64,7 +64,7 @@ def main():
     print("\nFactors:")
     print("  - volatility_1m  (low-vol anomaly)")
     print("  - momentum_1m    (short-term reversal)")
-    print("  - log_market_cap (size premium)")
+    print("  - log_market_cap_proxy (size proxy; not point-in-time market cap)")
     print("\nRisk controls:")
     print("  - Empty position in Jan/Apr/Dec (A-share seasonal effect)")
 

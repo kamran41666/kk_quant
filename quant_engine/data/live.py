@@ -22,6 +22,10 @@ import pandas as pd
 
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+_PUBLIC_INDEX_CODES = frozenset({
+    "000001.SH", "000016.SH", "000300.SH", "000905.SH",
+    "399001.SZ", "399006.SZ",
+})
 
 
 class MarketDataUnavailableError(RuntimeError):
@@ -46,6 +50,12 @@ class MarketQuote:
     received_at: str
     freshness: str
     is_fallback: bool
+    # Optional cross-market descriptors.  Existing A-share callers retain
+    # their original contract through defaults; foreign/fund providers fill
+    # these fields explicitly so the UI never infers currency from a code.
+    asset_type: str = "equity"
+    market: str = "CN"
+    currency: str = "CNY"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -398,7 +408,11 @@ class TencentDailyKlineProvider:
             }])
         canonical = _canonical_code(code)
         symbol = _tencent_symbol(canonical)
-        adjust_key = {
+        # Tencent does not publish qfq/hfq series for these broad indexes;
+        # requesting qfqday returns ``bad params``. Index levels have no
+        # corporate-action adjustment, so use the raw day series.
+        is_index = canonical in _PUBLIC_INDEX_CODES
+        adjust_key = "day" if is_index else {
             "event_driven": "qfqday",
             "qfq": "qfqday",
             "hfq": "hfqday",
@@ -436,7 +450,7 @@ class TencentDailyKlineProvider:
                     "low": values[3],
                     "volume": values[4] * 100 if values[4] is not None else None,
                     "source": "tencent:kline",
-                    "adjust": "qfq" if adjust_key == "qfqday" else "hfq" if adjust_key == "hfqday" else "none",
+                    "adjust": "none" if is_index else "qfq" if adjust_key == "qfqday" else "hfq" if adjust_key == "hfqday" else "none",
                 })
             if not result:
                 raise ValueError("provider returned no usable daily rows")

@@ -18,21 +18,64 @@ class DataHandler:
     数据按交易日逐步释放，策略只能看到"当前已知"的信息。
     """
 
-    def __init__(self, codes: list[str], start: date, end: date):
+    def __init__(self, codes: list[str], start: date, end: date, calendar=None):
         self._codes = list(codes)
         self._start = start
         self._end = end
         self._api = DataAPI()
 
+        # Ask the storage layer for an auditable report before loading the
+        # frame.  DataAPI implementations used by deterministic unit tests
+        # may not expose this optional report; the production implementation
+        # always returns a dict and the engine applies the strict gate.
+        self._coverage_report = None
+        coverage = getattr(self._api, "daily_coverage", None)
+        if callable(coverage):
+            try:
+                self._coverage_report = coverage(
+                    codes=self._codes,
+                    start=start,
+                    end=end,
+                    # OHLCV is the minimum deterministic execution surface;
+                    # optional limit/suspension columns are still loaded when
+                    # present but are not allowed to make an otherwise valid
+                    # historical dataset look incomplete.
+                    fields=["open", "high", "low", "close", "volume"],
+                    adjust="event_driven",
+                    calendar=calendar,
+                )
+            except Exception as exc:
+                # Preserve the error as evidence so the engine can fail closed
+                # with an actionable message instead of silently proceeding.
+                self._coverage_report = {
+                    "coverage_version": "daily-coverage-v1",
+                    "market": "a-share",
+                    "source": "local:parquet",
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat(),
+                    "requested_codes": list(self._codes),
+                    "complete": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+        self._load_error: Optional[str] = None
+
         # 预加载整个区间数据到内存
-        self._daily_data = self._api.daily(
-            codes=self._codes,
-            start=start,
-            end=end,
-            fields=["open", "high", "low", "close", "volume", "amount",
-                    "turnover_rate", "up_limit", "down_limit", "is_suspended"],
-            adjust="event_driven",
-        )
+        try:
+            self._daily_data = self._api.daily(
+                codes=self._codes,
+                start=start,
+                end=end,
+                fields=["open", "high", "low", "close", "volume", "amount",
+                        "turnover_rate", "up_limit", "down_limit", "is_suspended"],
+                adjust="event_driven",
+            )
+        except Exception as exc:
+            self._daily_data = pd.DataFrame(
+                columns=["open", "high", "low", "close", "volume", "amount",
+                         "turnover_rate", "up_limit", "down_limit", "is_suspended"],
+                index=pd.MultiIndex.from_arrays([[], []], names=["code", "date"]),
+            )
+            self._load_error = f"{type(exc).__name__}: {exc}"
 
         # Normalize date level to datetime.date (Parquet round-trips produce Timestamps)
         if not self._daily_data.empty:
@@ -50,8 +93,40 @@ class DataHandler:
         return self._current_date
 
     @property
+    def coverage_report(self) -> Optional[dict]:
+        """Machine-readable local data coverage evidence, when available."""
+        return self._coverage_report
+
+    @property
+    def load_error(self) -> Optional[str]:
+        """Error raised while loading the local frame, if any."""
+        return self._load_error
+
+    @property
     def stock_list(self) -> list[str]:
         return list(self._codes)
+
+    @property
+    def available_start(self) -> Optional[date]:
+        """Earliest date actually present in the preloaded local dataset."""
+        if self._daily_data.empty:
+            return None
+        values = [value for value in pd.to_datetime(self._daily_data.index.get_level_values("date")).date
+                  if self._start <= value <= self._end]
+        if not values:
+            return None
+        return min(values)
+
+    @property
+    def available_end(self) -> Optional[date]:
+        """Latest date actually present in the preloaded local dataset."""
+        if self._daily_data.empty:
+            return None
+        values = [value for value in pd.to_datetime(self._daily_data.index.get_level_values("date")).date
+                  if self._start <= value <= self._end]
+        if not values:
+            return None
+        return max(values)
 
     def push_day(self, dt: date):
         """推进到指定交易日"""

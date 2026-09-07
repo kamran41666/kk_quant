@@ -1,7 +1,7 @@
 # Phase 3 实盘就绪施工计划
 
 > 当前分支：`codex/phase-3-live-readiness`  
-> 当前施工批次：Phase 3A（安全控制面与订单草案）  
+> 当前施工批次：Phase 3A-M4-B / 3B-S / 3C-O / 3C-A / 3C-R / 3C-F（全市场宽度、行情工作台与本地故障恢复基线）
 > 真实券商状态：未接入；默认拒绝任何实盘委托
 
 ## 目标与边界
@@ -35,9 +35,20 @@ Phase 3 的目标不是把模拟盘改成“看起来像实盘”，而是在用
 
 前置条件：用户选择券商并提供官方沙盒文档/账号。实现连接测试、下单、撤单、异步成交回报、重连和状态恢复；适配器只能通过 `LiveBrokerGateway` 注册。
 
+在官方券商资料到位前，已先完成 **Phase 3B-S 本地合同沙盒**：
+`SandboxBrokerGateway` 和 `/live/sandbox` 运行态接口可演示提交、部分成交、继续撮合、撤单、未完成订单查询、事件 cursor 增量回放及 JSON checkpoint 重启恢复。会话文件只保存本地沙盒状态，且采用原子替换；它明确 `supports_live=false`，不会改变实盘能力开关。详见 `docs/phase-3b-sandbox.md`。官方券商沙盒接入仍未完成，不能以本地沙盒代替。
+
 ### Phase 3C：实盘安全与运营
 
 增加权限/会话认证、凭证轮换、备份恢复、对账告警、监控、审计导出、故障注入和部署加固。默认配置必须在测试中证明无法提交真实订单。
+
+已先交付 **Phase 3C-O 审计导出基线**：`/live/audit/export` 支持脱敏 JSON/CSV 下载，页面提供导出入口；随后已补充操作员令牌门（3C-A）、凭证引用轮换（3C-R）和本地故障演练（3C-F），但这些增量仍不等于完整 Phase 3C。详见 `docs/phase-3c-ops.md`。
+
+已补充 **Phase 3C-A 操作员令牌门**：设置 `QUANT_OPERATOR_TOKEN` 后，所有 `/live/**` 与 `/live/sandbox/**` 路由要求 `X-Operator-Token`，健康检查保持可用；默认空令牌只适合 loopback 开发体验，Compose 启动则强制要求显式令牌，避免容器网络请求被错误地当作回环。
+
+已补充 **Phase 3C-R 凭证引用轮换**：`/live/connections/{id}/credential-ref/rotate` 只更新 `env:`/`keychain:` 定位符，自动停用并要求重新测试；真实凭证轮换由用户的操作系统密钥存储或环境管理系统负责，平台不接触明文。
+
+已补充 **Phase 3C-F 本地故障演练**：本地沙盒可对提交、推进成交和事件回放注入确定性故障；故障开关写入 JSON checkpoint，失败操作返回固定 503，服务端保留旧 checkpoint，页面可验证恢复和幂等重试。该批不代表官方券商故障验收；真实券商对账监控、监控告警和柜台级故障演练仍未完成。
 
 Phase 3A 的控制面仍是本机使用边界：API 路由尚未提供用户会话认证，因此容器部署必须使用 Compose 中的 loopback 端口发布；在任何真实适配器接入前，Phase 3C 必须补齐认证/授权并通过未授权访问测试。
 
@@ -105,6 +116,52 @@ M3 已完成并通过独立最终审查：行情快照支持 500 代码上限、
 
 M4 独立运行态验收已通过：已验证日/周/月周期、四类子图、当前页行情、分页、刷新竞态和来源/过期提示；窄屏响应式样式已通过类型与生产构建检查。全量后端 `274 passed, 1 deselected`，前端 `6 passed` 且生产构建通过。详见 `docs/market-workbench-m4.md`。M1-M4 交付判断为“低频公开行情研究工作台完成”；Phase 3B/3C 的官方券商沙盒、认证、对账和真实交易仍未实施。
 
+### M4-B 施工状态（2026-09-05）
+
+M4-B 已补齐全市场宽度的实际公开源路径：默认 `/market/breadth` 从 5,556 条证券主数据生成代码列表，按 100 只、最多 6 路并发请求 Tencent，并使用 30 秒缓存；运行态已验证 `5,556/5,556` 返回、`status=ok`，第二次读取命中缓存。统计接口同时返回指标覆盖率、完整/部分状态、接收时间和聚合时效，页面按 `N/M` 展示有效样本；缓存按 provider 对象身份隔离，避免地址复用误命中。详见 `docs/market-workbench-m4-breadth.md`。该增量仍属于低频公开行情研究，不是交易所级实时终端，也不解除实盘阻断。
+
+### 历史数据适配器稳定性增量（2026-09-05）
+
+针对 Ashare 探查暴露出的旧历史入口风险，`AKShareAdapter` 已完成一轮不改变 `DataSource` 接口的加固：每个上游调用有明确 deadline，并对同一操作实施 single-flight；代码、日期、OHLCV 值域和重复记录在进入 `PriceStore` 前校验；批次返回通过 `DataFrame.attrs["source_meta"]` 标记 `ok/partial/failed`、请求/返回/失败代码和接收时间；`DataPipeline` 将状态写入 `data_update_log`。指数成分接口没有历史日期契约，现改为 fail-closed，禁止当前成分造成回测前视偏差。
+
+该增量已通过适配器、证券主数据和 DataPipeline 边界测试；仍未声称 AKShare 具备交易所级 SLA，真实交易确认继续禁止使用公开聚合源。
+
+独立复审后又补齐：重复日期会使批次降级为 `partial`；`failed` 批次禁止写入 `PriceStore`；上游异常会写入失败日志；无点时股票池的回测拒绝使用硬编码生存者列表。历史指数成分快照仍是后续必须建设的数据资产，未完成前不能宣称默认股票池回测已具备无偏保证。
+
+随后补充有限值校验与 `PriceStore.write_batch()` 临时文件/回滚机制；写入失败不会留下已替换的前半批文件。该批仍不等于历史指数成分数据已经补齐。
+
+最后补齐通用 `DataSource` 的完整 OHLCV 列门槛：缺列、非有限值和无效价格不会写入 `PriceStore`，相应批次会落 `failed` 审计记录。
+
+点时回测资产已形成闭环：MetaDB 新增按 `index_code + as_of` 保存的成分快照表，DataAPI 只返回生效日不晚于回测日的最近快照；市场 API 提供单期归档、批量导入、`dry_run` 预校验、查询和“今日当前快照”入口。批量导入在全部期间校验通过后以单事务写入，HTTP、DataAPI、MetaDB 三层拒绝未来日期。没有快照时默认回测和模拟交易均 fail-closed，均不再使用固定幸存者股票列表；当前快照仍不能伪装成历史数据。
+
+批量资产入口另提供 `scripts/import_index_snapshots.py`，支持 CSV/Parquet/JSON、SHA-256 文件指纹和 `--dry-run`；模拟交易的首次运行在没有点时成分快照时返回 `PIT_STOCK_POOL_UNAVAILABLE`，不会创建默认交易。
+
+纸面账户在行情为空、股票池行情部分覆盖、持仓缺少收盘价或价格为 NaN/无穷/非正数时返回明确阻断码，不更新估值也不保存错误快照；导入器和底层存储同时提供文件一致性、时区和旧版 SQLite 迁移保护。
+
+### Phase 4A 基本面数据层增量（2026-09-05）
+
+已补齐原规划中长期缺失的基本面 PIT 资产层：`fundamentals` 表、按公告日期的可见性查询、离线 CSV/Parquet/JSON 导入、SHA-256 校验、批量事务和市场 API 查询。当前没有经过授权和公告日期验证的默认联网财务源，因此无数据时明确返回 `empty`，不会将当前财报用于历史回测。详见 `docs/phase-4a-fundamentals.md`。
+
+### Phase 4B 策略观察期（模拟）增量（2026-09-06）
+
+已新增纸面策略观察控制面：只有存在已完成回测的策略才能创建 7 天或 30 天观察任务；任务支持启动、暂停、恢复、停止、到期和同日 tick 幂等，自动目标调整通过现有纸面订单链执行，手动订单仍可并行并继续遵守整手、T+1、现金、仓位、亏损和报价时效规则。历史窗口、策略信号或行情数据不完整时 fail-closed，并将原因写入事件时间线。前端 `/paper` 已提供策略选择、资金比例、自动模拟下单开关、生命周期控制和事件查看。详见 `docs/phase-4b-observations.md`。
+
+该增量仍严格为 `paper_only`，不读取券商凭据、不调用真实交易接口，也不代表真实资金观察已经接入；主 agent 复核、最新全量回归和浏览器点击链路验收完成后，才能将其标记为 Phase 4B 完成。
+
+### Phase 4B 最终验收状态（2026-09-06）
+
+Phase 4B 已按上述 A 股纸面观察范围完成验收：历史回放的成交/Fill/Ledger/Lot 日期与 `as_of` 一致，调度器会为观察新开仓补齐估值报价；`PaperLot.owner` 区分 `strategy` 与 `manual` 批次，策略减仓不会误卖同证券的手动加仓；旧版 SQLite 会将缺失归属字段迁移为 `manual`。独立 agent 复核无 P0/P1，后端全量 **377 passed**（1 个既有 matcher warning），前端测试 **6 passed**、类型检查和生产构建通过，浏览器已验证 `/market` → 详情页 → 返回、基金/美股切换、589px 无横向溢出及 `/paper` 观察边界提示。
+
+因此，Phase 4B 可标记为“按定义范围完成”：范围严格限于单账户 A 股策略观察和纸面订单；基金/美股行情详情已可用，但跨市场纸面策略观察、多策略批次隔离和真实券商执行转入 Phase 4C/后续阶段。`paper_only=true`、`live_execution=false`、`can_submit_live=false` 继续保持，不得据此宣称真实资金可交易。
+
+### Phase 4C 当前施工与验收状态（2026-09-06）
+
+Phase 4C 已落地市场维度的纸面账户、A 股/国内基金/美股代码与数量规则、交易日校验、基金 Eastmoney NAV 证据登记、历史日期防未来数据泄漏、策略批次 `owner_id` 隔离和非 A 股观察边界。市场页与独立详情页支持指数/证券点击跳转、日 K/周 K/月 K、指标切换和详情到模拟交易的预填链路；指数详情明确为“仅供观察”，不提供交易入口。
+
+当前验证：后端全量 **392 passed**（1 个既有 matcher warning），跨市场与观察边界定向 **13 passed**，前端 **6 passed**，`vue-tsc`/Vite 构建、`compileall`、Ruff 和 `git diff --check` 通过；Playwright 已验证桌面/589px 窄屏市场链路。独立 agent 复核无 P0/P1。
+
+该阶段仍不能标记为完整 Phase 4C：跨市场策略信号和基金/美股自动估值适配器尚未开放；基金 NAV 证据已持久化到 SQLite，但多实例部署的锁与共享存储仍需专项验证；直接服务调用省略 `trade_date` 仍保留离线回放兼容路径。详见 `docs/phase-4c-plan.md` 与 `docs/phase-4c-validation.md`。真实券商执行边界继续保持关闭。
+
 ## 当前可验证的 API
 
 - `GET /api/v1/live/capabilities`
@@ -116,6 +173,8 @@ M4 独立运行态验收已通过：已验证日/周/月周期、四类子图、
 - `POST /api/v1/live/drafts/{id}/confirm`
 - `POST /api/v1/live/drafts/{id}/cancel`
 - `GET /api/v1/live/audit`
+- `GET/POST /api/v1/live/sandbox/sessions`
+- `POST /api/v1/live/sandbox/sessions/{id}/faults`（仅本地故障演练）
 
 这些接口只构成“准备和阻断”控制面；在没有真实适配器之前，`confirm` 不会发送订单。
 

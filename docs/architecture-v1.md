@@ -49,6 +49,7 @@ FastAPI 应用层      │
 - 每条响应必须携带 `source`、`as_of`、`received_at`、`freshness` 和 `is_fallback`；过期缓存不能标记为实时。
 - 采集采用超时、有限重试、断路、原子落盘、schema 校验和最近成功缓存；数据源失败不返回伪造价格。
 - 复权、成分股、财务数据必须使用 point-in-time 可见日期；无法证明时间点正确的数据不能进入严肃回测。
+- 基本面数据按 `report_date` 与 `announce_date` 双时间建模；查询必须传递 `as_of`，只选择 `announce_date <= as_of` 的最新版本。没有公告日期或授权来源的数据只能作为待导入文件，不能进入价值/质量回测。
 
 ### 3.2 研究与回测
 
@@ -147,4 +148,9 @@ main
 - Phase 2 自动化已接入：`PaperDailyScheduler` 按上海交易日运行，收盘前自动任务只记录“尚未收盘”而不冻结当天结果；使用实时源对所有活跃账户做估值并生成日报，后续成交会触发当日任务重新估值；行情源不可用、缺失或时间戳不新鲜时，任务记录 `skipped` 而不伪造价格；实时源禁止回写历史日期，历史回放必须使用明确支持历史数据的测试/回放 provider；SQLite 文件数据库使用 `BEGIN IMMEDIATE` 配合进程锁防止跨进程并发写入；调度运行记录可查询，未来日期拒绝执行。旧 `/paper/init|trigger|reset` 接口仅为兼容旧模拟引擎，Phase 2 页面不再调用它们。
 - 当前验证：后端 `pytest` **226 passed, 4 warnings**；前端 Node 测试 **6 passed**，`npm run build` 成功；应用入口导入与 Phase 2 lifespan 启停已验证；运行时接口已验证健康检查、持久账户、订单、T+1 拒单、估值、对账和调度器未来日期/实时源历史日期保护。由于外部行情连接在当前环境受限，自动任务会明确记录 `market_data_unavailable`，不能据此声称实时行情已接通。
 - Phase 3 当前施工结果：已建立 `LiveBrokerGateway` / `BrokerCapabilities` 扩展契约（含券商订单 ID、未完成订单恢复和带游标成交回放接口）；新增默认关闭的实盘能力状态、持久化 kill switch、券商连接登记（仅允许 `env:` / `keychain:` 凭证引用）、服务端订单草案预检、费用估算、报价来源与人工确认门、草案取消和 append-only 审计接口。审计写入边界统一递归脱敏，Compose API 端口默认只发布到宿主机 loopback。当前没有注册任何真实券商适配器，`can_submit_live=false`，确认接口会安全阻断；详见 `docs/phase-3-plan.md`。
+- Phase 3B-S / 3C-O 增量：新增 `SandboxBrokerGateway` 与 `/api/v1/live/sandbox` 本地确定性演练接口，可验证提交、部分成交、继续撮合、撤单、未完成订单恢复和事件 cursor；新增 `/api/v1/live/audit/export` 脱敏 JSON/CSV 导出。沙盒会话通过本地 JSON checkpoint 原子持久化，`supports_live=false`，不读取凭证、不联网、不创建 `PaperOrder`，且不改变实盘能力阻断。官方券商沙盒、认证授权、真实券商备份和对账监控仍未接入。
+- Phase 3C-O 运维增量：新增 `/api/v1/live/ops/status` 控制面健康摘要与告警，以及带 SHA-256 校验和的安全备份 envelope 和只读完整性校验。备份排除凭证，恢复接口保持关闭；这不等同于多用户认证、真实券商凭证轮换、跨主机恢复或远程监控。
+- Phase 3C-A 认证增量：新增可配置 `QUANT_OPERATOR_TOKEN`。令牌非空时，`/api/v1/live/**` 和 `/api/v1/live/sandbox/**` 统一要求 `X-Operator-Token`，使用常量时间比较；空令牌仅保留 loopback 开发体验，`/api/health` 不受影响。
+- Phase 3C-R 凭证引用轮换：新增连接凭证定位符更新接口；只接受 `env:`/`keychain:` 引用，更新后自动停用连接并要求重新测试，不接触明文凭证。
+- Phase 3C-F 本地故障演练：本地确定性沙盒可持久化 `submit`/`advance`/`reconcile` 故障开关，用固定 503 验证前端降级、checkpoint 回滚、重启恢复和幂等重试；不连接券商，也不解除 `can_submit_live=false`。官方券商故障、对账和监控仍待适配器接入后验收。
 - 市场行情数据源已扩展：市场页优先请求腾讯公开快照 `tencent:qt`，失败或缺码时回退到 AKShare Eastmoney/Sina；本地日线窗口不足或仅部分覆盖时，日 K 页面回退到腾讯 `qfqday` JSON 接口。每条数据保留来源、源时间、接收时间和 freshness，全部源失败返回结构化 503；非法日期、倒序日期和超长远程区间均显式拒绝；详见 `docs/market-data-sources.md`。

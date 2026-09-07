@@ -5,6 +5,20 @@ const api = axios.create({
   timeout: 30000,
 })
 
+api.interceptors.request.use((config) => {
+  const url = config.url ?? ''
+  if (url.startsWith('/live') && typeof window !== 'undefined') {
+    try {
+      const token = window.sessionStorage.getItem('quant.operator.token')
+      if (token) config.headers.set('X-Operator-Token', token)
+    } catch {
+      // Access to sessionStorage can be denied in privacy-restricted contexts;
+      // the request proceeds and the server returns its normal 401 guidance.
+    }
+  }
+  return config
+})
+
 api.interceptors.response.use(
   (res) => res,
   (err) => {

@@ -12,8 +12,10 @@ from server.services.live_readiness import (
     cancel_draft,
     confirm_draft,
     create_order_draft,
+    export_audit_events,
     list_audit_events,
     register_connection,
+    rotate_connection_credential,
     set_kill_switch,
     test_connection as probe_connection,
 )
@@ -50,6 +52,23 @@ def test_connection_accepts_only_opaque_credential_reference(monkeypatch):
     assert checked["enabled"] is False
     audit = list_audit_events(db)
     assert "IBKR_API_KEY" not in str(audit)
+
+
+def test_credential_reference_rotation_invalidates_connection_until_retest(monkeypatch):
+    db = _db()
+    monkeypatch.setattr(live_readiness, "_adapter_capabilities", {})
+    connection = register_connection(db, provider="ibkr", account_ref="rotate-demo",
+                                     mode="sandbox", credential_ref="env:OLD_REF")
+    rotated = rotate_connection_credential(db, connection["id"], credential_ref="keychain:NEW_REF")
+    assert rotated["credential_ref_configured"] is True
+    assert rotated["enabled"] is False
+    assert rotated["status"] == "disabled"
+    assert rotated["last_error"] == "credential_reference_changed_retest_required"
+    audit = list_audit_events(db)
+    assert any(event["action"] == "broker_connection.credential_ref.rotate" for event in audit)
+    assert "NEW_REF" not in str(audit)
+    with pytest.raises(ValueError, match="secret values"):
+        rotate_connection_credential(db, connection["id"], credential_ref="raw-secret")
 
 
 def test_order_draft_runs_server_side_checks_and_never_creates_order(monkeypatch):
@@ -131,3 +150,17 @@ def test_audit_redacts_secret_shaped_free_text_at_write_boundary(monkeypatch):
     assert "token=[REDACTED]" not in serialized
     assert events[0]["details"]["reason_present"] is True
     assert live_readiness.control_status(db)["reason"] == "user_reason_provided"
+
+
+def test_audit_export_uses_redacted_view_and_explicit_format():
+    db = _db()
+    set_kill_switch(db, active=True, reason="token=SUPER_SECRET_VALUE")
+    json_body, json_type = export_audit_events(db, format="json")
+    csv_body, csv_type = export_audit_events(db, format="csv")
+    assert json_type.startswith("application/json")
+    assert csv_type.startswith("text/csv")
+    assert "SUPER_SECRET_VALUE" not in json_body
+    assert "SUPER_SECRET_VALUE" not in csv_body
+    assert "action" in csv_body and "outcome" in csv_body
+    with pytest.raises(ValueError, match="format must be json or csv"):
+        export_audit_events(db, format="xml")

@@ -4,6 +4,7 @@
 Portfolio、Recorder 串联，按交易日迭代执行完整回测流程。
 """
 import time
+import json
 from datetime import date
 from pathlib import Path
 from typing import Type
@@ -39,6 +40,10 @@ class BacktestEngine:
     def __init__(self, strategy_class: Type[Strategy], **strategy_kwargs):
         self._strategy_class = strategy_class
         self._stock_list = strategy_kwargs.pop("stock_list", None)
+        # Cost scenarios are resolved from a small, versioned registry.  Keep
+        # this outside strategy parameters so changing execution assumptions
+        # creates different run evidence without changing the alpha code.
+        self._cost_scenario = strategy_kwargs.pop("cost_scenario", "paper_baseline_v1")
         self._strategy_kwargs = strategy_kwargs
 
     def run(
@@ -52,6 +57,7 @@ class BacktestEngine:
         rebalance_weekday: int = 5,
         cancel_check=None,
         max_seconds: float | None = None,
+        calendar: TradingCalendar | None = None,
     ) -> str:
         """运行回测
 
@@ -69,7 +75,13 @@ class BacktestEngine:
         """
         started_at = time.monotonic()
         # ---- 初始化 ----
-        calendar = TradingCalendar()
+        calendar = calendar or TradingCalendar(start_year=start.year, end_year=end.year)
+        calendar_report = calendar.ensure_coverage(start, end)
+        if not calendar_report.get("complete"):
+            raise ValueError(
+                "trading_calendar_coverage_insufficient: "
+                + json.dumps(calendar_report, ensure_ascii=False, sort_keys=True)
+            )
         trading_days = calendar.get_trading_days(start, end)
 
         if not trading_days:
@@ -89,14 +101,62 @@ class BacktestEngine:
             codes=stock_list,
             start=trading_days[0],
             end=trading_days[-1],
+            calendar=calendar,
         )
+        # A production DataAPI returns a structured coverage report.  Treat a
+        # missing/invalid report as a compatibility condition for synthetic
+        # test doubles, but never allow a real incomplete report or read error
+        # to become a plausible partial backtest.
+        data_coverage = data_handler.coverage_report
+        if isinstance(data_coverage, dict):
+            if data_handler.load_error:
+                data_coverage = dict(data_coverage)
+                data_coverage["load_error"] = data_handler.load_error
+                raise ValueError(
+                    "daily_data_load_failed: "
+                    + json.dumps(data_coverage, ensure_ascii=False, sort_keys=True)
+                )
+            if not data_coverage.get("complete"):
+                raise ValueError(
+                    "daily_data_coverage_insufficient: "
+                    + json.dumps(data_coverage, ensure_ascii=False, sort_keys=True)
+                )
+            expected_calendar_hash = calendar_report.get("content_hash")
+            actual_calendar_hash = data_coverage.get("calendar_content_hash")
+            if expected_calendar_hash and actual_calendar_hash != expected_calendar_hash:
+                raise ValueError(
+                    "daily_data_calendar_mismatch: "
+                    f"engine={expected_calendar_hash} coverage={actual_calendar_hash}"
+                )
+            expected_codes = sorted(dict.fromkeys(stock_list))
+            items = data_coverage.get("items")
+            item_map = {
+                str(item.get("code")): item
+                for item in items
+                if isinstance(item, dict) and item.get("code")
+            } if isinstance(items, list) else {}
+            if sorted(item_map) != expected_codes or any(
+                item_map[code].get("status") != "complete"
+                or not item_map[code].get("content_hash")
+                for code in expected_codes
+            ):
+                raise ValueError(
+                    "daily_data_coverage_invalid: "
+                    + json.dumps(data_coverage, ensure_ascii=False, sort_keys=True)
+                )
+            if data_coverage.get("dataset_hash") != DataAPI.daily_dataset_hash(data_coverage):
+                raise ValueError("daily_data_dataset_hash_invalid")
+            if data_coverage.get("coverage_hash") != DataAPI.daily_coverage_hash(data_coverage):
+                raise ValueError("daily_data_coverage_hash_invalid")
+        elif data_handler.load_error:
+            raise ValueError("daily_data_load_failed: " + data_handler.load_error)
         context._data_handler = data_handler
         scheduler = RebalanceScheduler(
             calendar,
             frequency=rebalance_frequency,
             weekday=rebalance_weekday,
         )
-        cost_model = CostModel()
+        cost_model = CostModel.from_scenario(self._cost_scenario)
         order_manager = OrderManager(cost_model)
         matcher = Matcher(cost_model)
         portfolio = Portfolio(initial_capital=initial_capital)
@@ -108,6 +168,26 @@ class BacktestEngine:
         recorder.set_meta("initial_capital", initial_capital)
         recorder.set_meta("benchmark", benchmark)
         recorder.set_meta("rebalance_frequency", rebalance_frequency)
+        recorder.set_meta("execution_model", "next_trading_day_open-v1")
+        recorder.set_meta("calendar_version", calendar_report["calendar_version"])
+        recorder.set_meta("calendar_source", calendar_report["source"])
+        recorder.set_meta("calendar_content_hash", calendar_report["content_hash"])
+        recorder.set_meta("calendar_coverage_start", calendar_report["coverage_start"])
+        recorder.set_meta("calendar_coverage_end", calendar_report["coverage_end"])
+        recorder.set_meta("calendar_verified", calendar_report["verified"])
+        recorder.set_meta("cost_model", cost_model.as_manifest())
+        recorder.set_meta("cost_scenario", cost_model.scenario)
+        # Keep requested bounds (start_date/end_date) separate from the
+        # observed local-data bounds.  A successful loop over calendar days is
+        # not evidence that every requested day had usable OHLCV rows.
+        if data_handler.available_start is not None:
+            recorder.set_meta("data_available_start", str(data_handler.available_start))
+        if data_handler.available_end is not None:
+            recorder.set_meta("data_available_end", str(data_handler.available_end))
+        if isinstance(data_coverage, dict):
+            recorder.set_meta("daily_data_coverage", data_coverage)
+            if data_coverage.get("coverage_hash"):
+                recorder.set_meta("daily_data_coverage_hash", data_coverage["coverage_hash"])
 
         pending_target: dict[str, float] | None = None
         pending_signal_date: date | None = None
@@ -216,14 +296,14 @@ class BacktestEngine:
         except Exception:
             pass
 
-        # 兜底: 使用一些已知的大盘股
-        return [
-            '000001.SZ', '000002.SZ', '000858.SZ', '002415.SZ',
-            '600000.SH', '600036.SH', '600519.SH', '601318.SH',
-            '600276.SH', '000333.SZ', '300750.SZ', '000651.SZ',
-            '002714.SZ', '601166.SH', '600900.SH', '000568.SZ',
-            '002304.SZ', '600809.SH', '000725.SZ', '002475.SZ',
-        ]
+        # Never silently replace a point-in-time index universe with a
+        # hard-coded survivor list. That would make a backtest look successful
+        # while introducing survivorship bias. Users can provide an explicit
+        # stock_list, or import dated constituent snapshots first.
+        raise RuntimeError(
+            "Point-in-time stock pool unavailable for backtest date "
+            f"{first_day}; provide stock_list or import historical index snapshots"
+        )
 
     def _signals_to_orders(
         self,

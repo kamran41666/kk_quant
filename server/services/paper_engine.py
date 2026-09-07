@@ -1,9 +1,11 @@
 """Simulation Account — wraps phase-one backtest engine for daily paper trading"""
 import json
+import math
 import warnings
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional, Type
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -19,6 +21,14 @@ from quant_engine.backtest.strategy import Strategy
 from server.models.database import SessionLocal
 from server.models.schema import PaperSnapshot, PaperPosition as PaperPositionModel, Deviation
 from server.config import settings
+
+
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _trade_date() -> date:
+    """Return the platform accounting date in China Standard Time."""
+    return datetime.now(SHANGHAI_TZ).date()
 
 
 class SimulationAccount:
@@ -75,7 +85,7 @@ class SimulationAccount:
                         shares=pp.shares,
                         avg_cost=pp.avg_cost,
                         market_value=pp.market_value,
-                        unlock_date=date.today(),  # assume already unlocked
+                        unlock_date=_trade_date(),  # assume already unlocked
                     )
                     self._portfolio._positions[pp.code] = pos
         finally:
@@ -131,19 +141,45 @@ class SimulationAccount:
             dict with status and summary (for API response)
         """
         if dt is None:
-            dt = date.today()
+            dt = _trade_date()
 
+        if hasattr(self._calendar, "ensure_coverage"):
+            calendar_report = self._calendar.ensure_coverage(dt, dt)
+            if not calendar_report.get("complete"):
+                return {
+                    "status": "blocked",
+                    "code": "TRADING_CALENDAR_UNAVAILABLE",
+                    "reason": (
+                        "A verified A-share trading calendar is required before paper valuation; "
+                        f"source={calendar_report.get('source', 'unknown')}"
+                    ),
+                }
         if not self._calendar.is_trading_day(dt):
             return {"status": "skipped", "reason": f"{dt} is not a trading day"}
 
         # Get today's prices
         codes = list(self._portfolio.positions.keys())
         if not codes:
-            # Use a default watchlist for initial run
+            # A paper account must still use a point-in-time universe.  Never
+            # fall back to a hand-picked survivor list: doing so makes an
+            # apparently successful first run introduce look-ahead bias.
             try:
                 codes = self._api.index_components("000300", dt)[:50]
-            except Exception:
-                codes = ["000001.SZ", "000002.SZ", "000858.SZ", "002415.SZ", "600000.SH"]
+            except Exception as exc:
+                return {
+                    "status": "blocked",
+                    "code": "PIT_STOCK_POOL_UNAVAILABLE",
+                    "reason": (
+                        "No point-in-time index constituent snapshot is available "
+                        f"for {dt}; import a dated snapshot before starting paper trading ({type(exc).__name__})."
+                    ),
+                }
+            if not codes:
+                return {
+                    "status": "blocked",
+                    "code": "PIT_STOCK_POOL_EMPTY",
+                    "reason": f"The point-in-time stock pool for {dt} is empty.",
+                }
 
         try:
             prices_df = self._api.daily(
@@ -153,8 +189,57 @@ class SimulationAccount:
                 fields=["close"],
                 adjust="event_driven",
             )
-        except Exception:
-            return {"status": "skipped", "reason": "No market data available"}
+        except Exception as exc:
+            return {
+                "status": "blocked",
+                "code": "PAPER_PRICE_DATA_UNAVAILABLE",
+                "reason": f"No market data available for {dt}: {type(exc).__name__}: {exc}",
+            }
+        if prices_df is None or prices_df.empty:
+            return {
+                "status": "blocked",
+                "code": "PAPER_PRICE_DATA_UNAVAILABLE",
+                "reason": f"No valid closing prices were returned for {dt}; no snapshot was saved.",
+            }
+
+        def close_price(code: str) -> Optional[float]:
+            try:
+                value = float(prices_df.loc[(code, dt), "close"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            return value if math.isfinite(value) and value > 0 else None
+
+        # Existing positions must never be valued at an invented zero.  A
+        # paper run is explicitly blocked until every held security has a
+        # valid close, preserving the previous snapshot and its equity.
+        missing_position_prices = [
+            code for code in self._portfolio.positions
+            if close_price(code) is None
+        ]
+        if missing_position_prices:
+            return {
+                "status": "blocked",
+                "code": "PAPER_POSITION_PRICES_INCOMPLETE",
+                "missing_codes": missing_position_prices,
+                "reason": (
+                    f"Closing prices are missing or invalid for {len(missing_position_prices)} held "
+                    "security(ies); no snapshot was saved."
+                ),
+            }
+        missing_requested_prices = [
+            code for code in codes
+            if close_price(code) is None
+        ]
+        if missing_requested_prices:
+            return {
+                "status": "blocked",
+                "code": "PAPER_PRICE_DATA_INCOMPLETE",
+                "missing_codes": missing_requested_prices,
+                "reason": (
+                    f"Closing prices are missing or invalid for {len(missing_requested_prices)} "
+                    "requested stock-pool security(ies); no snapshot was saved."
+                ),
+            }
 
         # Check if it's a rebalance day (Friday)
         is_friday = dt.weekday() == 4
@@ -181,7 +266,9 @@ class SimulationAccount:
                     if target_weight <= 0:
                         continue
                     try:
-                        price = float(prices_df.loc[(code, dt), 'close'])
+                        price = close_price(code)
+                        if price is None:
+                            continue
                     except (KeyError, TypeError):
                         continue
 
@@ -205,8 +292,10 @@ class SimulationAccount:
                 for order in orders:
                     # Simple match: use close price directly (no DataHandler in paper mode)
                     try:
-                        price = float(prices_df.loc[(order.code, dt), 'close'])
-                    except KeyError:
+                        price = close_price(order.code)
+                        if price is None:
+                            continue
+                    except (KeyError, TypeError):
                         continue
 
                     fill_shares = order.remaining
@@ -227,10 +316,17 @@ class SimulationAccount:
         # Update market values
         prices_dict = {}
         for code in list(self._portfolio.positions.keys()):
-            try:
-                prices_dict[code] = float(prices_df.loc[(code, dt), 'close'])
-            except (KeyError, TypeError):
-                prices_dict[code] = 0.0
+            price = close_price(code)
+            if price is None:
+                # This is defensive redundancy for mutations introduced by a
+                # strategy/fill; the preflight above handles normal paths.
+                return {
+                    "status": "blocked",
+                    "code": "PAPER_POSITION_PRICES_INCOMPLETE",
+                    "missing_codes": [code],
+                    "reason": "A held security lost its valid close before valuation; no snapshot was saved.",
+                }
+            prices_dict[code] = price
 
         self._portfolio.update_market_values(prices_dict, dt)
 

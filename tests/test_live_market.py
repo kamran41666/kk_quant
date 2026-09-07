@@ -181,6 +181,31 @@ def test_tencent_daily_provider_parses_qfq_kline_shape():
     assert rows[0]["source"] == "tencent:kline"
 
 
+def test_tencent_daily_provider_uses_raw_day_for_index_levels():
+    payload = {
+        "code": 0,
+        "data": {
+            "sh000001": {
+                "day": [
+                    ["2026-09-01", "3900.0", "3910.0", "3920.0", "3890.0", "1234"],
+                    ["2026-09-02", "3910.0", "3920.0", "3930.0", "3900.0", "2345"],
+                ]
+            }
+        },
+    }
+    urls: list[str] = []
+    provider = TencentDailyKlineProvider(
+        fetcher=lambda url, timeout: (urls.append(url) or json.dumps(payload).encode("utf-8")),
+    )
+
+    rows = provider.fetch_daily("000001.SH", date(2026, 9, 1), date(2026, 9, 2))
+
+    assert len(rows) == 2
+    assert rows[0]["code"] == "000001.SH"
+    assert rows[0]["adjust"] == "none"
+    assert ",day,,," in urls[0]
+
+
 def test_tencent_daily_provider_rejects_unbounded_history_request():
     provider = TencentDailyKlineProvider(fetcher=lambda url, timeout: b"{}")
 

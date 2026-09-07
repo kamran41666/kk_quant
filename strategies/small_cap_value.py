@@ -11,7 +11,7 @@
 Alpha 信号构成:
   1. 低波动 (volatility_1m, 负向) — 低波异象
   2. 短期反转 (momentum_1m 取负) — A股短期反转效应
-  3. 小市值 (log_market_cap, 负向) — 小盘溢价
+  3. 小市值代理 (log_market_cap_proxy, 负向) — 仅在缺少点时市值时使用
 
 风控:
   - 1月/4月/12月 空仓 (A股季节效应)
@@ -45,13 +45,13 @@ class SmallCapValueStrategy(Strategy):
         self.factor_weights = {
             "volatility_1m": -0.35,   # 偏好低波动
             "momentum_1m": -0.35,     # 偏好短期反转
-            "log_market_cap": -0.30,  # 偏好小市值
+            "log_market_cap_proxy": -0.30,  # 偏好小市值代理，非真实市值
         }
 
         # 注册因子
         self.use_factor("volatility_1m")
         self.use_factor("momentum_1m")
-        self.use_factor("log_market_cap")
+        self.use_factor("log_market_cap_proxy")
 
     def generate_signals(self, dt: date) -> dict[str, float]:
         # ---- Calendar effect: empty position ----
@@ -92,13 +92,12 @@ class SmallCapValueStrategy(Strategy):
         # 2. Momentum (20-day)
         mom = close.pct_change(20).iloc[-1]
 
-        # 3. Approximate circulating market cap from amount / turnover rate.
-        # This is a demo proxy. Production research must use a point-in-time
-        # fundamental/share-count provider.
+        # 3. Turnover-derived size proxy. This is explicitly not market cap;
+        # production research should provide point-in-time share counts.
         amount = df["amount"].unstack(level="code")
         turnover = df["turnover_rate"].unstack(level="code").replace(0, np.nan)
         approx_mcap = amount / (turnover / 100.0)
-        log_mcap: pd.Series = np.log(approx_mcap).iloc[-1]
+        log_mcap: pd.Series = np.log(approx_mcap.where(approx_mcap > 0)).iloc[-1]
 
         # ---- Cross-sectional z-score ----
         def cs_zscore(s: pd.Series) -> pd.Series:

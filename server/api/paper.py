@@ -1,12 +1,14 @@
 """Paper trading account endpoints"""
 from datetime import date, datetime
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
+import math
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 from server.models.database import get_db
 from server.models.schema import PaperSnapshot, PaperPosition as PaperPositionModel
+from quant_engine.data.live import SHANGHAI_TZ
 from server.services.paper_engine import SimulationAccount
 from server.services.paper_trading import (account_report, account_snapshot, build_daily_report, create_account,
     list_accounts, list_daily_reports, list_deviations, list_ledger, list_orders, list_valuations,
@@ -35,6 +37,7 @@ def run_scheduler_now(request: Request, run_date: Optional[date] = None):
 
 class CreatePaperAccountRequest(BaseModel):
     name: str = Field(default="默认模拟账户", min_length=1, max_length=120)
+    market: str = Field(default="a-share", pattern=r"^(a-share|cn-fund|us-equity)$")
     initial_capital: float = Field(default=1_000_000.0, gt=0, le=1_000_000_000_000)
     max_order_notional: float = Field(default=100_000.0, gt=0)
     max_position_weight: float = Field(default=0.25, gt=0, le=1)
@@ -43,21 +46,18 @@ class CreatePaperAccountRequest(BaseModel):
 
 class PaperOrderRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=160)
-    code: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
+    # Code format is market-specific and is therefore validated by the
+    # service after loading the account's authoritative market. Keeping this
+    # field open here allows both six-digit fund codes and US tickers.
+    code: str = Field(min_length=1, max_length=20)
+    market: Optional[str] = Field(default=None, pattern=r"^(a-share|cn-fund|us-equity)$")
     side: str = Field(pattern=r"^(buy|sell)$")
-    quantity: int = Field(gt=0, le=10_000_000)
+    quantity: float = Field(gt=0, le=10_000_000)
     price: float = Field(gt=0, le=10_000_000)
     price_source: str = Field(default="manual_input", min_length=1, max_length=80)
     price_as_of: Optional[datetime] = None
     price_freshness: str = Field(default="manual", pattern=r"^(manual|realtime|fresh|delayed|stale|unknown)$")
-
-    @field_validator("quantity")
-    @classmethod
-    def round_lot(cls, value: int) -> int:
-        if value % 100 != 0:
-            raise ValueError("A-share paper orders must use 100-share lots")
-        return value
-
+    trade_date: Optional[date] = None
 
 @router.post("/accounts")
 def create_paper_account(req: CreatePaperAccountRequest, db: Session = Depends(get_db)):
@@ -78,6 +78,8 @@ def get_paper_account(account_id: str, db: Session = Depends(get_db)):
         return account_snapshot(db, account_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/accounts/{account_id}/orders")
@@ -85,6 +87,10 @@ async def submit_paper_order(account_id: str, req: PaperOrderRequest, db: Sessio
     try:
         payload = req.model_dump()
         payload["price_as_of"] = req.price_as_of.isoformat() if req.price_as_of else None
+        # HTTP orders always carry an explicit session date. This makes a
+        # weekend/holiday request fail closed while direct service callers can
+        # retain the legacy default used by offline tests and replays.
+        payload["trade_date"] = req.trade_date or datetime.now(SHANGHAI_TZ).date()
         result = submit_order(db, account_id=account_id, **payload)
         if result["status"] == "filled":
             message = {"type": "order_fill", "account_id": account_id, "data": result}
@@ -123,14 +129,15 @@ class PaperValuationRequest(BaseModel):
     prices: dict[str, float] = Field(min_length=0)
     price_source: str = Field(default="manual_input", min_length=1, max_length=80)
     price_as_of: Optional[datetime] = None
-    price_freshness: str = Field(default="manual", pattern=r"^(manual|realtime|fresh|delayed|stale|unknown)$")
+    price_freshness: str = Field(default="manual", pattern=r"^(manual|realtime|fresh|delayed|stale|unknown|mixed)$")
+    price_metadata: Optional[dict[str, dict[str, Optional[str]]]] = None
 
     @field_validator("prices")
     @classmethod
     def positive_prices(cls, value: dict[str, float]) -> dict[str, float]:
         for code, price in value.items():
-            if not __import__("re").fullmatch(r"\d{6}\.(SH|SZ|BJ)", code) or price <= 0:
-                raise ValueError("prices must contain canonical A-share codes and positive values")
+            if not isinstance(code, str) or not code.strip() or not isinstance(price, (int, float)) or not math.isfinite(float(price)) or price <= 0:
+                raise ValueError("prices must contain non-empty symbols and positive finite values")
         return value
 
 
@@ -141,7 +148,8 @@ async def create_paper_valuation(account_id: str, req: PaperValuationRequest, db
                                 valuation_date=req.valuation_date,
                                 price_source=req.price_source,
                                 price_as_of=req.price_as_of.isoformat() if req.price_as_of else None,
-                                price_freshness=req.price_freshness)
+                                price_freshness=req.price_freshness,
+                                price_metadata=req.price_metadata)
         message = {"type": "portfolio_update", "account_id": account_id, "data": result}
         try:
             await manager.broadcast(f"paper:{account_id}", message)
@@ -169,6 +177,8 @@ def get_paper_report(account_id: str, db: Session = Depends(get_db)):
         return account_report(db, account_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/accounts/{account_id}/reconcile")
@@ -177,6 +187,8 @@ def get_paper_reconciliation(account_id: str, db: Session = Depends(get_db)):
         return reconcile_account(db, account_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 class PaperDeviationRequest(BaseModel):
@@ -230,7 +242,7 @@ _paper_strategy_class: Optional[str] = None
 _paper_strategy_params: dict = {}
 
 
-def get_paper_account() -> Optional[SimulationAccount]:
+def get_legacy_paper_account() -> Optional[SimulationAccount]:
     return _paper_account
 
 
@@ -334,7 +346,7 @@ def trigger_paper_run():
     if _paper_account is None:
         raise HTTPException(status_code=400, detail="Paper account not initialized. POST /paper/init first")
 
-    result = _paper_account.run_daily(date.today())
+    result = _paper_account.run_daily(datetime.now(SHANGHAI_TZ).date())
     return result
 
 

@@ -192,7 +192,24 @@ def calmar_ratio(daily_returns: pd.Series) -> float:
     return float(ann_ret / abs(mdd))
 
 
-def win_rate(trades_df: pd.DataFrame) -> float:
+def _sell_net_pnl(trades_df: pd.DataFrame) -> Optional[pd.Series]:
+    """Return sell-side net cash flows when the schema supports it.
+
+    Domestic-fund NAV runs record ``units`` and a single ``fee`` field.  They
+    do not carry cost-basis lots, so treating every positive redemption as a
+    profitable sell would be misleading.  Return ``None`` for that schema so
+    callers can show the metric as unavailable.
+    """
+    required = {"side", "amount", "commission", "stamp_duty"}
+    if not required.issubset(trades_df.columns):
+        return None
+    sells = trades_df[trades_df["side"] == "sell"]
+    if sells.empty:
+        return pd.Series(dtype=float)
+    return sells["amount"] - sells["commission"] - sells["stamp_duty"]
+
+
+def win_rate(trades_df: pd.DataFrame) -> Optional[float]:
     """胜率 — 盈利交易笔数 / 总交易笔数
 
     每笔交易的盈亏由 amount 字段决定: 卖出为正, 买入为负 (建仓成本)。
@@ -208,22 +225,16 @@ def win_rate(trades_df: pd.DataFrame) -> float:
     """
     if trades_df.empty:
         return 0.0
-
-    # 按 trade_id 合并多腿 (如果有)
-    # 简单处理: 每笔成交的净现金流 = amount - commission - stamp_duty
-    # 卖出amount为正 → 盈利; 买入amount为负 → 无法单独判断盈亏
-    # 所以我们用 trade 的 side 来判断: 只看卖出交易
-    sells = trades_df[trades_df["side"] == "sell"]
-    if sells.empty:
+    net_pnl = _sell_net_pnl(trades_df)
+    if net_pnl is None:
+        return None
+    if net_pnl.empty:
         return 0.0
-
-    # 卖出交易的净收益
-    net_pnl = sells["amount"] - sells["commission"] - sells["stamp_duty"]
     wins = (net_pnl > 0).sum()
-    return float(wins / len(sells))
+    return float(wins / len(net_pnl))
 
 
-def profit_loss_ratio(trades_df: pd.DataFrame) -> float:
+def profit_loss_ratio(trades_df: pd.DataFrame) -> Optional[float]:
     """盈亏比 — 平均盈利 / 平均亏损 (绝对值)
 
     Args:
@@ -234,12 +245,11 @@ def profit_loss_ratio(trades_df: pd.DataFrame) -> float:
     """
     if trades_df.empty:
         return 0.0
-
-    sells = trades_df[trades_df["side"] == "sell"]
-    if sells.empty:
+    net_pnl = _sell_net_pnl(trades_df)
+    if net_pnl is None:
+        return None
+    if net_pnl.empty:
         return 0.0
-
-    net_pnl = sells["amount"] - sells["commission"] - sells["stamp_duty"]
     gains = net_pnl[net_pnl > 0]
     losses = net_pnl[net_pnl < 0]
 

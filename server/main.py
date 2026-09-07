@@ -4,16 +4,29 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from server.models.database import init_db
-from server.api import strategies, backtest, market, analytics, paper, live
+from server.api import strategies, backtest, market, analytics, paper, observations, live, sandbox
 from server.config import settings
 from server.services.paper_scheduler import PaperDailyScheduler
+from server.ws.manager import manager
+from quant_engine.data.global_markets import EastmoneyFundDataProvider, YahooUSMarketDataProvider
 from quant_engine.data.live import AKShareLiveMarketDataProvider
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    scheduler = PaperDailyScheduler(AKShareLiveMarketDataProvider(), settings.scheduler_interval_seconds) if settings.scheduler_enabled else None
+    scheduler = (
+        PaperDailyScheduler(
+            AKShareLiveMarketDataProvider(),
+            settings.scheduler_interval_seconds,
+            market_providers={
+                "cn-fund": EastmoneyFundDataProvider(),
+                "us-equity": YahooUSMarketDataProvider(),
+            },
+            broadcast=manager.broadcast,
+        )
+        if settings.scheduler_enabled else None
+    )
     task = asyncio.create_task(scheduler.run_forever()) if scheduler else None
     app.state.paper_scheduler = scheduler
     try:
@@ -66,7 +79,9 @@ app.include_router(backtest.router, prefix="/api/v1")
 app.include_router(market.router, prefix="/api/v1")
 app.include_router(analytics.router, prefix="/api/v1")
 app.include_router(paper.router, prefix="/api/v1")
+app.include_router(observations.router, prefix="/api/v1")
 app.include_router(live.router, prefix="/api/v1")
+app.include_router(sandbox.router, prefix="/api/v1")
 
 
 @app.get("/api/health")
@@ -75,9 +90,6 @@ def health():
 
 
 from fastapi import WebSocket, WebSocketDisconnect
-from server.ws.manager import manager
-
-
 @app.websocket("/ws/{channel}")
 async def websocket_endpoint(websocket: WebSocket, channel: str):
     await manager.connect(websocket, channel)

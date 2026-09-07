@@ -7,6 +7,8 @@ server-authoritative pre-trade draft, and an append-only audit trail.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 import threading
@@ -164,6 +166,36 @@ def register_connection(db: Session, *, provider: str, account_ref: str,
 
 def list_connections(db: Session) -> list[dict[str, Any]]:
     return [_connection_dict(row) for row in db.query(BrokerConnection).order_by(BrokerConnection.created_at.desc()).all()]
+
+
+def rotate_connection_credential(db: Session, connection_id: str, *, credential_ref: str,
+                                 actor: str = "local-user") -> dict[str, Any]:
+    """Replace an opaque credential reference without handling the secret.
+
+    Rotation deliberately invalidates the connection until a future reviewed
+    adapter re-tests it. The API accepts only an ``env:`` or ``keychain:``
+    locator, never the credential value itself.
+    """
+    reference = credential_ref.strip()
+    if not _credential_ref_pattern.fullmatch(reference):
+        raise ValueError("credential_ref must be an env: or keychain: reference; secret values are not accepted")
+    with _service_lock:
+        row = db.query(BrokerConnection).filter(BrokerConnection.id == connection_id).first()
+        if not row:
+            raise KeyError("broker connection not found")
+        previous_configured = bool(row.credential_ref)
+        row.credential_ref = reference
+        row.status = "disabled"
+        row.enabled = False
+        row.last_error = "credential_reference_changed_retest_required"
+        row.updated_at = _now()
+        _audit(db, action="broker_connection.credential_ref.rotate",
+               resource_type="broker_connection", resource_id=row.id, outcome="accepted",
+               details={"credential_ref_configured": True,
+                        "previous_credential_ref_configured": previous_configured}, actor=actor)
+        db.commit()
+        db.refresh(row)
+        return _connection_dict(row)
 
 
 def _capability_payload(db: Session) -> dict[str, Any]:
@@ -489,3 +521,19 @@ def list_audit_events(db: Session, limit: int = 100) -> list[dict[str, Any]]:
              "resource_type": row.resource_type, "resource_id": row.resource_id,
              "outcome": row.outcome, "details": json.loads(row.details or "{}"),
              "created_at": row.created_at} for row in rows]
+
+
+def export_audit_events(db: Session, *, limit: int = 500, format: str = "json") -> tuple[str, str]:
+    """Serialize the already-redacted audit view for local operator export."""
+    if format not in {"json", "csv"}:
+        raise ValueError("format must be json or csv")
+    events = list_audit_events(db, limit)
+    if format == "json":
+        return json.dumps(events, ensure_ascii=False, sort_keys=True, indent=2), "application/json; charset=utf-8"
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=["id", "created_at", "actor", "action",
+                                                "resource_type", "resource_id", "outcome", "details"])
+    writer.writeheader()
+    for event in events:
+        writer.writerow({**event, "details": json.dumps(event["details"], ensure_ascii=False, sort_keys=True)})
+    return output.getvalue(), "text/csv; charset=utf-8"

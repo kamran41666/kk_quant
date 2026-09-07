@@ -7,15 +7,43 @@ from quant_engine.factor.base import Factor
 
 
 class LogMarketCap(Factor):
+    """Log of point-in-time market capitalization.
+
+    ``market_cap`` must be supplied by a fundamentals/share-count provider in
+    the same currency and as-of date as the price. It is deliberately not
+    inferred from trading volume.
+    """
     name = "log_market_cap"
     category = "size"
-    inputs = ["close", "volume"]
+    inputs = ["market_cap"]
     window = 1
+    is_proxy = False
+    definition = "ln(point-in-time market capitalization; market_cap is currency units)"
 
     def compute(self, data: pd.DataFrame) -> pd.Series:
-        # 简化: 用 close * volume 近似市值
-        approx_mcap = data["close"] * data["volume"]
-        return np.log(approx_mcap.replace(0, np.nan))
+        if "market_cap" not in data.columns:
+            raise ValueError("log_market_cap requires point-in-time market_cap data")
+        market_cap = pd.to_numeric(data["market_cap"], errors="coerce")
+        return np.log(market_cap.where(market_cap > 0))
+
+
+class LogMarketCapProxy(Factor):
+    """Turnover-derived size proxy used only by the demo strategy."""
+    name = "log_market_cap_proxy"
+    category = "size"
+    inputs = ["amount", "turnover_rate"]
+    window = 1
+    is_proxy = True
+    definition = "ln(amount / (turnover_rate / 100)); proxy, not market capitalization"
+
+    def compute(self, data: pd.DataFrame) -> pd.Series:
+        required = {"amount", "turnover_rate"}
+        if not required.issubset(data.columns):
+            raise ValueError("log_market_cap_proxy requires amount and turnover_rate")
+        amount = pd.to_numeric(data["amount"], errors="coerce")
+        turnover = pd.to_numeric(data["turnover_rate"], errors="coerce").replace(0, np.nan)
+        proxy = amount / (turnover / 100.0)
+        return np.log(proxy.where(proxy > 0))
 
 
 class Turnover1M(Factor):
