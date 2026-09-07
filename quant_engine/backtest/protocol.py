@@ -259,4 +259,3 @@ STRATEGY_PROTOCOL = {
     "output_contract": "StrategyOutput[target_weights, diagnostics]",
     "discovery": "strategies package auto-discovery",
 }
-

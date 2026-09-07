@@ -1,7 +1,8 @@
 # Strategy Protocol v2 改造检查点
 
-记录时间：2026-09-07（Asia/Shanghai）  
-基础分支：`codex/phase-3-live-readiness`  
+记录时间：2026-09-07（Asia/Shanghai）
+
+基础分支：`codex/phase-3-live-readiness`
 改造状态：**进行中，不是完整交付，不代表 Phase 4 完成**
 
 ## 1. 本轮目标
