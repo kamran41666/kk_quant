@@ -1,0 +1,25 @@
+{
+  "experiment_id": "copa-price-only-v1-frozen-matrix",
+  "sealed_at": "2026-09-08T03:30:00+00:00",
+  "evidence_grade": "local_sequence_only",
+  "limitation": "This evidence file was created in the same uncommitted work session as the first result. Timestamps and hashes support local reproducibility but do not cryptographically prove public pre-registration before performance was viewed.",
+  "expected": {
+    "dataset_id": "copa-price-only-v1-2018-2026-r2",
+    "dataset_hash": "451d8af4c059958d9fcb519328372443fe9f7ffcc839252ff9387e8741275a38",
+    "coverage_hash": "a4e24b63ffa9423e755a8cbcdb03b5a863ace0070edd04257b9e10eac9d2b5f4",
+    "calendar_source": "akshare:sina_trade_calendar",
+    "calendar_content_hash": "b5a75abe0d4aea5c6cb7f64b8691ebed9b8b24fa82f55584b1795e7497ca3f27",
+    "protocol_sha256": "32e1f96f5fe0943f83337939ff63f13959510e73142048e3ab6ecc919408004a",
+    "strategy_source_hash": "2ee342ec209e457bf3ca734442600c04e80fa7bf4c2e97c3c22afe0cf908df08",
+    "execution_code_hashes": {
+      "quant_engine/backtest/engine.py": "c0b13b381b4d5343bcf48d653bd9a5a787c67d6de7c6e52c26f2a4741f2ddb49",
+      "quant_engine/backtest/matcher.py": "b271a20d86b3318a5107d06245025702a486f25129956c142a3b6069f08e4e91",
+      "quant_engine/backtest/cost_model.py": "9f792c0dcf85d30235c97aee4885370d592f91ce304d864854f558e1916be94c",
+      "quant_engine/backtest/portfolio.py": "9aa9fd10c842fe696187e3a0921b03b99425fe22b57002080906abd5f166cd17",
+      "quant_engine/backtest/data_handler.py": "ad9a6b255f1293b0468d8e527934ca86cc97a6fb070c04be5d8242007a14d10a",
+      "quant_engine/data/api.py": "48c74a39292a37b9e0d7886684f49c82a663d2a741e24f844b13f74e66329bed",
+      "quant_engine/data/adjust.py": "951fdae013dcceb0b36efb7e35f9044f61a58c1fa77be4d6518a8da299d82fae",
+      "strategies/cycle_of_price_action.py": "c06c64a4b25a0c221b78edb34d5ef4caa32b67b104bcd2f5b6ac1ef10e332b6d"
+    }
+  }
+}

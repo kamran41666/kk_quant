@@ -73,7 +73,8 @@ def test_copa_strategy_is_discoverable_with_frozen_v2_contract():
     assert entry.spec.id == "cycle-of-price-action-price-only"
     assert entry.spec.version == "1.0.0"
     assert entry.spec.rebalance_frequency == "daily"
-    assert entry.spec.extensions["research_status"] == "unvalidated"
+    assert entry.spec.extensions["research_status"] == "blocked_by_research_gate"
+    assert entry.spec.extensions["research_gate_required"] is True
     assert entry.spec.max_gross_exposure == 0.9
 
 

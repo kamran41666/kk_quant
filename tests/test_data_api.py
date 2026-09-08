@@ -91,3 +91,37 @@ class TestDataAPI:
             assert first["items"][0]["content_hash"] != second["items"][0]["content_hash"]
         finally:
             api._price_store = previous
+
+    def test_daily_dataset_hash_is_independent_of_requested_code_order(self):
+        first = {
+            "coverage_version": "daily-coverage-v1",
+            "market": "a-share",
+            "start_date": "2024-01-02",
+            "end_date": "2024-01-03",
+            "adjust": "event_driven",
+            "items": [
+                {"code": "600000.SH", "content_hash": "a" * 64},
+                {"code": "000001.SZ", "content_hash": "b" * 64},
+            ],
+        }
+        second = {**first, "items": list(reversed(first["items"]))}
+        assert DataAPI.daily_dataset_hash(first) == DataAPI.daily_dataset_hash(second)
+
+    def test_daily_coverage_rejects_non_trading_day_rows(self, tmp_path):
+        api = DataAPI()
+        previous = api._price_store
+        store = PriceStore(base_dir=str(tmp_path))
+        api._price_store = store
+        try:
+            store.write("000001.SZ", pd.DataFrame([
+                {"date": "2024-01-02", "open": 10, "high": 11, "low": 9, "close": 10, "volume": 100},
+                {"date": "2024-01-03", "open": 10, "high": 11, "low": 9, "close": 10, "volume": 100},
+                {"date": "2024-01-06", "open": 10, "high": 11, "low": 9, "close": 10, "volume": 100},
+            ]))
+            report = api.daily_coverage(
+                ["000001.SZ"], date(2024, 1, 2), date(2024, 1, 6)
+            )
+            assert report["complete"] is False
+            assert report["items"][0]["unexpected_dates"] == ["2024-01-06"]
+        finally:
+            api._price_store = previous

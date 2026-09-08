@@ -20,6 +20,7 @@ from server.services.strategy_evidence import (
     manifest_is_complete,
     serialize_manifest,
     strategy_fingerprint,
+    strategy_research_gate_passed,
 )
 from quant_engine.backtest.cost_model import cost_scenario_catalog
 from quant_engine.backtest.protocol import StrategyProtocolError
@@ -398,6 +399,11 @@ def _execute_backtest(run_id: str, req: BacktestRunRequest):
             run.market in {"a-share", "cn-fund"}
             and run.strategy_fingerprint
             and manifest_is_complete(run.data_manifest)
+            and strategy_research_gate_passed(
+                registered.implementation,
+                params,
+                _manifest_payload(run),
+            )
         )
         run.completed_at = datetime.now().isoformat()
         db.commit()

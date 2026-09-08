@@ -7,6 +7,7 @@ from server.services.strategy_evidence import (
     manifest_is_complete,
     serialize_manifest,
     strategy_fingerprint,
+    strategy_research_gate_passed,
 )
 
 
@@ -17,6 +18,16 @@ def test_strategy_fingerprint_is_deterministic_and_parameter_sensitive():
     assert first == reordered
     assert first != changed
     assert len(first) == 64
+
+
+def test_declared_failed_research_gate_blocks_observation_eligibility():
+    assert strategy_research_gate_passed(
+        "strategies.small_cap_value.SmallCapValueStrategy"
+    ) is True
+    assert strategy_research_gate_passed(
+        "strategies.cycle_of_price_action.CycleOfPriceActionStrategy",
+        {},
+    ) is False
 
 
 def test_manifest_round_trip_has_observation_gate_fields():

@@ -67,7 +67,7 @@ class DataHandler:
                 start=start,
                 end=end,
                 fields=["open", "high", "low", "close", "volume", "amount",
-                        "turnover_rate", "up_limit", "down_limit", "is_suspended"],
+                        "turnover_rate"],
                 adjust="event_driven",
             )
         except Exception as exc:
@@ -180,6 +180,10 @@ class DataHandler:
 
         suspended = []
         for code in self._codes:
+            if "is_suspended" not in self._daily_data.columns:
+                if (code, self._current_date) not in self._daily_data.index:
+                    suspended.append(code)
+                continue
             try:
                 is_susp = self._daily_data.loc[
                     (code, self._current_date), 'is_suspended'

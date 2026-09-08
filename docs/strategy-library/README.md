@@ -6,7 +6,7 @@
 
 | 编号 | 策略 | 市场方向 | 研究状态 | 报告日期 | 文档 |
 |---|---|---|---|---|---|
-| STR-001 | Cycle of Price Action | A股纯多头 | 价格量能版实现完成，尚未真实数据回测 | 2026-09-08 | [cycle-of-price-action.md](cycle-of-price-action.md) |
+| STR-001 | Cycle of Price Action | A股纯多头 | 暂停：固定矩阵未通过研究门 | 2026-09-08 | [cycle-of-price-action.md](cycle-of-price-action.md) |
 
 ## 状态定义
 

@@ -1,0 +1,36 @@
+{
+  "dataset_id": "copa-price-only-v1-2018-2026-r2",
+  "created_at": "2026-09-08T04:13:25.293452+00:00",
+  "start_date": "2018-01-02",
+  "end_date": "2026-08-31",
+  "price_source": "akshare:tencent:stock_zh_a_hist_tx:unadjusted",
+  "factor_source": "akshare:sina:hfq-factor:converted-to-incremental-events",
+  "calendar_source": "akshare:sina_trade_calendar",
+  "calendar_content_hash": "b5a75abe0d4aea5c6cb7f64b8691ebed9b8b24fa82f55584b1795e7497ca3f27",
+  "coverage_complete": true,
+  "coverage_hash": "a4e24b63ffa9423e755a8cbcdb03b5a863ace0070edd04257b9e10eac9d2b5f4",
+  "dataset_hash": "451d8af4c059958d9fcb519328372443fe9f7ffcc839252ff9387e8741275a38",
+  "selection_rule": "Ten pre-registered, long-listed Shanghai/Shenzhen main-board securities with complete coverage; replacements were decided only from coverage before strategy performance was read.",
+  "known_biases": [
+    "Fixed research universe, not historical index membership.",
+    "Delisted securities are absent; survivorship bias is not eliminated.",
+    "Public providers have no production SLA.",
+    "Volume is not adjusted for share-count corporate actions.",
+    "Historical daily price-limit and independent suspension flags are unavailable."
+  ],
+  "universe": [
+    "000858.SZ",
+    "002594.SZ",
+    "600000.SH",
+    "600036.SH",
+    "600276.SH",
+    "600519.SH",
+    "600887.SH",
+    "601166.SH",
+    "601318.SH",
+    "601398.SH"
+  ],
+  "rows_per_security": 2102,
+  "raw_archives": "data/research/copa-price-only-v1-2018-2026-r2/raw",
+  "full_local_manifest": "data/research/copa-price-only-v1-2018-2026-r2/manifest.json"
+}

@@ -384,6 +384,23 @@ class TestBacktestEngine:
 
         assert received_kwargs.get('top_n') == 3
 
+    def test_missing_optional_market_rule_columns_do_not_block_existing_bar(self, mock_daily_data):
+        from quant_engine.backtest.data_handler import DataHandler
+
+        core = mock_daily_data.drop(columns=["up_limit", "down_limit", "is_suspended"])
+        with patch('quant_engine.backtest.data_handler.DataAPI') as mock_cls:
+            mock_cls.return_value.daily.return_value = core
+            mock_cls.return_value.daily_coverage = None
+            handler = DataHandler(
+                ["000001.SZ"],
+                date(2024, 1, 2),
+                date(2024, 1, 3),
+            )
+        handler.push_day(date(2024, 1, 2))
+        assert handler.is_suspended("000001.SZ") is False
+        handler.push_day(date(2024, 1, 6))
+        assert handler.is_suspended("000001.SZ") is True
+
     def test_signal_executes_on_next_trading_day(self, mock_data_api, tmp_path):
         engine = BacktestEngine(
             SimpleTestStrategy,

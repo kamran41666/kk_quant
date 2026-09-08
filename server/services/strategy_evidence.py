@@ -12,6 +12,7 @@ import inspect
 import json
 from datetime import date
 from importlib import import_module
+from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from quant_engine.backtest.protocol import StrategyProtocolError, StrategySpec
@@ -88,6 +89,103 @@ def strategy_source_hash(strategy_class: str) -> Optional[str]:
     except (AttributeError, ImportError, OSError, TypeError, ValueError):
         return None
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def strategy_research_gate_passed(
+    strategy_class: str,
+    params: Any = None,
+    manifest: Any = None,
+) -> bool:
+    """Fail closed when a strategy declares an external research gate."""
+    spec = _strategy_spec(strategy_class)
+    if spec is None or not bool(spec.extensions.get("research_gate_required")):
+        return True
+    relative = spec.extensions.get("research_gate_result")
+    if not isinstance(relative, str):
+        return False
+    repository = Path(__file__).resolve().parents[2]
+    target = (repository / relative).resolve()
+    research_root = (repository / "docs" / "research-runs").resolve()
+    if research_root not in target.parents:
+        return False
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        frozen_path = target.with_name(target.name.replace("-results.json", "-frozen-evidence.json"))
+        frozen = json.loads(frozen_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return False
+    checks = (payload.get("research_gate") or {}).get("checks")
+    expected = frozen.get("expected") if isinstance(frozen, dict) else None
+    if not isinstance(checks, dict) or not checks or not all(value is True for value in checks.values()):
+        return False
+    if not isinstance(expected, dict):
+        return False
+    result_evidence = {
+        key: payload.get(key)
+        for key in (
+            "dataset_id", "dataset_hash", "coverage_hash", "calendar_source",
+            "calendar_content_hash", "protocol_sha256", "strategy_source_hash",
+            "execution_code_hashes",
+        )
+    }
+    if result_evidence != expected:
+        return False
+    repository = Path(__file__).resolve().parents[2]
+    protocol_path = target.with_name(target.name.replace("-results.json", "-protocol.md"))
+    try:
+        if hashlib.sha256(protocol_path.read_bytes()).hexdigest() != expected.get("protocol_sha256"):
+            return False
+    except OSError:
+        return False
+    for relative_path, expected_hash in (expected.get("execution_code_hashes") or {}).items():
+        code_path = (repository / relative_path).resolve()
+        if repository not in code_path.parents:
+            return False
+        try:
+            actual_hash = hashlib.sha256(code_path.read_bytes()).hexdigest()
+        except OSError:
+            return False
+        if actual_hash != expected_hash:
+            return False
+    try:
+        normalized_params = normalized_strategy_params(strategy_class, params)
+    except StrategyProtocolError:
+        return False
+    if isinstance(manifest, str):
+        try:
+            manifest = json.loads(manifest)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(manifest, Mapping):
+        return False
+    runtime_coverage = manifest.get("daily_data_coverage")
+    authorized = payload.get("authorized_observation_evidence")
+    if not isinstance(runtime_coverage, Mapping) or not isinstance(authorized, Mapping):
+        return False
+    runtime_evidence = {
+        "dataset_hash": runtime_coverage.get("dataset_hash"),
+        "coverage_hash": runtime_coverage.get("coverage_hash"),
+        "cost_scenario": manifest.get("cost_scenario"),
+        "universe": sorted(
+            str(item.get("code"))
+            for item in runtime_coverage.get("items", [])
+            if isinstance(item, Mapping) and item.get("code")
+        ),
+    }
+    expected_runtime = {
+        "dataset_hash": authorized.get("dataset_hash"),
+        "coverage_hash": authorized.get("coverage_hash"),
+        "cost_scenario": authorized.get("cost_scenario"),
+        "universe": sorted(str(code) for code in authorized.get("universe", [])),
+    }
+    return bool(
+        runtime_evidence == expected_runtime
+        and payload.get("strategy_id") == spec.id
+        and payload.get("strategy_version") == spec.version
+        and payload.get("strategy_source_hash") == strategy_source_hash(strategy_class)
+        and payload.get("strategy_parameters") == normalized_params
+        and (payload.get("research_gate") or {}).get("passed") is True
+    )
 
 
 def strategy_fingerprint(strategy_class: str, params: Any) -> str:

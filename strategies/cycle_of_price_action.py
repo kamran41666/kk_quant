@@ -88,7 +88,9 @@ class CycleOfPriceActionStrategy(Strategy):
         ),
         research_document="docs/strategy-library/cycle-of-price-action.md",
         extensions={
-            "research_status": "unvalidated",
+            "research_status": "blocked_by_research_gate",
+            "research_gate_required": True,
+            "research_gate_result": "docs/research-runs/copa-price-only-v1-results.json",
             "scope": "COPA_PRICE_ONLY_S1_S5_DAILY_CLOSE",
             "limitations": [
                 "universe breadth and cross-sectional return percentile proxy for index regime and benchmark RS",
@@ -236,18 +238,18 @@ class CycleOfPriceActionStrategy(Strategy):
         crossbacks: list[bool] = []
         last_wedge = -10_000
         used = False
-        for index, (_, row) in enumerate(result.iterrows()):
-            if bool(row["wedge_pop"]):
+        for index, row in enumerate(result.itertuples()):
+            if bool(row.wedge_pop):
                 last_wedge = index
                 used = False
             crossback = (
                 0 < index - last_wedge <= 20
                 and not used
-                and bool(row["long_trend"])
-                and float(row["low"]) <= max(float(row["ema10"]), float(row["ema20"])) + 0.25 * float(row["atr"])
-                and float(row["close"]) >= float(row["ema20"])
-                and bool(row["upper_half"])
-                and float(row["rvol"]) <= 1.2
+                and bool(row.long_trend)
+                and float(row.low) <= max(float(row.ema10), float(row.ema20)) + 0.25 * float(row.atr)
+                and float(row.close) >= float(row.ema20)
+                and bool(row.upper_half)
+                and float(row.rvol) <= 1.2
                 and bool(leader.iloc[index])
                 and bool(allowed.iloc[index])
             )
@@ -262,59 +264,64 @@ class CycleOfPriceActionStrategy(Strategy):
         cooldown_until = -1
         exit_today = False
         stage = int(self.ablation_stage[1:])
-        for index, (_, row) in enumerate(frame.iterrows()):
-            finite = all(math.isfinite(float(row[field])) for field in ("close", "atr", "ema20", "return63"))
+        active_maximum = 0.0
+        for index, row in enumerate(frame.itertuples()):
+            finite = all(
+                math.isfinite(float(value))
+                for value in (row.close, row.atr, row.ema20, row.return63)
+            )
             if not finite:
                 continue
-            close = float(row["close"])
+            close = float(row.close)
             if active is not None:
-                post_signal_highs = frame["high"].iloc[active.entry_index + 1:index + 1]
-                maximum = float(post_signal_highs.max()) if not post_signal_highs.empty else active.entry_close
+                active_maximum = max(active_maximum, float(row.high))
                 risk = max(0.0, active.entry_close - active.stop)
                 failed = (
                     active.signal in {"wedge-pop", "base-break"}
                     and index - active.entry_index <= 3
                     and risk > 0
-                    and maximum - active.entry_close < 0.5 * risk
+                    and active_maximum - active.entry_close < 0.5 * risk
                     and close < active.pivot
                 )
                 stop_breached = close < active.stop
-                regime_exit = row["regime"] == "risk-off" and self.risk_off_exposure <= 0
-                if regime_exit or bool(row["weak_exit"]) or bool(row["wedge_drop"]) or failed or stop_breached:
+                regime_exit = row.regime == "risk-off" and self.risk_off_exposure <= 0
+                if regime_exit or bool(row.weak_exit) or bool(row.wedge_drop) or failed or stop_breached:
                     active = None
+                    active_maximum = 0.0
                     cooldown_until = index + self.cooldown_bars
                     exit_today = index == len(frame) - 1
                     continue
                 crossback_add = (
                     stage >= 3
                     and active.signal == "wedge-pop"
-                    and bool(row["crossback"])
+                    and bool(row.crossback)
                 )
                 active = _ActiveSignal(
                     **{
                         **active.__dict__,
                         "signal": "ema-crossback-add" if crossback_add else active.signal,
-                        "exhausted": active.exhausted or (stage >= 5 and bool(row["exhaustion"])),
+                        "exhausted": active.exhausted or (stage >= 5 and bool(row.exhaustion)),
                     }
                 )
                 continue
-            if index <= cooldown_until or row["regime"] == "risk-off" or not bool(row["leader"]):
+            if index <= cooldown_until or row.regime == "risk-off" or not bool(row.leader):
                 continue
             signal = None
-            if stage == 1 and bool(row["long_trend"]):
+            if stage == 1 and bool(row.long_trend):
                 signal = "leader-trend"
-            elif stage >= 2 and bool(row["wedge_pop"]):
+            elif stage >= 2 and bool(row.wedge_pop):
                 signal = "wedge-pop"
-            elif stage >= 3 and bool(row["crossback"]):
+            elif stage >= 3 and bool(row.crossback):
                 signal = "ema-crossback"
-            elif stage >= 4 and bool(row["base_break"]):
+            elif stage >= 4 and bool(row.base_break):
                 signal = "base-break"
             if signal is None or (
-                row["regime"] == "neutral"
+                row.regime == "neutral"
                 and signal not in {"wedge-pop", "ema-crossback"}
             ):
                 continue
-            stop = self._entry_stop(signal, row)
+            row_values = frame.iloc[index]
+            stop = self._entry_stop(signal, row_values)
             if not math.isfinite(stop) or stop >= close:
                 continue
             active = _ActiveSignal(
@@ -322,11 +329,12 @@ class CycleOfPriceActionStrategy(Strategy):
                 signal=signal,
                 entry_close=close,
                 stop=stop,
-                pivot=float(row["prior_high10"]),
+                pivot=float(row.prior_high10),
                 entry_index=index,
                 exhausted=False,
-                score=float(row["return63_percentile"]),
+                score=float(row.return63_percentile),
             )
+            active_maximum = close
         return active, exit_today
 
     @staticmethod
@@ -382,40 +390,27 @@ class CycleOfPriceActionStrategy(Strategy):
         if not features:
             return self._empty_output()
 
-        dates = sorted(set().union(*(frame.index for frame in features.values())))
-        breadth = pd.Series(index=dates, dtype=float)
-        for day in dates:
-            states = [
-                bool(frame.at[day, "close"] > frame.at[day, "sma50"])
-                for frame in features.values()
-                if day in frame.index and pd.notna(frame.at[day, "sma50"])
-            ]
-            breadth.at[day] = sum(states) / len(states) if states else np.nan
+        panel = pd.concat(features, names=["code", "date"])
+        above_sma50 = (panel["close"] > panel["sma50"]).where(panel["sma50"].notna())
+        breadth = above_sma50.groupby(level="date").mean().sort_index()
         regimes = self._confirmed_regimes(breadth, self.risk_on_breadth, self.risk_off_breadth)
-
-        for day in dates:
-            returns20 = pd.Series({
-                code: frame.at[day, "return20"]
-                for code, frame in features.items()
-                if day in frame.index
-            }).dropna()
-            returns63 = pd.Series({
-                code: frame.at[day, "return63"]
-                for code, frame in features.items()
-                if day in frame.index
-            }).dropna()
-            percentile20 = returns20.rank(pct=True, method="average")
-            percentile63 = returns63.rank(pct=True, method="average")
-            for code, frame in features.items():
-                if day not in frame.index:
-                    continue
-                frame.at[day, "return63_percentile"] = percentile63.get(code, np.nan)
-                frame.at[day, "leader"] = bool(
-                    percentile20.get(code, 0.0) >= self.leader_quantile
-                    and percentile63.get(code, 0.0) >= self.leader_quantile
-                    and frame.at[day, "avg_amount20"] >= self.min_avg_amount
-                )
-                frame.at[day, "regime"] = regimes.at[day]
+        percentile20 = panel["return20"].groupby(level="date").rank(
+            pct=True, method="average"
+        )
+        percentile63 = panel["return63"].groupby(level="date").rank(
+            pct=True, method="average"
+        )
+        panel["return63_percentile"] = percentile63
+        panel["leader"] = (
+            (percentile20 >= self.leader_quantile)
+            & (percentile63 >= self.leader_quantile)
+            & (panel["avg_amount20"] >= self.min_avg_amount)
+        )
+        panel["regime"] = panel.index.get_level_values("date").map(regimes)
+        features = {
+            code: panel.xs(code, level="code").copy()
+            for code in features
+        }
 
         active: list[_ActiveSignal] = []
         exit_count = 0

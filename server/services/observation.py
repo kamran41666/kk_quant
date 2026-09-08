@@ -46,7 +46,11 @@ from server.models.schema import (
 )
 from server.services.paper_market_rules import A_SHARE, CN_FUND, fee_for, market_session_status, normalize_market, normalize_symbol
 from server.services.paper_trading import submit_order
-from server.services.strategy_evidence import manifest_is_complete, strategy_fingerprint
+from server.services.strategy_evidence import (
+    manifest_is_complete,
+    strategy_fingerprint,
+    strategy_research_gate_passed,
+)
 
 _CODE_RE = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
 _DURATIONS = frozenset({7, 30})
@@ -691,6 +695,12 @@ def _validate_backtest_evidence(
         raise ValueError("strategy_backtest_evidence_stale")
     if not manifest_is_complete(manifest) or not bool(getattr(run, "eligible_for_observation", False)):
         raise ValueError("backtest_evidence_not_eligible")
+    if not strategy_research_gate_passed(
+        strategy.strategy_class,
+        strategy.params or "{}",
+        manifest,
+    ):
+        raise ValueError("strategy_research_gate_not_passed")
 
 
 def _revalidate_observation_evidence(

@@ -78,7 +78,9 @@ class DataAPI:
             raise ValueError("start must not be after end")
         if adjust not in {"none", "event_driven"}:
             raise ValueError(f"Unknown adjust method: {adjust}")
-        requested_codes = list(dict.fromkeys(str(code).strip().upper() for code in codes if str(code).strip()))
+        requested_codes = sorted(dict.fromkeys(
+            str(code).strip().upper() for code in codes if str(code).strip()
+        ))
         selected_fields = list(dict.fromkeys(fields or ["open", "high", "low", "close", "volume"]))
         # Backtests pass the exact calendar instance that drives their event
         # loop.  Falling back to the API singleton is retained for the
@@ -107,6 +109,7 @@ class DataAPI:
                     except (TypeError, ValueError):
                         continue
             observed_set = set(observed_dates) & expected
+            unexpected_dates = sorted(set(observed_dates) - expected)
             duplicate_rows = max(0, len(observed_dates) - len(set(observed_dates)))
             field_valid_counts: dict[str, int] = {}
             invalid_field_rows = 0
@@ -147,7 +150,13 @@ class DataAPI:
                 content_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
             if not expected:
                 status = "no_trading_days"
-            elif not frame.empty and not missing_dates and duplicate_rows == 0 and invalid_field_rows == 0:
+            elif (
+                not frame.empty
+                and not missing_dates
+                and not unexpected_dates
+                and duplicate_rows == 0
+                and invalid_field_rows == 0
+            ):
                 status = "complete"
             elif frame.empty:
                 status = "empty"
@@ -161,6 +170,9 @@ class DataAPI:
                 "missing_count": len(missing_dates),
                 "missing_dates": [value.isoformat() for value in missing_dates[:200]],
                 "missing_dates_truncated": len(missing_dates) > 200,
+                "unexpected_count": len(unexpected_dates),
+                "unexpected_dates": [value.isoformat() for value in unexpected_dates[:200]],
+                "unexpected_dates_truncated": len(unexpected_dates) > 200,
                 "duplicate_rows": duplicate_rows,
                 "invalid_field_rows": invalid_field_rows,
                 "field_valid_counts": field_valid_counts,
@@ -191,6 +203,7 @@ class DataAPI:
             {"code": item["code"], "content_hash": item.get("content_hash")}
             for item in items
         ]
+        dataset_identity.sort(key=lambda item: item["code"])
         dataset_encoded = json.dumps(
             {
                 "coverage_version": payload["coverage_version"],
@@ -223,6 +236,7 @@ class DataAPI:
             {"code": item.get("code"), "content_hash": item.get("content_hash")}
             for item in items or [] if isinstance(item, dict)
         ]
+        identity.sort(key=lambda item: str(item.get("code") or ""))
         encoded = json.dumps(
             {
                 "coverage_version": report.get("coverage_version"),
