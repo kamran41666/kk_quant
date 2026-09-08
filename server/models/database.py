@@ -35,6 +35,7 @@ def init_db():
     additive = {
         "paper_account": {
             "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",
+            "validation_only": "BOOLEAN NOT NULL DEFAULT 0",
         },
         "paper_account_position": {
             "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",
@@ -66,6 +67,7 @@ def init_db():
             "strategy_fingerprint": "VARCHAR(64)",
             "pending_signals": "TEXT NOT NULL DEFAULT '{}'",
             "pending_signal_date": "VARCHAR(10)",
+            "purpose": "VARCHAR(32) NOT NULL DEFAULT 'research'",
         },
         "paper_fill": {
             "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",

@@ -191,6 +191,7 @@ def _account_dict(account: PaperAccount) -> dict[str, Any]:
             "is_trading_day": is_market_trading_day(account.market, today),
         },
         "status": account.status,
+        "validation_only": bool(getattr(account, "validation_only", False)),
         "execution_mode": "paper_only",
         "paper_only": True,
         "live_execution": False,
@@ -205,7 +206,8 @@ def create_account(db: Session, *, name: str, initial_capital: float,
                    max_order_notional: float = 100_000.0,
                    max_position_weight: float = 0.25,
                    max_daily_loss: float = 0.03,
-                   market: str = A_SHARE) -> dict[str, Any]:
+                   market: str = A_SHARE,
+                   validation_only: bool = False) -> dict[str, Any]:
     market = normalize_market(market)
     if not isinstance(initial_capital, (int, float)) or not math.isfinite(float(initial_capital)) or initial_capital <= 0:
         raise ValueError("initial_capital must be positive")
@@ -216,7 +218,7 @@ def create_account(db: Session, *, name: str, initial_capital: float,
     account = PaperAccount(name=name, initial_capital=initial_capital, cash=initial_capital,
                            max_order_notional=max_order_notional,
                            max_position_weight=max_position_weight, max_daily_loss=max_daily_loss,
-                           market=market)
+                           market=market, validation_only=bool(validation_only))
     db.add(account)
     db.commit()
     db.refresh(account)
@@ -551,6 +553,8 @@ def submit_order(db: Session, *, account_id: str, idempotency_key: str, code: st
         if not account:
             raise KeyError("paper account not found")
         account_market = normalize_market(account.market)
+        if getattr(account, "validation_only", False) and lot_owner != "strategy":
+            raise ValueError("validation_only_account_rejects_manual_orders")
         requested_market = normalize_market(market) if market is not None else account_market
         if requested_market != account_market:
             raise ValueError("order_market_must_match_account")

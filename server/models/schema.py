@@ -105,6 +105,7 @@ class PaperAccount(Base):
     # accidentally added together. Existing accounts are A-share by default.
     market: Mapped[str] = mapped_column(String(20), nullable=False, default="a-share")
     status: Mapped[str] = mapped_column(String(20), default="active")
+    validation_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     max_order_notional: Mapped[float] = mapped_column(Float, default=100_000.0)
     max_position_weight: Mapped[float] = mapped_column(Float, default=0.25)
     max_daily_loss: Mapped[float] = mapped_column(Float, default=0.03)
@@ -345,6 +346,9 @@ class StrategyObservation(Base):
     start_date: Mapped[str] = mapped_column(String(10), nullable=False)
     end_date: Mapped[str] = mapped_column(String(10), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    # ``research`` requires a passed research gate. ``engineering_validation``
+    # is an explicitly non-promotable paper rehearsal.
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False, default="research")
     auto_trade: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     started_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     paused_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)

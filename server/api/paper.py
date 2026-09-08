@@ -42,6 +42,7 @@ class CreatePaperAccountRequest(BaseModel):
     max_order_notional: float = Field(default=100_000.0, gt=0)
     max_position_weight: float = Field(default=0.25, gt=0, le=1)
     max_daily_loss: float = Field(default=0.03, ge=0, lt=1)
+    validation_only: bool = False
 
 
 class PaperOrderRequest(BaseModel):

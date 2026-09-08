@@ -123,6 +123,12 @@ def _observation_dict(row: StrategyObservation) -> dict[str, Any]:
         "start_date": row.start_date,
         "end_date": row.end_date,
         "status": row.status,
+        "purpose": getattr(row, "purpose", "research"),
+        "research_eligible": getattr(row, "purpose", "research") == "research",
+        "validation_only": getattr(row, "purpose", "research") == "engineering_validation",
+        "promotion_eligible": False if getattr(row, "purpose", "research") == "engineering_validation" else None,
+        "paper_only": True,
+        "live_execution": False,
         "auto_trade": bool(row.auto_trade),
         "started_at": row.started_at,
         "paused_at": row.paused_at,
@@ -650,7 +656,13 @@ def _require_account(db: Session, account_id: str) -> PaperAccount:
     return account
 
 
-def _require_strategy_with_backtest(db: Session, strategy_id: str, *, account_market: Optional[str] = None) -> tuple[Strategy, Run]:
+def _require_strategy_with_backtest(
+    db: Session,
+    strategy_id: str,
+    *,
+    account_market: Optional[str] = None,
+    backtest_run_id: Optional[str] = None,
+) -> tuple[Strategy, Run]:
     strategy = db.query(Strategy).filter(Strategy.id == strategy_id).first()
     if not strategy:
         raise KeyError("strategy not found")
@@ -658,9 +670,14 @@ def _require_strategy_with_backtest(db: Session, strategy_id: str, *, account_ma
     strategy_market = normalize_market(getattr(strategy, "market", A_SHARE))
     if requested_market and strategy_market != requested_market:
         raise ValueError("strategy_market_mismatch")
-    runs = (db.query(Run)
-            .filter(Run.strategy_id == strategy_id, Run.run_type == "backtest", Run.status == "completed")
-            .order_by(Run.created_at.desc()).all())
+    query = db.query(Run).filter(
+        Run.strategy_id == strategy_id,
+        Run.run_type == "backtest",
+        Run.status == "completed",
+    )
+    if backtest_run_id:
+        query = query.filter(Run.id == backtest_run_id)
+    runs = query.order_by(Run.created_at.desc()).all()
     if requested_market:
         runs = [row for row in runs if normalize_market(getattr(row, "market", None)) == requested_market]
     if not runs:
@@ -673,6 +690,7 @@ def _validate_backtest_evidence(
     run: Run,
     *,
     account_market: str,
+    require_research_gate: bool = True,
 ) -> None:
     """Validate immutable evidence when a run contains the new fields.
 
@@ -685,6 +703,8 @@ def _validate_backtest_evidence(
     manifest = getattr(run, "data_manifest", None)
     has_evidence = any(value not in (None, "") for value in (run_market, fingerprint, manifest))
     if not has_evidence:
+        if not require_research_gate:
+            raise ValueError("backtest_evidence_not_available")
         if account_market != A_SHARE:
             raise ValueError("backtest_evidence_not_available")
         return
@@ -693,14 +713,17 @@ def _validate_backtest_evidence(
     current = strategy_fingerprint(strategy.strategy_class, strategy.params or "{}")
     if not fingerprint or fingerprint != current:
         raise ValueError("strategy_backtest_evidence_stale")
-    if not manifest_is_complete(manifest) or not bool(getattr(run, "eligible_for_observation", False)):
+    if not manifest_is_complete(manifest):
         raise ValueError("backtest_evidence_not_eligible")
-    if not strategy_research_gate_passed(
-        strategy.strategy_class,
-        strategy.params or "{}",
-        manifest,
-    ):
-        raise ValueError("strategy_research_gate_not_passed")
+    if require_research_gate:
+        if not bool(getattr(run, "eligible_for_observation", False)):
+            raise ValueError("backtest_evidence_not_eligible")
+        if not strategy_research_gate_passed(
+            strategy.strategy_class,
+            strategy.params or "{}",
+            manifest,
+        ):
+            raise ValueError("strategy_research_gate_not_passed")
 
 
 def _revalidate_observation_evidence(
@@ -710,7 +733,12 @@ def _revalidate_observation_evidence(
 ) -> None:
     """Re-check the exact run before starting or ticking an observation."""
     run_id = getattr(observation, "backtest_run_id", None)
+    purpose = getattr(observation, "purpose", "research")
+    if purpose not in {"research", "engineering_validation"}:
+        raise ValueError("invalid_observation_purpose")
     if not run_id:
+        if purpose == "engineering_validation":
+            raise ValueError("engineering_validation_requires_backtest_run_id")
         return
     run = db.query(Run).filter(Run.id == run_id).first()
     if run is None or run.status != "completed":
@@ -722,7 +750,18 @@ def _revalidate_observation_evidence(
         strategy,
         run,
         account_market=normalize_market(account.market),
+        require_research_gate=getattr(observation, "purpose", "research") == "research",
     )
+    if purpose == "engineering_validation":
+        if not getattr(account, "validation_only", False):
+            raise ValueError("engineering_validation_requires_validation_only_account")
+        if not strategy_research_gate_passed(
+            strategy.strategy_class,
+            strategy.params or "{}",
+            run.data_manifest,
+            allow_failed_performance=True,
+        ):
+            raise ValueError("engineering_research_evidence_integrity_invalid")
 
 
 def create_observation(
@@ -735,6 +774,8 @@ def create_observation(
     allocation_pct: float = 1.0,
     allocated_capital: Optional[float] = None,
     auto_trade: bool = True,
+    purpose: str = "research",
+    backtest_run_id: Optional[str] = None,
     start_date: Optional[date] = None,
 ) -> dict[str, Any]:
     """Create one bounded observation, safely replayable by idempotency key."""
@@ -744,9 +785,13 @@ def create_observation(
         raise ValueError("idempotency_key must contain 8-160 characters")
     if not math.isfinite(float(allocation_pct)) or not 0 < allocation_pct <= 1:
         raise ValueError("allocation_pct must be within (0, 1]")
+    if purpose not in {"research", "engineering_validation"}:
+        raise ValueError("purpose must be research or engineering_validation")
 
     account = _require_account(db, account_id)
     account_market = normalize_market(account.market)
+    if purpose == "research" and getattr(account, "validation_only", False):
+        raise ValueError("validation_only_account_rejects_research_observation")
     # Fund observations are enabled only for the dedicated NAV backtest
     # evidence path.  US remains fail-closed until its adjusted-price and
     # exchange-calendar evidence is implemented.
@@ -760,8 +805,43 @@ def create_observation(
             # Preserve the existing public boundary for an A-share strategy
             # accidentally selected from a fund account.
             raise ValueError("strategy_observation_requires_a_share_account")
-    strategy, backtest_run = _require_strategy_with_backtest(db, strategy_id, account_market=account_market)
-    _validate_backtest_evidence(strategy, backtest_run, account_market=account_market)
+    if purpose == "engineering_validation":
+        if not backtest_run_id:
+            raise ValueError("engineering_validation_requires_backtest_run_id")
+        if not getattr(account, "validation_only", False):
+            raise ValueError("engineering_validation_requires_validation_only_account")
+        existing_for_key = db.query(StrategyObservation).filter(
+            StrategyObservation.idempotency_key == idempotency_key,
+        ).first()
+        has_positions = None if existing_for_key else db.query(PaperAccountPosition).filter(
+            PaperAccountPosition.account_id == account_id,
+            PaperAccountPosition.shares > 0,
+        ).first()
+        has_observations = db.query(StrategyObservation).filter(
+            StrategyObservation.account_id == account_id,
+            StrategyObservation.idempotency_key != idempotency_key,
+        ).first()
+        if has_positions or has_observations:
+            raise ValueError("engineering_validation_requires_isolated_empty_account")
+    strategy, backtest_run = _require_strategy_with_backtest(
+        db,
+        strategy_id,
+        account_market=account_market,
+        backtest_run_id=backtest_run_id,
+    )
+    _validate_backtest_evidence(
+        strategy,
+        backtest_run,
+        account_market=account_market,
+        require_research_gate=purpose == "research",
+    )
+    if purpose == "engineering_validation" and not strategy_research_gate_passed(
+        strategy.strategy_class,
+        strategy.params or "{}",
+        backtest_run.data_manifest,
+        allow_failed_performance=True,
+    ):
+        raise ValueError("engineering_research_evidence_integrity_invalid")
     if allocated_capital is None:
         capital = account.initial_capital * float(allocation_pct)
     else:
@@ -791,6 +871,8 @@ def create_observation(
             and abs(existing.allocated_capital - capital) <= 1e-9
             and existing.start_date == begin.isoformat()
             and bool(existing.auto_trade) == bool(auto_trade)
+            and getattr(existing, "purpose", "research") == purpose
+            and getattr(existing, "backtest_run_id", None) == backtest_run.id
         )
         if not same:
             raise ValueError("idempotency_key already belongs to a different observation")
@@ -809,6 +891,7 @@ def create_observation(
         end_date=finish.isoformat(),
         status="draft",
         auto_trade=bool(auto_trade),
+        purpose=purpose,
         backtest_run_id=backtest_run.id,
         market=account_market,
         strategy_fingerprint=getattr(backtest_run, "strategy_fingerprint", None),
@@ -833,6 +916,8 @@ def create_observation(
                 and abs(existing.allocated_capital - capital) <= 1e-9
                 and existing.start_date == begin.isoformat()
                 and bool(existing.auto_trade) == bool(auto_trade)
+                and getattr(existing, "purpose", "research") == purpose
+                and getattr(existing, "backtest_run_id", None) == backtest_run.id
             )
             if same:
                 return _observation_dict(existing)
@@ -842,6 +927,17 @@ def create_observation(
     db.commit()
     db.refresh(row)
     return _observation_dict(row)
+
+
+def create_engineering_validation(db: Session, **kwargs) -> dict[str, Any]:
+    """Serialize the isolated-account check and engineering observation insert."""
+    with _observation_lock:
+        return create_observation(
+            db,
+            duration_days=7,
+            purpose="engineering_validation",
+            **kwargs,
+        )
 
 
 def list_observations(db: Session, account_id: str) -> list[dict[str, Any]]:
@@ -945,6 +1041,8 @@ def _transition(
             else:
                 raise ValueError("observation_must_be_running")
         elif action == "resume":
+            account = _require_account(db, account_id)
+            _revalidate_observation_evidence(db, row, account)
             if status == "paused":
                 row.status = "running"
                 row.paused_at = None

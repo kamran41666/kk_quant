@@ -25,14 +25,14 @@
 
 - 分支：`codex/phase-3-live-readiness`。
 - Strategy Protocol v2 完整闭环提交：`867f369`。
-- 最新验证：后端 `511 passed`（1 个既有 matcher 截断告警）；前端 `6 passed`，`vue-tsc` 和 Vite 构建通过。
+- 最新验证：后端 `512 passed`（1 个既有 matcher 截断告警）；前端 `6 passed`，`vue-tsc` 和 Vite 构建通过。
 - 当前 Mac 工作区已导入 COPA 固定研究集：10 只证券、2018-01-02—2026-08-31、每只 2,102 个交易日，覆盖完整；数据集哈希为 `451d8af4…`。本地数据目录不进入 Git，复现入口和哈希保存在 `docs/research-runs/`。
 - 不同开发机的数据目录是本地资产，文档中的历史数量不能代表另一台机器的当前覆盖。
 
 ## 当前施工顺序
 
 1. `STR-001 Cycle of Price Action` v1.0.0、固定真实数据集和 Train/Validation/Sealed OOS 矩阵已经完成。
-2. COPA v1 未通过本地冻结研究门，连续纸面观察状态为 `blocked_by_research_gate`；服务端会复核机器可读结果，没有创建账户或观察任务。
+2. COPA v1 未通过本地冻结研究门，标准连续研究观察状态为 `blocked_by_research_gate`；补齐拆送股成交量和历史涨跌停/停牌证据后，再使用独立 `engineering_validation` 模式验证连续纸面调度，且不可晋级。
 3. 如继续 COPA，先解释低参与率和 S3–S5 缺少增量，形成新版本假设；已打开的 Sealed OOS 不再用于新版本最终验证。
 4. 新标记为“需要研究门”的稳定策略只有在固定数据、样本外和成本压力门均通过后，才创建 7/30 天连续纸面观察；早期示例策略仍保留兼容路径，尚未补同等级研究门。
 5. 完成发布基线后才评估官方券商沙盒；真实资金始终需要独立授权和人工确认。

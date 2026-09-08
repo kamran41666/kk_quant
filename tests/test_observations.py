@@ -1,4 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
+import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -297,6 +299,118 @@ def test_observation_requires_completed_backtest_and_create_is_idempotent():
         create_observation(db, account_id=account["id"], strategy_id=strategy.id,
                            idempotency_key="same-observation", duration_days=7,
                            allocation_pct=0.5)
+
+
+def test_engineering_validation_uses_exact_run_without_research_promotion(monkeypatch):
+    db = _db()
+    account = create_account(
+        db,
+        name="COPA工程验证隔离账户",
+        initial_capital=100_000,
+        max_position_weight=1.0,
+        validation_only=True,
+    )
+    strategy = Strategy(
+        name="COPA工程验证",
+        strategy_class="strategies.cycle_of_price_action.CycleOfPriceActionStrategy",
+        params="{}",
+        market="a-share",
+    )
+    db.add(strategy)
+    db.flush()
+    results = json.loads(Path(
+        "docs/research-runs/copa-price-only-v1-results.json"
+    ).read_text(encoding="utf-8"))
+    authorized = results["authorized_observation_evidence"]
+    manifest = build_manifest(
+        market="a-share",
+        strategy_class=strategy.strategy_class,
+        params={},
+        start_date="2024-07-01",
+        end_date="2026-08-31",
+        benchmark="000300.SH",
+        rebalance_frequency="daily",
+        cost_scenario=authorized["cost_scenario"],
+    )
+    manifest["calendar_evidence"] = {
+        "source": results["calendar_source"],
+        "content_hash": results["calendar_content_hash"],
+        "coverage_start": "2018-01-02",
+        "coverage_end": "2026-08-31",
+        "verified": True,
+    }
+    manifest["daily_data_coverage"] = {
+        "dataset_hash": authorized["dataset_hash"],
+        "coverage_hash": authorized["coverage_hash"],
+        "items": [
+            {"code": code, "status": "complete"}
+            for code in authorized["universe"]
+        ],
+    }
+    run = Run(
+        strategy_id=strategy.id,
+        run_type="backtest",
+        status="completed",
+        market="a-share",
+        strategy_fingerprint=strategy_fingerprint(strategy.strategy_class, strategy.params),
+        data_manifest=serialize_manifest(manifest),
+        data_end="2026-08-31",
+        calendar_version=manifest["calendar_version"],
+        execution_model=manifest["execution_model"],
+        eligible_for_observation=False,
+    )
+    db.add(run)
+    db.commit()
+
+    with pytest.raises(ValueError, match="validation_only_account_rejects_research"):
+        create_observation(
+            db,
+            account_id=account["id"],
+            strategy_id=strategy.id,
+            idempotency_key="copa-research-blocked",
+            duration_days=7,
+        )
+    with pytest.raises(ValueError, match="engineering_research_evidence_integrity_invalid"):
+        create_observation(
+            db,
+            account_id=account["id"],
+            strategy_id=strategy.id,
+            backtest_run_id=run.id,
+            idempotency_key="copa-engineering-integrity-blocked",
+            duration_days=7,
+            purpose="engineering_validation",
+        )
+    monkeypatch.setattr(
+        "server.services.observation.strategy_research_gate_passed",
+        lambda *_args, **_kwargs: True,
+    )
+    validation = create_observation(
+        db,
+        account_id=account["id"],
+        strategy_id=strategy.id,
+        backtest_run_id=run.id,
+        idempotency_key="copa-engineering-only",
+        duration_days=7,
+        purpose="engineering_validation",
+    )
+    assert validation["purpose"] == "engineering_validation"
+    assert validation["validation_only"] is True
+    assert validation["promotion_eligible"] is False
+    assert validation["paper_only"] is True
+    assert validation["live_execution"] is False
+    assert run.eligible_for_observation is False
+    stored = db.query(StrategyObservation).filter(
+        StrategyObservation.id == validation["id"]
+    ).one()
+    stored.purpose = "corrupted"
+    db.commit()
+    with pytest.raises(ValueError, match="invalid_observation_purpose"):
+        start_observation(db, account["id"], validation["id"])
+    stored.purpose = "engineering_validation"
+    db.commit()
+    started = start_observation(db, account["id"], validation["id"])
+    assert started["status"] == "running"
+    assert started["purpose"] == "engineering_validation"
 
 
 def test_observation_start_rejects_strategy_revision_after_evidence_run():

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from server.models.database import get_db
 from server.services.observation import (
     create_observation,
+    create_engineering_validation as create_engineering_validation_service,
     get_observation,
     list_observation_events,
     list_observations,
@@ -44,6 +45,16 @@ class ObservationTickRequest(BaseModel):
     as_of: Optional[date] = None
 
 
+class CreateEngineeringValidationRequest(BaseModel):
+    strategy_id: str = Field(min_length=1, max_length=36)
+    backtest_run_id: str = Field(min_length=1, max_length=36)
+    idempotency_key: str = Field(min_length=8, max_length=160)
+    allocation_pct: float = Field(default=1.0, gt=0, le=1)
+    allocated_capital: Optional[float] = Field(default=None, gt=0)
+    auto_trade: bool = True
+    start_date: Optional[date] = None
+
+
 def _domain_error(exc: Exception) -> HTTPException:
     message = str(exc)
     if isinstance(exc, KeyError):
@@ -55,6 +66,22 @@ def _domain_error(exc: Exception) -> HTTPException:
 def create_paper_observation(account_id: str, req: CreateObservationRequest, db: Session = Depends(get_db)):
     try:
         return create_observation(db, account_id=account_id, **req.model_dump())
+    except (KeyError, ValueError) as exc:
+        raise _domain_error(exc) from exc
+
+
+@router.post("/accounts/{account_id}/engineering-validations", status_code=201)
+def create_engineering_validation(
+    account_id: str,
+    req: CreateEngineeringValidationRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return create_engineering_validation_service(
+            db,
+            account_id=account_id,
+            **req.model_dump(),
+        )
     except (KeyError, ValueError) as exc:
         raise _domain_error(exc) from exc
 

@@ -95,6 +95,7 @@ def strategy_research_gate_passed(
     strategy_class: str,
     params: Any = None,
     manifest: Any = None,
+    allow_failed_performance: bool = False,
 ) -> bool:
     """Fail closed when a strategy declares an external research gate."""
     spec = _strategy_spec(strategy_class)
@@ -116,7 +117,17 @@ def strategy_research_gate_passed(
         return False
     checks = (payload.get("research_gate") or {}).get("checks")
     expected = frozen.get("expected") if isinstance(frozen, dict) else None
-    if not isinstance(checks, dict) or not checks or not all(value is True for value in checks.values()):
+    if not isinstance(checks, dict) or not checks:
+        return False
+    integrity_checks = {
+        "share_adjusted_volume_verified",
+        "historical_price_limit_and_suspension_verified",
+    }
+    if allow_failed_performance and not all(
+        checks.get(key) is True for key in integrity_checks
+    ):
+        return False
+    if not allow_failed_performance and not all(value is True for value in checks.values()):
         return False
     if not isinstance(expected, dict):
         return False
@@ -159,13 +170,20 @@ def strategy_research_gate_passed(
     if not isinstance(manifest, Mapping):
         return False
     runtime_coverage = manifest.get("daily_data_coverage")
+    runtime_calendar = manifest.get("calendar_evidence")
     authorized = payload.get("authorized_observation_evidence")
-    if not isinstance(runtime_coverage, Mapping) or not isinstance(authorized, Mapping):
+    if (
+        not isinstance(runtime_coverage, Mapping)
+        or not isinstance(runtime_calendar, Mapping)
+        or not isinstance(authorized, Mapping)
+    ):
         return False
     runtime_evidence = {
         "dataset_hash": runtime_coverage.get("dataset_hash"),
         "coverage_hash": runtime_coverage.get("coverage_hash"),
         "cost_scenario": manifest.get("cost_scenario"),
+        "calendar_source": runtime_calendar.get("source"),
+        "calendar_content_hash": runtime_calendar.get("content_hash"),
         "universe": sorted(
             str(item.get("code"))
             for item in runtime_coverage.get("items", [])
@@ -176,6 +194,8 @@ def strategy_research_gate_passed(
         "dataset_hash": authorized.get("dataset_hash"),
         "coverage_hash": authorized.get("coverage_hash"),
         "cost_scenario": authorized.get("cost_scenario"),
+        "calendar_source": payload.get("calendar_source"),
+        "calendar_content_hash": payload.get("calendar_content_hash"),
         "universe": sorted(str(code) for code in authorized.get("universe", [])),
     }
     return bool(
@@ -184,7 +204,10 @@ def strategy_research_gate_passed(
         and payload.get("strategy_version") == spec.version
         and payload.get("strategy_source_hash") == strategy_source_hash(strategy_class)
         and payload.get("strategy_parameters") == normalized_params
-        and (payload.get("research_gate") or {}).get("passed") is True
+        and (
+            allow_failed_performance
+            or (payload.get("research_gate") or {}).get("passed") is True
+        )
     )
 
 
