@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from server.models.database import get_db
 from server.models.schema import Run, Strategy
@@ -22,6 +22,8 @@ from server.services.strategy_evidence import (
     strategy_fingerprint,
 )
 from quant_engine.backtest.cost_model import cost_scenario_catalog
+from quant_engine.backtest.protocol import StrategyProtocolError
+from quant_engine.backtest.registry import RegisteredStrategy, strategy_registry
 
 router = APIRouter(prefix="/backtest", tags=["backtest"])
 _cancelled_runs: set[str] = set()
@@ -44,7 +46,8 @@ class BacktestRunRequest(BaseModel):
     # broker fee quote and is persisted so reports remain reproducible.
     cost_scenario: str = Field(default="paper_baseline_v1", pattern=r"^paper_(baseline|low_impact|high_impact)_v1$")
     benchmark: str = Field(default="000300.SH", min_length=1, max_length=20)
-    rebalance_frequency: str = Field(default="weekly", pattern=r"^(daily|weekly|monthly)$")
+    parameter_overrides: dict[str, Any] = Field(default_factory=dict)
+    rebalance_frequency: Optional[str] = Field(default=None, pattern=r"^(daily|weekly|monthly)$")
 
     @field_validator("start_date", "end_date")
     @classmethod
@@ -117,25 +120,46 @@ class RunResponse(BaseModel):
 # ---- Helpers ----
 
 def _import_strategy(class_path: str):
-    """Dynamically import a strategy class from a dotted path.
-
-    Example: "quant_engine.strategies.momentum.MomentumStrategy"
-    """
-    parts = class_path.rsplit(".", 1)
-    if len(parts) != 2:
-        raise ValueError(f"Invalid strategy class path: {class_path}. Expected format: module.ClassName")
-    module_name, class_name = parts
-    if not module_name.startswith("strategies."):
+    """Load a declared local strategy through the shared v2 registry."""
+    try:
+        # This helper is also used by legacy paper/observation endpoints.
+        # New backtests call ``strategy_registry.load`` directly and require a
+        # real Spec; explicit legacy callers retain their compatibility path.
+        return strategy_registry.load(class_path, require_spec=False).strategy_class
+    except StrategyProtocolError as exc:
         raise ValueError(
-            "Strategy classes must be declared in the local strategies package"
+            f"Strategy classes must be declared in the local strategies package: {exc}"
+        ) from exc
+
+
+def _stored_params(strategy: Strategy) -> dict:
+    try:
+        value = json.loads(strategy.params) if strategy.params else {}
+    except (TypeError, ValueError) as exc:
+        raise StrategyProtocolError("stored strategy parameters are not valid JSON") from exc
+    if not isinstance(value, Mapping):
+        raise StrategyProtocolError("stored strategy parameters must be a JSON object")
+    return dict(value)
+
+
+def _resolve_strategy_run(
+    strategy: Strategy,
+    req: BacktestRunRequest,
+) -> tuple[RegisteredStrategy, dict, str, str]:
+    registered = strategy_registry.load(strategy.strategy_class)
+    strategy_market = str(getattr(strategy, "market", "a-share") or "a-share").strip().lower()
+    if strategy_market != req.market:
+        raise StrategyProtocolError("strategy_market_mismatch")
+    if req.market not in registered.spec.markets:
+        raise StrategyProtocolError(
+            f"strategy {registered.spec.id} does not support market {req.market}"
         )
-    import importlib
-    module = importlib.import_module(module_name)
-    strategy_class = getattr(module, class_name)
-    from quant_engine.backtest.strategy import Strategy as StrategyBase
-    if not isinstance(strategy_class, type) or not issubclass(strategy_class, StrategyBase):
-        raise TypeError(f"{class_path} is not a Strategy subclass")
-    return strategy_class
+    params = _stored_params(strategy)
+    params.update(req.parameter_overrides)
+    normalized = registered.spec.validate_params(params)
+    frequency = req.rebalance_frequency or registered.spec.rebalance_frequency
+    source = "request_override" if req.rebalance_frequency is not None else "strategy_spec"
+    return registered, normalized, frequency, source
 
 
 def _manifest_payload(run: Run) -> Optional[dict]:
@@ -194,22 +218,31 @@ def _execute_backtest(run_id: str, req: BacktestRunRequest):
         run.status = "running"
         db.commit()
 
-        # Load strategy
+        # Load the immutable strategy snapshot captured at submission.  The
+        # database definition may be edited while this background task waits.
         strategy_def = db.query(Strategy).filter(Strategy.id == req.strategy_id).first()
-        if not strategy_def:
+        saved_manifest = _manifest_payload(run) or {}
+        implementation = saved_manifest.get("strategy_class")
+        params = saved_manifest.get("strategy_parameters")
+        if not implementation and strategy_def is not None:
+            implementation = strategy_def.strategy_class
+        if params is None and strategy_def is not None:
+            params = _stored_params(strategy_def)
+        if not implementation or not isinstance(params, Mapping):
             run.status = "failed"
-            run.error_message = "Strategy not found"
+            run.error_message = "Strategy snapshot not found"
             db.commit()
             return
-
-        strategy_market = str(getattr(strategy_def, "market", "a-share") or "a-share").strip().lower()
-        if strategy_market != req.market:
-            run.status = "failed"
-            run.error_message = "strategy_market_mismatch"
-            db.commit()
-            return
-        strategy_cls = _import_strategy(strategy_def.strategy_class)
-        params = json.loads(strategy_def.params) if strategy_def.params else {}
+        registered = strategy_registry.load(str(implementation))
+        if req.market not in registered.spec.markets:
+            raise StrategyProtocolError("strategy_market_mismatch")
+        strategy_cls = registered.strategy_class
+        params = registered.spec.validate_params(params)
+        expected_fingerprint = saved_manifest.get("strategy_fingerprint") or run.strategy_fingerprint
+        current_fingerprint = strategy_fingerprint(registered.implementation, params)
+        if expected_fingerprint and current_fingerprint != expected_fingerprint:
+            raise StrategyProtocolError("strategy_changed_after_submission")
+        rebalance_frequency = req.rebalance_frequency or registered.spec.rebalance_frequency
 
         if req.market == "cn-fund":
             if isinstance(params, dict) and "paper_fee_rate" in params:
@@ -245,14 +278,17 @@ def _execute_backtest(run_id: str, req: BacktestRunRequest):
                 rows_by_code[full["code"]] = full["rows"]
                 dataset_manifests.append({key: dataset[key] for key in ("dataset_id", "code", "source", "start_date", "end_date", "row_count", "content_hash", "dataset_version", "nav_rule")})
             manifest = build_manifest(
-                market=req.market, strategy_class=strategy_def.strategy_class,
+                market=req.market, strategy_class=registered.implementation,
                 params=params, start_date=req.start_date, end_date=req.end_date,
-                benchmark=None, rebalance_frequency=req.rebalance_frequency,
+                benchmark=None, rebalance_frequency=rebalance_frequency,
                 universe=sorted(rows_by_code), dataset_manifests=dataset_manifests,
                 nav_rule="published_nav_next_valid_day",
                 cost_scenario="paper_baseline_v1",
             )
             manifest["fund_fee_rate"] = req.fund_fee_rate
+            manifest["rebalance_frequency_source"] = saved_manifest.get(
+                "rebalance_frequency_source", "strategy_spec",
+            )
             manifest["calendar_evidence"] = {
                 "source": calendar_report["source"],
                 "content_hash": calendar_report["content_hash"],
@@ -269,8 +305,8 @@ def _execute_backtest(run_id: str, req: BacktestRunRequest):
             result_dir = engine.run(
                 rows=rows_by_code, start=start_day, end=end_day,
                 initial_capital=req.initial_capital,
-                output_dir=f"backtest_result/{run_id}",
-                rebalance_frequency=req.rebalance_frequency,
+                output_dir=str(Path("backtest_result") / run_id),
+                rebalance_frequency=rebalance_frequency,
                 cancel_check=lambda: _is_cancelled(run_id),
                 # Fund NAV rows are accepted only on the same dated trading
                 # calendar used by the research manifest.  Tests and direct
@@ -290,7 +326,6 @@ def _execute_backtest(run_id: str, req: BacktestRunRequest):
                     "trading_calendar_coverage_insufficient: "
                     + json.dumps(calendar_report, ensure_ascii=False, sort_keys=True)
                 )
-            saved_manifest = _manifest_payload(run) or {}
             expected_calendar_hash = (saved_manifest.get("calendar_evidence") or {}).get("content_hash")
             if expected_calendar_hash and expected_calendar_hash != calendar_report.get("content_hash"):
                 raise ValueError("trading_calendar_changed_after_submission")
@@ -300,8 +335,8 @@ def _execute_backtest(run_id: str, req: BacktestRunRequest):
                 end=end_day,
                 initial_capital=req.initial_capital,
                 benchmark=req.benchmark,
-                output_dir=f"backtest_result/{run_id}",
-                rebalance_frequency=req.rebalance_frequency,
+                output_dir=str(Path("backtest_result") / run_id),
+                rebalance_frequency=rebalance_frequency,
                 cancel_check=lambda: _is_cancelled(run_id),
                 max_seconds=60 * 30,
                 calendar=calendar,
@@ -344,6 +379,9 @@ def _execute_backtest(run_id: str, req: BacktestRunRequest):
                     cost_model = summary.get("cost_model")
                     if isinstance(cost_model, dict):
                         manifest_payload["cost_model"] = cost_model
+                    strategy_requirements = summary.get("strategy_data_requirements")
+                    if isinstance(strategy_requirements, list):
+                        manifest_payload["strategy_data_requirements"] = strategy_requirements
                     run.data_manifest = serialize_manifest(manifest_payload)
 
         # Compute metrics if we have daily data
@@ -410,27 +448,31 @@ def run_backtest(
 
     now = datetime.now().isoformat()
     market = req.market
-    strategy_market = str(getattr(strategy, "market", "a-share") or "a-share").strip().lower()
-    if strategy_market != market:
-        raise HTTPException(status_code=409, detail="strategy_market_mismatch")
+    try:
+        registered, params, rebalance_frequency, frequency_source = _resolve_strategy_run(
+            strategy, req,
+        )
+    except StrategyProtocolError as exc:
+        status_code = 409 if str(exc) == "strategy_market_mismatch" else 422
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     if market == "cn-fund" and not req.symbols:
         raise HTTPException(status_code=422, detail="symbols are required for a domestic-fund backtest")
-    params = json.loads(strategy.params) if strategy.params else {}
     if market == "cn-fund" and isinstance(params, dict) and "paper_fee_rate" in params:
         raise HTTPException(status_code=422, detail="strategy parameter 'paper_fee_rate' is reserved for the paper cost model")
-    fingerprint = strategy_fingerprint(strategy.strategy_class, params)
+    fingerprint = strategy_fingerprint(registered.implementation, params)
     manifest = build_manifest(
         market=market,
-        strategy_class=strategy.strategy_class,
+        strategy_class=registered.implementation,
         params=params,
         start_date=req.start_date,
         end_date=req.end_date,
         benchmark=req.benchmark if market == "a-share" else None,
         universe=sorted({str(item).strip().upper() for item in req.symbols}) if market == "cn-fund" else None,
         nav_rule="published_nav_next_valid_day" if market == "cn-fund" else None,
-        rebalance_frequency=req.rebalance_frequency,
+        rebalance_frequency=rebalance_frequency,
         cost_scenario=req.cost_scenario if market == "a-share" else "paper_baseline_v1",
     )
+    manifest["rebalance_frequency_source"] = frequency_source
     if market == "a-share":
         # Run the same strict calendar preflight at the HTTP boundary so a
         # pending run cannot be created with unverifiable exchange dates.
@@ -506,7 +548,8 @@ def run_backtest(
     db.commit()
     db.refresh(run)
 
-    background_tasks.add_task(_execute_backtest, run.id, req)
+    execution_request = req.model_copy(update={"rebalance_frequency": rebalance_frequency})
+    background_tasks.add_task(_execute_backtest, run.id, execution_request)
 
     return RunResponse(
         id=run.id, run_type=run.run_type, status=run.status,
@@ -612,3 +655,37 @@ def get_trades(
         "page": page,
         "page_size": page_size,
     }
+
+
+@router.get("/runs/{run_id}/strategy-outputs")
+def get_strategy_outputs(
+    run_id: str,
+    page: int = 1,
+    page_size: int = 100,
+    db: Session = Depends(get_db),
+):
+    """Read generic, Spec-declared strategy diagnostics for a completed run."""
+    if page < 1 or page_size < 1 or page_size > 500:
+        raise HTTPException(status_code=422, detail="invalid pagination")
+    run = db.query(Run).filter(Run.id == run_id).first()
+    if not run or not run.result_dir:
+        raise HTTPException(status_code=404, detail="Run not found or not completed")
+    output_path = Path(run.result_dir) / "strategy_outputs.parquet"
+    if not output_path.exists():
+        return {"outputs": [], "total": 0, "page": page, "page_size": page_size}
+    import pandas as pd
+    frame = pd.read_parquet(output_path)
+    total = len(frame)
+    start = (page - 1) * page_size
+    # Pandas' JSON encoder normalizes Timestamp/NumPy scalar values into a
+    # platform-independent API representation.
+    outputs = json.loads(
+        frame.iloc[start:start + page_size].to_json(orient="records", date_format="iso")
+    )
+    for item in outputs:
+        if "value_json" in item:
+            try:
+                item["value"] = json.loads(item.pop("value_json"))
+            except (TypeError, ValueError):
+                item["value"] = None
+    return {"outputs": outputs, "total": total, "page": page, "page_size": page_size}

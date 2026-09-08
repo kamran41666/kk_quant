@@ -6,6 +6,7 @@
 from datetime import date
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from quant_engine.data.api import DataAPI
@@ -105,6 +106,25 @@ class DataHandler:
     @property
     def stock_list(self) -> list[str]:
         return list(self._codes)
+
+    def requirement_coverage(self, fields: list[str]) -> dict:
+        """Report usable finite bars per code for a strategy data requirement."""
+        missing_fields = sorted(set(fields) - set(self._daily_data.columns))
+        if missing_fields:
+            return {
+                "missing_fields": missing_fields,
+                "usable_bars": {code: 0 for code in self._codes},
+            }
+        selected = self._daily_data[fields].apply(pd.to_numeric, errors="coerce")
+        usable_mask = pd.Series(
+            np.isfinite(selected.to_numpy()).all(axis=1),
+            index=selected.index,
+        )
+        counts = usable_mask.groupby(level="code").sum()
+        return {
+            "missing_fields": [],
+            "usable_bars": {code: int(counts.get(code, 0)) for code in self._codes},
+        }
 
     @property
     def available_start(self) -> Optional[date]:

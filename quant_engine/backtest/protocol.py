@@ -11,7 +11,7 @@ from enum import Enum
 import json
 import math
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 
 STRATEGY_PROTOCOL_VERSION = "2.0"
@@ -45,6 +45,8 @@ class ParameterSpec:
     def __post_init__(self) -> None:
         if not self.key.isidentifier():
             raise StrategyProtocolError(f"invalid parameter key: {self.key!r}")
+        if self.required and self.default is None:
+            return
         self.validate(self.default)
 
     def validate(self, value: Any) -> Any:
@@ -94,16 +96,32 @@ class DataRequirement:
     frequency: str = "1d"
     adjustment: str = "event_driven"
     optional: bool = False
+    lookback_parameter: str | None = None
+    lookback_offset: int = 0
 
     def __post_init__(self) -> None:
         if not self.dataset or not self.fields or self.lookback < 1:
             raise StrategyProtocolError("data requirement needs dataset, fields and lookback >= 1")
+        if self.lookback_offset < 0:
+            raise StrategyProtocolError("data requirement lookback_offset must be >= 0")
+
+    def resolved_lookback(self, params: Mapping[str, Any]) -> int:
+        if self.lookback_parameter is None:
+            return self.lookback
+        value = params.get(self.lookback_parameter)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise StrategyProtocolError(
+                f"lookback parameter {self.lookback_parameter} must be an integer"
+            )
+        return max(self.lookback, value + self.lookback_offset)
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "dataset": self.dataset, "fields": list(self.fields),
             "lookback": self.lookback, "frequency": self.frequency,
             "adjustment": self.adjustment, "optional": self.optional,
+            "lookback_parameter": self.lookback_parameter,
+            "lookback_offset": self.lookback_offset,
         }
 
 
@@ -113,6 +131,12 @@ class AnalysisOutputSpec:
     label: str
     type: str = "number"
     description: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.key.isidentifier():
+            raise StrategyProtocolError(f"invalid analysis output key: {self.key!r}")
+        if self.type not in {"number", "integer", "boolean", "string", "json"}:
+            raise StrategyProtocolError(f"unsupported analysis output type: {self.type}")
 
     def as_dict(self) -> dict[str, str]:
         return {"key": self.key, "label": self.label, "type": self.type, "description": self.description}
@@ -152,6 +176,11 @@ class StrategySpec:
         keys = [item.key for item in self.parameters]
         if len(keys) != len(set(keys)):
             raise StrategyProtocolError("parameter keys must be unique")
+        for requirement in self.data:
+            if requirement.lookback_parameter and requirement.lookback_parameter not in keys:
+                raise StrategyProtocolError(
+                    f"unknown data lookback parameter: {requirement.lookback_parameter}"
+                )
         analysis_keys = [item.key for item in self.analysis_outputs]
         if len(analysis_keys) != len(set(analysis_keys)):
             raise StrategyProtocolError("analysis output keys must be unique")
@@ -203,9 +232,94 @@ class StrategySpec:
 
 
 @dataclass(frozen=True)
+class ResolvedDataRequirement:
+    dataset: str
+    fields: tuple[str, ...]
+    required_bars: int
+    frequency: str
+    adjustment: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "dataset": self.dataset,
+            "fields": list(self.fields),
+            "required_bars": self.required_bars,
+            "frequency": self.frequency,
+            "adjustment": self.adjustment,
+        }
+
+
+def resolve_strategy_data_requirements(
+    spec: StrategySpec,
+    params: Mapping[str, Any],
+    *,
+    supported: Mapping[str, tuple[str, str]],
+) -> tuple[ResolvedDataRequirement, ...]:
+    """Resolve dynamic lookbacks and reject unsupported engine data contracts."""
+    normalized_params = spec.validate_params(params)
+    resolved: list[ResolvedDataRequirement] = []
+    for requirement in spec.data:
+        if requirement.optional:
+            continue
+        expected = supported.get(requirement.dataset)
+        if expected != (requirement.frequency, requirement.adjustment):
+            raise StrategyProtocolError(
+                "strategy_data_requirement_unsupported: "
+                f"{requirement.dataset}:{requirement.frequency}:{requirement.adjustment}"
+            )
+        resolved.append(ResolvedDataRequirement(
+            dataset=requirement.dataset,
+            fields=requirement.fields,
+            required_bars=max(
+                spec.warmup_bars,
+                requirement.resolved_lookback(normalized_params),
+            ),
+            frequency=requirement.frequency,
+            adjustment=requirement.adjustment,
+        ))
+    return tuple(resolved)
+
+
+@dataclass(frozen=True)
 class StrategyOutput:
     target_weights: Mapping[str, float]
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
+
+
+def encode_strategy_diagnostic(value: Any) -> str:
+    """Encode one diagnostic into a stable scalar suitable for Parquet."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
+
+
+def normalize_strategy_diagnostics(
+    value: Mapping[str, Any],
+    *,
+    spec: StrategySpec | None = None,
+) -> Mapping[str, Any]:
+    """Validate diagnostics from StrategyOutput and StrategyContext.record alike."""
+    try:
+        diagnostics = json.loads(encode_strategy_diagnostic(dict(value)))
+    except (TypeError, ValueError) as exc:
+        raise StrategyProtocolError("strategy diagnostics must be JSON serializable") from exc
+    declared = {item.key: item for item in spec.analysis_outputs} if spec else {}
+    if spec is not None:
+        unknown = sorted(set(diagnostics) - set(declared))
+        if unknown:
+            raise StrategyProtocolError(f"undeclared strategy diagnostic(s): {', '.join(unknown)}")
+    for key, item in diagnostics.items():
+        output_spec = declared.get(key)
+        if output_spec is None:
+            continue
+        if output_spec.type == "integer" and (isinstance(item, bool) or not isinstance(item, int)):
+            raise StrategyProtocolError(f"strategy diagnostic {key} must be an integer")
+        if output_spec.type == "number":
+            if isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(float(item)):
+                raise StrategyProtocolError(f"strategy diagnostic {key} must be a finite number")
+        if output_spec.type == "boolean" and not isinstance(item, bool):
+            raise StrategyProtocolError(f"strategy diagnostic {key} must be a boolean")
+        if output_spec.type == "string" and not isinstance(item, str):
+            raise StrategyProtocolError(f"strategy diagnostic {key} must be a string")
+    return MappingProxyType(diagnostics)
 
 
 def normalize_strategy_output(
@@ -233,16 +347,8 @@ def normalize_strategy_output(
     gross = sum(abs(weight) for weight in normalized.values())
     if gross > limit + 1e-9:
         raise StrategyProtocolError(f"gross target exposure {gross:.6f} exceeds {limit:.6f}")
-    try:
-        diagnostics = json.loads(json.dumps(dict(output.diagnostics), default=str))
-    except (TypeError, ValueError) as exc:
-        raise StrategyProtocolError("strategy diagnostics must be JSON serializable") from exc
-    declared = {item.key for item in spec.analysis_outputs} if spec else set()
-    if declared:
-        unknown = sorted(set(diagnostics) - declared)
-        if unknown:
-            raise StrategyProtocolError(f"undeclared strategy diagnostic(s): {', '.join(unknown)}")
-    return StrategyOutput(MappingProxyType(normalized), MappingProxyType(diagnostics))
+    diagnostics = normalize_strategy_diagnostics(output.diagnostics, spec=spec)
+    return StrategyOutput(MappingProxyType(normalized), diagnostics)
 
 
 STRATEGY_PROTOCOL = {

@@ -6,6 +6,12 @@ export interface Strategy {
   params: Record<string, any>
   market?: 'a-share' | 'cn-fund' | 'us-equity'
   protocol_version?: string
+  spec_id?: string
+  spec_version?: string
+  spec?: StrategySpec
+  protocol_compatible?: boolean
+  compatibility_error?: string
+  resolved_data_requirements?: Array<StrategySpec['data'][number] & { required_bars: number }>
   created_at: string
   updated_at: string
 }
@@ -16,6 +22,53 @@ export interface StrategyCreate {
   strategy_class: string
   params: Record<string, any>
   market?: 'a-share' | 'cn-fund' | 'us-equity'
+}
+
+export interface StrategyParameterSpec {
+  key: string
+  label: string
+  type: 'integer' | 'number' | 'boolean' | 'string'
+  default: unknown
+  description: string
+  required: boolean
+  minimum?: number | null
+  maximum?: number | null
+  choices: unknown[]
+  advanced: boolean
+}
+
+export interface StrategySpec {
+  id: string
+  name: string
+  version: string
+  protocol_version: string
+  description: string
+  markets: Array<'a-share' | 'cn-fund' | 'us-equity'>
+  parameters: StrategyParameterSpec[]
+  data: Array<{
+    dataset: string
+    fields: string[]
+    lookback: number
+    frequency: string
+    adjustment: string
+    optional: boolean
+    lookback_parameter?: string | null
+    lookback_offset?: number
+  }>
+  execution: {
+    signal_type: string
+    rebalance_frequency: 'daily' | 'weekly' | 'monthly'
+    warmup_bars: number
+    long_only: boolean
+    max_gross_exposure: number
+  }
+  implementation: string
+  tags: string[]
+}
+
+export interface StrategyCatalog {
+  protocol_version: string
+  strategies: StrategySpec[]
 }
 
 export interface RunSummary {
@@ -52,6 +105,7 @@ export interface BacktestRunRequest {
   fund_fee_rate?: number
   benchmark?: string
   rebalance_frequency?: 'daily' | 'weekly' | 'monthly'
+  parameter_overrides?: Record<string, unknown>
 }
 
 export interface PaperStatus {

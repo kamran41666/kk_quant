@@ -14,6 +14,8 @@ from datetime import date
 from importlib import import_module
 from typing import Any, Mapping, Optional
 
+from quant_engine.backtest.protocol import StrategyProtocolError, StrategySpec
+
 
 EVIDENCE_VERSION = "backtest-evidence-v1"
 CALENDAR_VERSION = "trading-calendar-v1"
@@ -26,13 +28,52 @@ FUND_CALENDAR_VERSION = "cn-fund-nav-calendar-v1"
 FUND_EXECUTION_MODEL = "next_valid_nav-v1"
 
 
-def _canonical_params(params: Any) -> str:
+def _params_object(params: Any) -> Any:
     if isinstance(params, str):
         try:
             params = json.loads(params or "{}")
         except (TypeError, ValueError):
             params = {"raw": params}
-    return json.dumps(params or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return params or {}
+
+
+def _strategy_spec(strategy_class: str) -> StrategySpec | None:
+    try:
+        module_name, class_name = str(strategy_class).rsplit(".", 1)
+        if not module_name.startswith("strategies."):
+            return None
+        module = import_module(module_name)
+        strategy_type = getattr(module, class_name)
+    except (AttributeError, ImportError, TypeError, ValueError):
+        return None
+    spec = getattr(strategy_type, "SPEC", None)
+    return spec if isinstance(spec, StrategySpec) else None
+
+
+def normalized_strategy_params(strategy_class: str, params: Any) -> dict[str, Any]:
+    """Return the exact parameter object bound into strategy evidence."""
+    raw = _params_object(params)
+    if not isinstance(raw, Mapping):
+        raise StrategyProtocolError("strategy parameters must be a JSON object")
+    spec = _strategy_spec(strategy_class)
+    return spec.validate_params(raw) if spec is not None else dict(raw)
+
+
+def _canonical_params(strategy_class: str, params: Any) -> str:
+    normalized = normalized_strategy_params(strategy_class, params)
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def strategy_spec_identity(strategy_class: str) -> dict[str, str] | None:
+    """Return stable declarative identity without executable strategy details."""
+    spec = _strategy_spec(strategy_class)
+    if spec is None:
+        return None
+    return {
+        "id": spec.id,
+        "version": spec.version,
+        "protocol_version": spec.protocol_version,
+    }
 
 
 def strategy_source_hash(strategy_class: str) -> Optional[str]:
@@ -50,10 +91,11 @@ def strategy_source_hash(strategy_class: str) -> Optional[str]:
 
 
 def strategy_fingerprint(strategy_class: str, params: Any) -> str:
-    """Hash class path, normalized parameters, and local source content."""
+    """Hash implementation, Spec identity, normalized parameters and source."""
     payload = {
         "strategy_class": str(strategy_class),
-        "params": _canonical_params(params),
+        "strategy_spec": strategy_spec_identity(strategy_class),
+        "params": _canonical_params(strategy_class, params),
         "source_hash": strategy_source_hash(strategy_class),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -84,6 +126,8 @@ def build_manifest(
         "evidence_version": EVIDENCE_VERSION,
         "market": str(market),
         "strategy_class": str(strategy_class),
+        "strategy_spec": strategy_spec_identity(strategy_class),
+        "strategy_parameters": normalized_strategy_params(strategy_class, params),
         "strategy_fingerprint": fingerprint,
         "start_date": start,
         "end_date": end,

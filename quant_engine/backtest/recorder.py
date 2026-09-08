@@ -10,6 +10,8 @@ from typing import Optional
 
 import pandas as pd
 
+from quant_engine.backtest.protocol import encode_strategy_diagnostic
+
 from quant_engine.backtest.types import Trade, Order, Position
 
 
@@ -108,7 +110,11 @@ class Recorder:
 
     def record_strategy_output(self, dt: date, diagnostics) -> None:
         for key, value in dict(diagnostics or {}).items():
-            self._strategy_outputs.append({"date": dt, "key": str(key), "value": value})
+            self._strategy_outputs.append({
+                "date": dt,
+                "key": str(key),
+                "value_json": encode_strategy_diagnostic(value),
+            })
 
     def save(self):
         """保存所有记录到磁盘"""

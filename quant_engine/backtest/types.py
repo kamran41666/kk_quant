@@ -1,6 +1,6 @@
 """回测引擎核心数据类型"""
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date
 from enum import Enum
 from typing import Optional
 import uuid

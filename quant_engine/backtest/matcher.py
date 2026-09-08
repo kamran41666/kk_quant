@@ -5,7 +5,7 @@
 import uuid
 from typing import Optional
 
-from quant_engine.backtest.types import Order, OrderSide, OrderStatus, Trade
+from quant_engine.backtest.types import Order, OrderSide, Trade
 from quant_engine.backtest.cost_model import CostModel
 
 

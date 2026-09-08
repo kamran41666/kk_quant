@@ -9,7 +9,8 @@ from typing import Optional
 from server.models.database import get_db
 from server.models.schema import Strategy
 from server.services.paper_market_rules import normalize_market
-from quant_engine.backtest.strategy import STRATEGY_PROTOCOL_V1
+from quant_engine.backtest.protocol import STRATEGY_PROTOCOL, StrategyProtocolError
+from quant_engine.backtest.registry import RegisteredStrategy, strategy_registry
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -52,9 +53,93 @@ class StrategyResponse(BaseModel):
     strategy_class: str
     params: dict
     market: str = "a-share"
-    protocol_version: str = STRATEGY_PROTOCOL_V1["version"]
+    protocol_version: Optional[str] = None
+    spec_id: Optional[str] = None
+    spec_version: Optional[str] = None
+    spec: Optional[dict] = None
+    protocol_compatible: bool = False
+    compatibility_error: Optional[str] = None
+    resolved_data_requirements: list[dict] = Field(default_factory=list)
     created_at: str
     updated_at: str
+
+def _load_registered(implementation: str) -> RegisteredStrategy | None:
+    try:
+        return strategy_registry.load(implementation)
+    except StrategyProtocolError:
+        return None
+
+
+def _strategy_response(strategy: Strategy) -> StrategyResponse:
+    registered = _load_registered(strategy.strategy_class)
+    spec = registered.spec if registered is not None else None
+    compatibility_error = None
+    params: dict = {}
+    market = str(getattr(strategy, "market", "a-share") or "a-share").strip().lower()
+    try:
+        raw_params = json.loads(strategy.params) if strategy.params else {}
+        if not isinstance(raw_params, dict):
+            raise StrategyProtocolError("stored strategy parameters must be a JSON object")
+        params = raw_params
+        if spec is None:
+            raise StrategyProtocolError("strategy implementation is not registered for protocol v2")
+        market = normalize_market(market)
+        if market not in spec.markets:
+            raise StrategyProtocolError(f"strategy does not support stored market {market}")
+        normalized_params = spec.validate_params(params)
+    except (StrategyProtocolError, TypeError, ValueError) as exc:
+        compatibility_error = str(exc)
+        normalized_params = {}
+    resolved_data_requirements = []
+    if spec is not None and compatibility_error is None:
+        resolved_data_requirements = [
+            {
+                **requirement.as_dict(),
+                "required_bars": max(
+                    spec.warmup_bars,
+                    requirement.resolved_lookback(normalized_params),
+                ),
+            }
+            for requirement in spec.data
+        ]
+    return StrategyResponse(
+        id=strategy.id,
+        name=strategy.name,
+        description=strategy.description,
+        strategy_class=strategy.strategy_class,
+        params=params,
+        market=market,
+        protocol_version=spec.protocol_version if spec else None,
+        spec_id=spec.id if spec else None,
+        spec_version=spec.version if spec else None,
+        spec=registered.as_dict() if registered is not None else None,
+        protocol_compatible=compatibility_error is None,
+        compatibility_error=compatibility_error,
+        resolved_data_requirements=resolved_data_requirements,
+        created_at=strategy.created_at,
+        updated_at=strategy.updated_at,
+    )
+
+
+def _validated_definition(
+    implementation: str,
+    market: str,
+    params: dict,
+) -> tuple[RegisteredStrategy, str, dict]:
+    try:
+        registered = strategy_registry.load(implementation)
+        normalized_market = normalize_market(market)
+        if normalized_market not in registered.spec.markets:
+            supported = ", ".join(registered.spec.markets)
+            raise StrategyProtocolError(
+                f"strategy {registered.spec.id} does not support market {normalized_market}; "
+                f"supported: {supported}"
+            )
+        normalized_params = registered.spec.validate_params(params)
+    except StrategyProtocolError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return registered, normalized_market, normalized_params
+
 
 # ---- Endpoints ----
 
@@ -71,25 +156,26 @@ def list_strategies(
             (Strategy.strategy_class.ilike(f"%{search}%"))
         )
     strategies = query.order_by(Strategy.updated_at.desc()).all()
-    # Parse JSON params for response
-    result = []
-    for s in strategies:
-        d = StrategyResponse(
-            id=s.id, name=s.name, description=s.description,
-            strategy_class=s.strategy_class,
-            params=json.loads(s.params) if s.params else {},
-            market=normalize_market(getattr(s, "market", "a-share")),
-            protocol_version=STRATEGY_PROTOCOL_V1["version"],
-            created_at=s.created_at, updated_at=s.updated_at,
-        )
-        result.append(d)
-    return result
+    return [_strategy_response(strategy) for strategy in strategies]
 
 
 @router.get("/protocol")
 def get_strategy_protocol():
     """Return the versioned strategy contract used by backtest and paper flows."""
-    return STRATEGY_PROTOCOL_V1
+    return STRATEGY_PROTOCOL
+
+
+@router.get("/catalog")
+def get_strategy_catalog():
+    """Return auto-discovered strategy Specs for API and form generation."""
+    try:
+        entries = strategy_registry.discover()
+    except StrategyProtocolError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "protocol_version": STRATEGY_PROTOCOL["version"],
+        "strategies": [entry.as_dict() for entry in entries],
+    }
 
 
 @router.post("", response_model=StrategyResponse, status_code=201)
@@ -98,14 +184,16 @@ def create_strategy(
     db: Session = Depends(get_db),
 ):
     """Create a new strategy definition"""
+    _, market, params = _validated_definition(
+        data.strategy_class, data.market, data.params,
+    )
     now = datetime.now().isoformat()
     strategy = Strategy(
         name=data.name,
         description=data.description,
         strategy_class=data.strategy_class,
-        params=json.dumps(data.params),
-        market=normalize_market(data.market),
-        protocol_version=STRATEGY_PROTOCOL_V1["version"],
+        params=json.dumps(params, ensure_ascii=False, sort_keys=True),
+        market=market,
         created_at=now,
         updated_at=now,
     )
@@ -113,14 +201,7 @@ def create_strategy(
     db.commit()
     db.refresh(strategy)
 
-    return StrategyResponse(
-        id=strategy.id, name=strategy.name, description=strategy.description,
-        strategy_class=strategy.strategy_class,
-        params=json.loads(strategy.params) if strategy.params else {},
-        market=normalize_market(getattr(strategy, "market", "a-share")),
-        protocol_version=STRATEGY_PROTOCOL_V1["version"],
-        created_at=strategy.created_at, updated_at=strategy.updated_at,
-    )
+    return _strategy_response(strategy)
 
 
 @router.get("/{strategy_id}", response_model=StrategyResponse)
@@ -133,14 +214,7 @@ def get_strategy(
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
-    return StrategyResponse(
-        id=strategy.id, name=strategy.name, description=strategy.description,
-        strategy_class=strategy.strategy_class,
-        params=json.loads(strategy.params) if strategy.params else {},
-        market=normalize_market(getattr(strategy, "market", "a-share")),
-        protocol_version=STRATEGY_PROTOCOL_V1["version"],
-        created_at=strategy.created_at, updated_at=strategy.updated_at,
-    )
+    return _strategy_response(strategy)
 
 
 @router.put("/{strategy_id}", response_model=StrategyResponse)
@@ -155,10 +229,15 @@ def update_strategy(
         raise HTTPException(status_code=404, detail="Strategy not found")
 
     update_data = data.model_dump(exclude_unset=True)
-    if 'params' in update_data:
-        update_data['params'] = json.dumps(update_data['params'])
-    if 'market' in update_data:
-        update_data['market'] = normalize_market(update_data['market'])
+    implementation = update_data.get("strategy_class", strategy.strategy_class)
+    market = update_data.get("market", getattr(strategy, "market", "a-share"))
+    params = update_data.get(
+        "params", json.loads(strategy.params) if strategy.params else {},
+    )
+    _, market, params = _validated_definition(implementation, market, params)
+    update_data["strategy_class"] = implementation
+    update_data["market"] = market
+    update_data["params"] = json.dumps(params, ensure_ascii=False, sort_keys=True)
 
     update_data['updated_at'] = datetime.now().isoformat()
 
@@ -168,13 +247,7 @@ def update_strategy(
     db.commit()
     db.refresh(strategy)
 
-    return StrategyResponse(
-        id=strategy.id, name=strategy.name, description=strategy.description,
-        strategy_class=strategy.strategy_class,
-        params=json.loads(strategy.params) if strategy.params else {},
-        market=normalize_market(getattr(strategy, "market", "a-share")),
-        created_at=strategy.created_at, updated_at=strategy.updated_at,
-    )
+    return _strategy_response(strategy)
 
 
 @router.delete("/{strategy_id}", status_code=204)

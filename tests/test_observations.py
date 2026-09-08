@@ -1,10 +1,13 @@
 from datetime import date, datetime, timedelta, timezone
 
+import pandas as pd
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from quant_engine.data.live import LiveMarketDataProvider, MarketQuote
+from quant_engine.backtest.protocol import StrategyOutput, StrategySpec
+from quant_engine.backtest.strategy import Strategy as StrategyBase
 from server.models.database import Base
 from server.models.schema import PaperLot, PaperOrder, PaperRebalanceItem, PaperRebalancePlan, Run, Strategy, StrategyObservation, StrategyObservationEvent
 from server.services.observation import (
@@ -17,6 +20,8 @@ from server.services.observation import (
     start_observation,
     stop_observation,
     _execute_rebalance_plan,
+    _default_fund_signal_provider,
+    _default_signal_provider,
     _get_or_create_rebalance_plan,
     retry_rebalance_plan,
 )
@@ -74,6 +79,149 @@ def _quote(code="000001.SZ", price=10.0, freshness="fresh"):
         volume=1000.0, amount=10000.0, source="test-feed",
         as_of=stamp, received_at=stamp, freshness=freshness, is_fallback=False,
     )
+
+
+def test_default_a_share_signal_provider_accepts_v2_output_and_public_context(monkeypatch):
+    db = _db()
+    definition = Strategy(
+        name="v2 a-share",
+        strategy_class="strategies.test.V2Ashare",
+        params="{}",
+        market="a-share",
+    )
+    db.add(definition)
+    db.commit()
+    events = []
+
+    class V2Ashare(StrategyBase):
+        SPEC = StrategySpec(
+            id="v2-a-share-observation-test",
+            name="v2 a-share observation test",
+            version="1.0.0",
+            description="Exercises the public context",
+            markets=("a-share",),
+        )
+
+        def initialize(self):
+            assert self.ctx.current_date is None
+            events.append("initialize")
+
+        def before_trading(self):
+            assert self.ctx.current_date == date(2024, 6, 14)
+            events.append("before_trading")
+
+        def generate_signals(self, dt):
+            assert self.ctx.universe == ["000001.SZ"]
+            return StrategyOutput({"000001.SZ": 0.5})
+
+        def teardown(self):
+            events.append("teardown")
+
+    class Handler:
+        stock_list = ["000001.SZ"]
+
+        def __init__(self, **_kwargs):
+            self._daily_data = pd.DataFrame(
+                [{"code": "000001.SZ", "date": date(2024, 6, 14), "close": 10.0}]
+            ).set_index(["code", "date"])
+
+        def push_day(self, dt):
+            self.current_date = dt
+
+        def get_history(self, **_kwargs):
+            return self._daily_data
+
+        def get_price(self, _code, _field):
+            return 10.0
+
+    class Api:
+        def index_components(self, _index, _as_of):
+            return ["000001.SZ"]
+
+    monkeypatch.setattr("server.services.observation.DataAPI", lambda: Api())
+    monkeypatch.setattr("server.services.observation.DataHandler", Handler)
+    monkeypatch.setattr("server.services.observation._verified_trading_calendar", lambda _day: object())
+    monkeypatch.setattr("server.api.backtest._import_strategy", lambda _path: V2Ashare)
+    observation = StrategyObservation(strategy_id=definition.id)
+
+    assert _default_signal_provider(db, observation, date(2024, 6, 14)) == {
+        "000001.SZ": 0.5,
+    }
+    assert events == ["initialize", "before_trading", "teardown"]
+
+
+def test_default_fund_signal_provider_accepts_v2_output_and_public_context(monkeypatch):
+    db = _db()
+    definition = Strategy(
+        name="v2 fund",
+        strategy_class="strategies.test.V2Fund",
+        params="{}",
+        market="cn-fund",
+    )
+    db.add(definition)
+    db.flush()
+    dataset = archive_fund_nav_dataset(
+        db,
+        code="110022",
+        rows=[
+            {"date": "2024-06-13", "nav": 2.0},
+            {"date": "2024-06-14", "nav": 2.1},
+        ],
+        start_date=date(2024, 6, 13),
+        end_date=date(2024, 6, 14),
+    )
+    run = Run(
+        strategy_id=definition.id,
+        run_type="backtest",
+        status="completed",
+        data_manifest=serialize_manifest({"dataset_manifests": [dataset]}),
+    )
+    db.add(run)
+    db.commit()
+    events = []
+
+    class V2Fund(StrategyBase):
+        SPEC = StrategySpec(
+            id="v2-fund-observation-test",
+            name="v2 fund observation test",
+            version="1.0.0",
+            description="Exercises the public fund context",
+            markets=("cn-fund",),
+        )
+
+        def initialize(self):
+            assert self.ctx.current_date is None
+            assert self.ctx.history(lookback=10, fields=["nav"]).empty
+            events.append("initialize")
+
+        def before_trading(self):
+            assert self.ctx.current_date == date(2024, 6, 14)
+            events.append("before_trading")
+
+        def generate_signals(self, dt):
+            history = self.ctx.history(lookback=10, fields=["nav"])
+            assert history.index.get_level_values("date").max() == date(2024, 6, 14)
+            return StrategyOutput({"110022": 1.0})
+
+        def teardown(self):
+            events.append("teardown")
+
+    class Calendar:
+        @staticmethod
+        def is_trading_day(day):
+            return day.weekday() < 5
+
+    monkeypatch.setattr("server.services.observation._verified_trading_calendar", lambda _day: Calendar())
+    monkeypatch.setattr("server.api.backtest._import_strategy", lambda _path: V2Fund)
+    observation = StrategyObservation(
+        strategy_id=definition.id,
+        backtest_run_id=run.id,
+    )
+
+    assert _default_fund_signal_provider(db, observation, date(2024, 6, 14)) == {
+        "110022": 1.0,
+    }
+    assert events == ["initialize", "before_trading", "teardown"]
 
 
 class _Quotes:
@@ -334,7 +482,7 @@ def test_cross_day_recovery_claims_order_committed_before_worker_crash(monkeypat
     real_submit = observation_module.submit_order
 
     def crash_after_commit(*args, **kwargs):
-        result = real_submit(*args, **kwargs)
+        real_submit(*args, **kwargs)
         raise RuntimeError("simulated crash after paper fill commit")
 
     monkeypatch.setattr(observation_module, "submit_order", crash_after_commit)

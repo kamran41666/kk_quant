@@ -5,7 +5,6 @@ A股实际费率:
   - 印花税: 千1 (仅卖出)
   - 滑点: 模拟市场冲击成本, 默认千1
 """
-import warnings
 import math
 from quant_engine.backtest.types import Trade, OrderSide
 

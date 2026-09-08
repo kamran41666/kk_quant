@@ -71,8 +71,10 @@ class FundNavPortal:
                     item_date = pd.Timestamp(item["date"]).date()
                 except (KeyError, TypeError, ValueError):
                     continue
-                if self._current_date is None or item_date <= self._current_date:
-                    usable.append({"code": code, "date": item_date, **item})
+                # An unpositioned portal is deliberately empty.  In
+                # particular, initialize() must not see the run's future NAVs.
+                if self._current_date is not None and item_date <= self._current_date:
+                    usable.append({**item, "code": code, "date": item_date})
             rows.extend(usable[-lookback:])
         if not rows:
             return pd.DataFrame(columns=list(fields), index=pd.MultiIndex.from_arrays([[], []], names=["code", "date"]))
@@ -126,6 +128,11 @@ class StrategyContext:
     @property
     def universe(self) -> list[str]:
         return list(self._data.universe) if self._data is not None else []
+
+    @property
+    def stock_list(self) -> list[str]:
+        """Legacy v1 alias retained while stored strategies migrate to ``universe``."""
+        return self.universe
 
     def history(
         self,

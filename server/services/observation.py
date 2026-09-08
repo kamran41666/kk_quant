@@ -20,8 +20,14 @@ from sqlalchemy import or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from quant_engine.backtest.context import StrategyContext
+from quant_engine.backtest.context import DataHandlerPortal, FundNavPortal, StrategyContext
 from quant_engine.backtest.data_handler import DataHandler
+from quant_engine.backtest.protocol import (
+    StrategyProtocolError,
+    StrategySpec,
+    normalize_strategy_output,
+    resolve_strategy_data_requirements,
+)
 from quant_engine.data.api import DataAPI
 from quant_engine.data.calendar import TradingCalendar
 from quant_engine.data.live import AKShareLiveMarketDataProvider, LiveMarketDataProvider, MarketQuote, SHANGHAI_TZ
@@ -37,7 +43,7 @@ from server.models.schema import (
     PaperRebalanceItem,
     PaperRebalancePlan,
 )
-from server.services.paper_market_rules import A_SHARE, CN_FUND, fee_for, is_market_trading_day, market_session_status, normalize_market, normalize_symbol
+from server.services.paper_market_rules import A_SHARE, CN_FUND, fee_for, market_session_status, normalize_market, normalize_symbol
 from server.services.paper_trading import submit_order
 from server.services.strategy_evidence import manifest_is_complete, strategy_fingerprint
 
@@ -978,25 +984,60 @@ def _default_signal_provider(db: Session, observation: StrategyObservation, as_o
         params = json.loads(strategy.params or "{}")
         from server.api.backtest import _import_strategy
         strategy_cls = _import_strategy(strategy.strategy_class)
+        spec = getattr(strategy_cls, "SPEC", None)
+        requirements = (
+            resolve_strategy_data_requirements(
+                spec,
+                params,
+                supported={"a_share_daily": ("1d", "event_driven")},
+            )
+            if isinstance(spec, StrategySpec)
+            else ()
+        )
         api = DataAPI()
         codes = api.index_components("000300", as_of)[:50]
         if not codes:
             raise ObservationBlocked("PIT_STOCK_POOL_EMPTY", "No point-in-time stock pool is available for this observation date.")
-        handler = DataHandler(codes=codes, start=as_of - timedelta(days=90), end=as_of)
+        calendar = _verified_trading_calendar(as_of)
+        required_bars = max((item.required_bars for item in requirements), default=30)
+        handler = DataHandler(
+            codes=codes,
+            start=as_of - timedelta(days=max(90, required_bars * 2 + 30)),
+            end=as_of,
+            calendar=calendar,
+        )
         if handler._daily_data.empty or as_of not in set(handler._daily_data.index.get_level_values("date")):
             raise ObservationBlocked("OBSERVATION_HISTORY_UNAVAILABLE", "A complete point-in-time history window is not available for this date.")
-        context = StrategyContext(_verified_trading_calendar(as_of))
-        context._data_handler = handler
-        context.set_date(as_of)
+        for requirement in requirements:
+            coverage = handler.requirement_coverage(list(requirement.fields))
+            if coverage["missing_fields"] or any(
+                count < requirement.required_bars
+                for count in coverage["usable_bars"].values()
+            ):
+                raise ObservationBlocked(
+                    "OBSERVATION_HISTORY_UNAVAILABLE",
+                    f"The strategy requires {requirement.required_bars} usable {requirement.dataset} bars.",
+                )
+        context = StrategyContext(calendar)
+        context.bind_data(DataHandlerPortal(handler))
         strategy_instance = strategy_cls(context, **params)
-        strategy_instance.initialize()
-        signals = strategy_instance.generate_signals(as_of)
+        try:
+            strategy_instance.initialize()
+            handler.push_day(as_of)
+            context.set_date(as_of)
+            strategy_instance.before_trading()
+            signals = normalize_strategy_output(
+                strategy_instance.generate_signals(as_of),
+                spec=spec,
+            ).target_weights
+        finally:
+            strategy_instance.teardown()
     except ObservationBlocked:
         raise
+    except StrategyProtocolError as exc:
+        raise ObservationBlocked("INVALID_STRATEGY_SIGNAL", str(exc)) from exc
     except Exception as exc:
         raise ObservationBlocked("STRATEGY_DATA_UNAVAILABLE", f"Strategy signal generation was blocked: {type(exc).__name__}.") from exc
-    if not isinstance(signals, dict):
-        raise ObservationBlocked("INVALID_STRATEGY_SIGNAL", "The strategy did not return a target-weight mapping.")
     normalized: dict[str, float] = {}
     for code, weight in signals.items():
         if not isinstance(code, str) or not _CODE_RE.fullmatch(code):
@@ -1009,8 +1050,6 @@ def _default_signal_provider(db: Session, observation: StrategyObservation, as_o
             raise ObservationBlocked("INVALID_STRATEGY_SIGNAL", "The strategy returned an invalid target weight.")
         if value > 0:
             normalized[code] = value
-    if sum(normalized.values()) > 1.0 + 1e-9:
-        raise ObservationBlocked("INVALID_STRATEGY_SIGNAL", "The strategy target weights exceed 100%.")
     return normalized
 
 
@@ -1045,17 +1084,59 @@ def _default_fund_signal_provider(db: Session, observation: StrategyObservation,
         params = json.loads(strategy.params or "{}")
         from server.api.backtest import _import_strategy
         strategy_cls = _import_strategy(strategy.strategy_class)
-        context = StrategyContext(_verified_trading_calendar(as_of))
+        calendar = _verified_trading_calendar(as_of)
+        filtered_history = {
+            code: [
+                item for item in rows
+                if date.fromisoformat(str(item["date"])) <= as_of
+                and calendar.is_trading_day(date.fromisoformat(str(item["date"])))
+            ]
+            for code, rows in history.items()
+        }
+        spec = getattr(strategy_cls, "SPEC", None)
+        requirements = (
+            resolve_strategy_data_requirements(
+                spec,
+                params,
+                supported={"cn_fund_nav": ("1d", "none")},
+            )
+            if isinstance(spec, StrategySpec)
+            else ()
+        )
+        for requirement in requirements:
+            if any(
+                sum(
+                    1 for item in rows
+                    if all(item.get(field) is not None for field in requirement.fields)
+                ) < requirement.required_bars
+                for rows in filtered_history.values()
+            ):
+                raise ObservationBlocked(
+                    "FUND_HISTORY_UNAVAILABLE",
+                    f"The strategy requires {requirement.required_bars} usable {requirement.dataset} bars.",
+                )
+        portal = FundNavPortal(filtered_history)
+        context = StrategyContext(calendar)
+        context.bind_data(portal)
         strategy_instance = strategy_cls(context, **params)
-        strategy_instance.initialize()
-        strategy_instance._fund_history = history
-        signals = strategy_instance.generate_signals(as_of)
+        try:
+            strategy_instance.initialize()
+            strategy_instance._fund_history = filtered_history
+            portal.set_date(as_of)
+            context.set_date(as_of)
+            strategy_instance.before_trading()
+            signals = normalize_strategy_output(
+                strategy_instance.generate_signals(as_of),
+                spec=spec,
+            ).target_weights
+        finally:
+            strategy_instance.teardown()
     except ObservationBlocked:
         raise
+    except StrategyProtocolError as exc:
+        raise ObservationBlocked("INVALID_STRATEGY_SIGNAL", str(exc)) from exc
     except Exception as exc:
         raise ObservationBlocked("FUND_STRATEGY_UNAVAILABLE", f"Fund strategy signal generation was blocked: {type(exc).__name__}.") from exc
-    if not isinstance(signals, dict):
-        raise ObservationBlocked("INVALID_STRATEGY_SIGNAL", "The fund strategy did not return target weights.")
     normalized: dict[str, float] = {}
     for code, weight in signals.items():
         try:
@@ -1067,8 +1148,6 @@ def _default_fund_signal_provider(db: Session, observation: StrategyObservation,
             raise ObservationBlocked("INVALID_STRATEGY_SIGNAL", "The fund strategy returned an invalid weight.")
         if value > 0:
             normalized[normalized_code] = value
-    if sum(normalized.values()) > 1.0 + 1e-9:
-        raise ObservationBlocked("INVALID_STRATEGY_SIGNAL", "The fund strategy target weights exceed 100%.")
     return normalized
 
 

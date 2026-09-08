@@ -3,9 +3,7 @@
 管理回测中的虚拟持仓、现金和总权益。支持 T+1 锁仓规则。
 """
 from datetime import date, timedelta
-from typing import Optional
-
-from quant_engine.backtest.types import Trade, OrderSide, Position, AccountState
+from quant_engine.backtest.types import Trade, OrderSide, Position
 
 
 class Portfolio:

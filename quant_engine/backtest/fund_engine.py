@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping, Type
@@ -18,7 +18,14 @@ import pandas as pd
 from quant_engine.backtest.context import FundNavPortal, StrategyContext
 from quant_engine.data.calendar import TradingCalendar
 from quant_engine.backtest.strategy import Strategy
-from quant_engine.backtest.protocol import StrategySpec, normalize_strategy_output
+from quant_engine.backtest.protocol import (
+    StrategySpec,
+    encode_strategy_diagnostic,
+    normalize_strategy_diagnostics,
+    normalize_strategy_output,
+    resolve_strategy_data_requirements,
+)
+from quant_engine.backtest.scheduler import RebalanceScheduler
 from quant_engine.backtest.types import OrderSide, Trade
 
 
@@ -45,18 +52,6 @@ class FundNavBacktestEngine:
         if not math.isfinite(normalized_fee_rate) or normalized_fee_rate < 0:
             raise ValueError("paper_fee_rate must be finite and non-negative")
         self.fee_rate = normalized_fee_rate
-
-    @staticmethod
-    def _is_rebalance_day(day: date, frequency: str, previous: date | None) -> bool:
-        if previous is None:
-            return True
-        if frequency == "daily":
-            return True
-        if frequency == "weekly":
-            return day.isocalendar().week != previous.isocalendar().week
-        if frequency == "monthly":
-            return (day.year, day.month) != (previous.year, previous.month)
-        raise ValueError("rebalance_frequency must be daily, weekly, or monthly")
 
     @staticmethod
     def _rows_by_date(
@@ -121,7 +116,50 @@ class FundNavBacktestEngine:
             code: [{"date": day, "nav": value} for day, value in sorted(series.items())]
             for code, series in navs.items()
         }
-        data_portal = FundNavPortal(canonical_rows)
+        allowed_history_dates = {day.isoformat() for day in trading_days}
+        trading_rows = {
+            code: [item for item in values if item["date"] in allowed_history_dates]
+            for code, values in canonical_rows.items()
+        }
+        spec = getattr(self.strategy_class, "SPEC", None)
+        requirement_reports: list[dict[str, Any]] = []
+        if isinstance(spec, StrategySpec):
+            requirements = resolve_strategy_data_requirements(
+                spec,
+                self.strategy_kwargs,
+                supported={"cn_fund_nav": ("1d", "none")},
+            )
+            for requirement in requirements:
+                missing_fields = sorted({
+                    field
+                    for field in requirement.fields
+                    if any(field not in item for values in trading_rows.values() for item in values)
+                })
+                usable_bars = {
+                    code: sum(
+                        1 for item in values
+                        if all(item.get(field) is not None for field in requirement.fields)
+                    )
+                    for code, values in trading_rows.items()
+                }
+                insufficient = {
+                    code: count
+                    for code, count in usable_bars.items()
+                    if count < requirement.required_bars
+                }
+                report = {
+                    **requirement.as_dict(),
+                    "missing_fields": missing_fields,
+                    "usable_bars": usable_bars,
+                    "insufficient_codes": insufficient,
+                }
+                requirement_reports.append(report)
+                if missing_fields or insufficient:
+                    raise ValueError(
+                        "strategy_data_requirement_unsatisfied: "
+                        + json.dumps(report, ensure_ascii=False, sort_keys=True)
+                    )
+        data_portal = FundNavPortal(trading_rows)
         context = StrategyContext(trading_calendar)
         context.bind_data(data_portal)
         strategy = self.strategy_class(context, **self.strategy_kwargs)
@@ -141,24 +179,19 @@ class FundNavBacktestEngine:
         # execution loop uses.  Passing the raw archive here allowed a
         # malformed weekend/holiday NAV to influence lookback rankings even
         # though that row was excluded from simulated trading.
-        allowed_history_dates = {day.isoformat() for day in trading_days}
-        strategy._fund_history = {
-            code: [item for item in values if item["date"] in allowed_history_dates]
-            for code, values in canonical_rows.items()
-        }
+        strategy._fund_history = trading_rows
 
         cash = float(initial_capital)
         positions: dict[str, float] = {}
         previous_total = cash
         pending: dict[str, float] | None = None
         pending_date: date | None = None
-        last_rebalance: date | None = None
+        scheduler = RebalanceScheduler(trading_calendar, frequency=rebalance_frequency, weekday=5)
         portfolio_rows: list[dict[str, Any]] = []
         position_rows: list[dict[str, Any]] = []
         trade_rows: list[dict[str, Any]] = []
         signal_rows: list[dict[str, Any]] = []
         strategy_output_rows: list[dict[str, Any]] = []
-        spec = getattr(self.strategy_class, "SPEC", None)
 
         def value_at(day: date) -> float:
             return cash + sum(units * navs[code][day.isoformat()] for code, units in positions.items())
@@ -282,7 +315,7 @@ class FundNavBacktestEngine:
                 context.set_portfolio(portfolio_view(day))
 
             total = value_at(day)
-            if self._is_rebalance_day(day, rebalance_frequency, last_rebalance):
+            if scheduler.is_rebalance_day(day):
                 try:
                     output = normalize_strategy_output(strategy.generate_signals(day), spec=spec)
                 except ValueError as exc:
@@ -298,12 +331,26 @@ class FundNavBacktestEngine:
                 }
                 pending = {str(code): weight for code, weight in normalized.items() if weight > 0}
                 pending_date = day
-                last_rebalance = day
                 for code, weight in pending.items():
                     signal_rows.append({"date": day, "code": code, "target_weight": weight})
                 for key, value in output.diagnostics.items():
-                    strategy_output_rows.append({"date": day, "key": key, "value": value})
-                strategy_output_rows.extend(context.drain_diagnostics())
+                    strategy_output_rows.append({
+                        "date": day,
+                        "key": key,
+                        "value_json": encode_strategy_diagnostic(value),
+                    })
+                for row in context.drain_diagnostics():
+                    diagnostics = normalize_strategy_diagnostics(
+                        {row["key"]: row["value"]}, spec=spec,
+                    )
+                    strategy_output_rows.extend(
+                        {
+                            "date": row["date"] or day,
+                            "key": key,
+                            "value_json": encode_strategy_diagnostic(value),
+                        }
+                        for key, value in diagnostics.items()
+                    )
                 # Preserve explicit zero-weight targets in the lifecycle
                 # callback even though the execution proposal only stores
                 # positive positions; this mirrors the A-share contract and
@@ -352,6 +399,7 @@ class FundNavBacktestEngine:
             "fee_model": "fund_nav_configurable_rate-v1", "fee_rate": self.fee_rate,
             "strategy_spec": spec.as_dict(f"{self.strategy_class.__module__}.{self.strategy_class.__name__}") if isinstance(spec, StrategySpec) else None,
             "strategy_params": dict(strategy.params),
+            "strategy_data_requirements": requirement_reports,
             "unexecuted_signal_date": pending_date.isoformat() if pending is not None and pending_date else None,
         }
         (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

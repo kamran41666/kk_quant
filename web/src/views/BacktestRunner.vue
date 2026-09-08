@@ -38,11 +38,25 @@
         <label>初始资金 <input v-model.number="config.initial_capital" type="number" /></label>
         <label>调仓频率
           <select v-model="config.rebalance_frequency">
+            <option value="">按策略建议（{{ frequencyLabel(selectedStrategy?.spec?.execution.rebalance_frequency) }}）</option>
             <option value="daily">每日</option>
             <option value="weekly">每周</option>
             <option value="monthly">每月</option>
           </select>
         </label>
+        <div v-if="selectedStrategy?.spec?.parameters.length" class="runtime-params">
+          <span class="runtime-title">本次运行参数</span>
+          <label v-for="parameter in selectedStrategy.spec.parameters" :key="parameter.key">
+            {{ parameter.label }}
+            <select v-if="parameter.choices.length" v-model="parameterOverrides[parameter.key]">
+              <option v-for="choice in parameter.choices" :key="String(choice)" :value="choice">{{ choice }}</option>
+            </select>
+            <input v-else-if="parameter.type === 'boolean'" v-model="parameterOverrides[parameter.key]" type="checkbox" />
+            <input v-else-if="parameter.type === 'integer' || parameter.type === 'number'" v-model.number="parameterOverrides[parameter.key]" type="number" :min="parameter.minimum ?? undefined" :max="parameter.maximum ?? undefined" :step="parameter.type === 'integer' ? 1 : 'any'" />
+            <input v-else v-model="parameterOverrides[parameter.key]" type="text" />
+            <small class="field-hint">{{ parameter.description || parameter.key }}</small>
+          </label>
+        </div>
       </div>
       <button class="btn-primary" @click="runBacktest" :disabled="running">{{ running ? '运行中...' : '开始回测' }}</button>
       <p v-if="error" class="error">{{ error }}</p>
@@ -90,6 +104,13 @@
       <div v-if="selectedRun.strategy_fingerprint" class="fingerprint">
         <span>策略指纹</span><code>{{ selectedRun.strategy_fingerprint }}</code>
       </div>
+      <details v-if="strategyOutputs.length" class="strategy-output-list">
+        <summary>策略诊断（{{ strategyOutputTotal }}）</summary>
+        <table class="data-table">
+          <thead><tr><th>日期</th><th>字段</th><th>值</th></tr></thead>
+          <tbody><tr v-for="(item, index) in strategyOutputs" :key="`${item.date}-${item.key}-${index}`"><td>{{ String(item.date).slice(0, 10) }}</td><td>{{ item.key }}</td><td>{{ item.value }}</td></tr></tbody>
+        </table>
+      </details>
       <p v-if="!selectedRun.eligible_for_observation" class="hint">该记录缺少完整证据或尚未完成，不能授权跨市场或自动策略观察。</p>
     </section>
 
@@ -112,6 +133,9 @@ const running = ref(false)
 const error = ref('')
 const fundSymbolsInput = ref('110022')
 const costScenarios = ref<Array<{ id: string; label: string; slippage_rate: number }>>([])
+const parameterOverrides = ref<Record<string, unknown>>({})
+const strategyOutputs = ref<Array<{ date: string; key: string; value: unknown }>>([])
+const strategyOutputTotal = ref(0)
 
 const config = ref({
   strategy_id: '',
@@ -122,15 +146,44 @@ const config = ref({
   initial_capital: 1_000_000,
   fund_fee_rate: 0,
   cost_scenario: 'paper_baseline_v1',
-  rebalance_frequency: 'weekly',
+  rebalance_frequency: '' as '' | 'daily' | 'weekly' | 'monthly',
 })
 
-const selectedStrategyMarket = computed(() => strategies.value.find((item) => item.id === config.value.strategy_id)?.market || '')
+const selectedStrategy = computed(() => strategies.value.find((item) => item.id === config.value.strategy_id))
+const selectedStrategyMarket = computed(() => selectedStrategy.value?.market || '')
 watch(selectedStrategyMarket, (market) => {
   if (market === 'a-share' || market === 'cn-fund' || market === 'us-equity') config.value.market = market
 })
+watch(selectedStrategy, (strategy) => {
+  parameterOverrides.value = strategy ? { ...strategy.params } : {}
+  config.value.rebalance_frequency = ''
+})
 watch(() => config.value.market, (market) => {
   if (market !== 'cn-fund') config.value.fund_fee_rate = 0
+})
+watch(selectedRun, async (run) => {
+  strategyOutputs.value = []
+  strategyOutputTotal.value = 0
+  if (!run || run.status !== 'completed') return
+  try {
+    const selectedId = run.id
+    const collected: Array<{ date: string; key: string; value: unknown }> = []
+    let page = 1
+    let total = 0
+    do {
+      const { data } = await api.get<{ outputs: Array<{ date: string; key: string; value: unknown }>; total: number }>(`/backtest/runs/${selectedId}/strategy-outputs`, { params: { page, page_size: 500 } })
+      collected.push(...data.outputs)
+      total = data.total
+      page += 1
+      if (data.outputs.length === 0) break
+    } while (collected.length < total)
+    if (selectedRun.value?.id === selectedId) {
+      strategyOutputs.value = collected
+      strategyOutputTotal.value = total
+    }
+  } catch {
+    // Diagnostics are optional; the run summary remains usable without them.
+  }
 })
 
 function statusLabel(s: string): string {
@@ -171,7 +224,12 @@ async function runBacktest() {
       ? fundSymbolsInput.value.split(',').map((item) => item.trim()).filter(Boolean)
       : []
     if (config.value.market === 'cn-fund' && symbols.length === 0) { error.value = '请输入至少一个基金代码'; return }
-    await api.post('/backtest/run', { ...config.value, symbols })
+    await api.post('/backtest/run', {
+      ...config.value,
+      symbols,
+      parameter_overrides: parameterOverrides.value,
+      rebalance_frequency: config.value.rebalance_frequency || undefined,
+    })
     await loadData()
   } catch (e: any) {
     error.value = e.response?.data?.detail || e.message
@@ -184,6 +242,10 @@ onMounted(() => { loadData(); loadCostScenarios() })
 
 function marketLabel(market?: string): string {
   return ({ 'a-share': 'A 股', 'cn-fund': '国内基金', 'us-equity': '美股' } as Record<string, string>)[market || 'a-share'] || 'A 股'
+}
+
+function frequencyLabel(value?: string): string {
+  return ({ daily: '每日', weekly: '每周', monthly: '每月' } as Record<string, string>)[value || ''] || '未声明'
 }
 
 function formatFundFeeRate(run: RunSummary): string {
@@ -223,6 +285,8 @@ function formatDataCoverage(run: RunSummary): string {
 .form-row { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 16px; }
 .form-row label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--text-secondary); }
 .form-row input, .form-row select { font-size: 14px; min-width: 120px; }
+.runtime-params { display: flex; flex-basis: 100%; flex-wrap: wrap; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-secondary); }.runtime-title { flex-basis: 100%; color: var(--text-primary); font-size: 12px; font-weight: 600; }.runtime-params input[type='checkbox'] { min-width: 18px; width: 18px; height: 18px; }
+.strategy-output-list { margin-top: 14px; color: var(--text-secondary); font-size: 12px; }.strategy-output-list .data-table { margin-top: 8px; }
 .field-hint { color: var(--text-muted, var(--text-secondary)); font-size: 11px; }
 .btn-primary { background: var(--accent); color: #fff; padding: 10px 24px; border-radius: 6px; font-size: 14px; }
 .btn-primary:hover { background: var(--accent-hover); }

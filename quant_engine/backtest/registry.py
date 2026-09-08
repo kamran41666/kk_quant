@@ -5,8 +5,6 @@ import importlib
 import inspect
 import pkgutil
 from dataclasses import dataclass
-from typing import Iterable
-
 from quant_engine.backtest.protocol import StrategyProtocolError, StrategySpec
 
 
@@ -41,6 +39,8 @@ class StrategyRegistry:
             module = importlib.import_module(module_name)
             for _, strategy_class in inspect.getmembers(module, inspect.isclass):
                 if strategy_class is Strategy or not issubclass(strategy_class, Strategy):
+                    continue
+                if strategy_class.__name__.startswith("_"):
                     continue
                 if strategy_class.__module__ != module.__name__ or inspect.isabstract(strategy_class):
                     continue

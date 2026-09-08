@@ -51,7 +51,12 @@ class SmallCapValueStrategy(Strategy):
             ParameterSpec("lookback", "回看交易日", ParameterType.INTEGER, 30, minimum=21, maximum=250),
             ParameterSpec("avoid_weak_months", "弱势月份空仓", ParameterType.BOOLEAN, True),
         ),
-        data=(DataRequirement("a_share_daily", ("close", "amount", "turnover_rate"), 30),),
+        data=(DataRequirement(
+            "a_share_daily",
+            ("close", "amount", "turnover_rate"),
+            21,
+            lookback_parameter="lookback",
+        ),),
         rebalance_frequency="weekly",
         warmup_bars=30,
         tags=("多因子", "低波", "反转"),

@@ -7,6 +7,8 @@ import pytest
 from strategies.fund_nav_momentum import FundNavMomentumStrategy
 from quant_engine.backtest.fund_engine import FundNavBacktestEngine
 from quant_engine.backtest.strategy import Strategy
+from quant_engine.backtest.context import FundNavPortal
+from quant_engine.backtest.protocol import DataRequirement, StrategySpec
 
 
 def test_fund_nav_engine_uses_next_valid_nav_and_writes_audit_files(tmp_path):
@@ -74,6 +76,53 @@ def test_fund_engine_rejects_non_finite_signal_weights(tmp_path):
         FundNavBacktestEngine(InvalidSignalStrategy).run(
             rows=rows, start=date(2024, 1, 1), end=date(2024, 1, 2),
             initial_capital=1000, output_dir=str(tmp_path), rebalance_frequency="daily",
+        )
+
+
+def test_fund_engine_fails_closed_when_parameterized_lookback_is_unavailable(tmp_path):
+    rows = {"000001": [
+        {"date": "2024-01-02", "nav": 1.0},
+        {"date": "2024-01-03", "nav": 1.1},
+        {"date": "2024-01-04", "nav": 1.2},
+    ]}
+    with pytest.raises(ValueError, match="strategy_data_requirement_unsatisfied"):
+        FundNavBacktestEngine(FundNavMomentumStrategy, lookback=3).run(
+            rows=rows,
+            start=date(2024, 1, 2),
+            end=date(2024, 1, 4),
+            initial_capital=1000,
+            output_dir=str(tmp_path),
+            rebalance_frequency="daily",
+        )
+
+
+def test_fund_engine_rejects_unsupported_frequency_and_adjustment(tmp_path):
+    class UnsupportedDataStrategy(Strategy):
+        SPEC = StrategySpec(
+            id="unsupported-fund-data-test",
+            name="Unsupported fund data test",
+            version="1.0.0",
+            description="Requests unsupported fund input",
+            markets=("cn-fund",),
+            data=(DataRequirement(
+                "cn_fund_nav", ("nav",), 1,
+                frequency="1h", adjustment="event_driven",
+            ),),
+        )
+
+        def initialize(self):
+            pass
+
+        def generate_signals(self, dt):
+            return {}
+
+    with pytest.raises(ValueError, match="strategy_data_requirement_unsupported"):
+        FundNavBacktestEngine(UnsupportedDataStrategy).run(
+            rows={"000001": [{"date": "2024-01-02", "nav": 1.0}]},
+            start=date(2024, 1, 2),
+            end=date(2024, 1, 2),
+            initial_capital=1000,
+            output_dir=str(tmp_path),
         )
 
 
@@ -171,6 +220,69 @@ def test_fund_strategy_history_uses_canonical_trading_rows(tmp_path):
         output_dir=str(tmp_path),
     )
     assert seen == [["2024-01-02"]]
+
+
+def test_fund_public_history_is_pit_safe_and_filters_non_trading_rows(tmp_path):
+    portal = FundNavPortal({"000001": [{"date": "2024-01-02", "nav": 1.1}]})
+    assert portal.history(None, 5, ["nav"]).empty
+
+    seen = []
+
+    class PublicHistoryStrategy(Strategy):
+        def initialize(self):
+            assert self.ctx.history(lookback=10, fields=["nav"]).empty
+
+        def generate_signals(self, dt):
+            history = self.ctx.history(lookback=10, fields=["nav"])
+            seen.append([str(day) for day in history.index.get_level_values("date")])
+            return {}
+
+    FundNavBacktestEngine(PublicHistoryStrategy).run(
+        rows={"000001": [
+            {"date": "2024-01-01", "nav": 1.0},
+            {"date": "2024-01-02", "nav": 1.1},
+        ]},
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        initial_capital=1000,
+        output_dir=str(tmp_path),
+        rebalance_frequency="daily",
+    )
+    assert seen == [["2024-01-02"]]
+
+
+@pytest.mark.parametrize(
+    ("frequency", "start", "end", "expected_signal"),
+    [
+        ("weekly", date(2024, 1, 2), date(2024, 1, 8), "2024-01-05"),
+        ("monthly", date(2024, 1, 2), date(2024, 1, 31), "2024-01-31"),
+    ],
+)
+def test_fund_rebalance_frequency_matches_common_period_end_semantics(
+    tmp_path, frequency, start, end, expected_signal,
+):
+    class TargetStrategy(Strategy):
+        def initialize(self):
+            pass
+
+        def generate_signals(self, dt):
+            return {"000001": 0.5}
+
+    rows = {"000001": [
+        {"date": day.date().isoformat(), "nav": 1.0}
+        for day in pd.date_range(start, end, freq="B")
+    ]}
+    output = tmp_path / frequency
+    FundNavBacktestEngine(TargetStrategy).run(
+        rows=rows,
+        start=start,
+        end=end,
+        initial_capital=1000,
+        output_dir=str(output),
+        rebalance_frequency=frequency,
+    )
+    signals = pd.read_parquet(output / "signals.parquet")
+    assert signals["date"].astype(str).tolist() == [expected_signal]
 
 
 def test_fund_engine_records_explicit_paper_fee_rate(tmp_path):

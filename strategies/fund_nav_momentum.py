@@ -28,9 +28,16 @@ class FundNavMomentumStrategy(Strategy):
             ParameterSpec("top_n", "持有数量", ParameterType.INTEGER, 1, minimum=1, maximum=50),
             ParameterSpec("target_weight", "总目标仓位", ParameterType.NUMBER, 1.0, minimum=0.0, maximum=1.0),
         ),
-        data=(DataRequirement("cn_fund_nav", ("nav",), 21, adjustment="none"),),
+        data=(DataRequirement(
+            "cn_fund_nav",
+            ("nav",),
+            2,
+            adjustment="none",
+            lookback_parameter="lookback",
+            lookback_offset=1,
+        ),),
         rebalance_frequency="daily",
-        warmup_bars=21,
+        warmup_bars=2,
         tags=("基金", "动量"),
         analysis_outputs=(AnalysisOutputSpec("positive_candidates", "正动量候选", "integer"),),
     )

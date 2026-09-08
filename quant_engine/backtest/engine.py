@@ -16,7 +16,12 @@ from quant_engine.data.api import DataAPI
 from quant_engine.backtest.types import OrderSide
 from quant_engine.backtest.strategy import Strategy
 from quant_engine.backtest.context import DataHandlerPortal, StrategyContext
-from quant_engine.backtest.protocol import StrategySpec, normalize_strategy_output
+from quant_engine.backtest.protocol import (
+    StrategySpec,
+    normalize_strategy_diagnostics,
+    normalize_strategy_output,
+    resolve_strategy_data_requirements,
+)
 from quant_engine.backtest.data_handler import DataHandler
 from quant_engine.backtest.scheduler import RebalanceScheduler
 from quant_engine.backtest.order_manager import OrderManager
@@ -145,10 +150,42 @@ class BacktestEngine:
                 raise ValueError("daily_data_coverage_hash_invalid")
         elif data_handler.load_error:
             raise ValueError("daily_data_load_failed: " + data_handler.load_error)
+        spec = getattr(self._strategy_class, "SPEC", None)
+        if isinstance(spec, StrategySpec):
+            requirement_reports = []
+            requirements = resolve_strategy_data_requirements(
+                spec,
+                self._strategy_kwargs,
+                supported={"a_share_daily": ("1d", "event_driven")},
+            )
+            for requirement in requirements:
+                report = data_handler.requirement_coverage(list(requirement.fields))
+                insufficient = {
+                    code: count
+                    for code, count in report["usable_bars"].items()
+                    if count < requirement.required_bars
+                }
+                requirement_reports.append({
+                    **requirement.as_dict(),
+                    **report,
+                    "insufficient_codes": insufficient,
+                })
+                if report["missing_fields"] or insufficient:
+                    raise ValueError(
+                        "strategy_data_requirement_unsatisfied: "
+                        + json.dumps(requirement_reports[-1], ensure_ascii=False, sort_keys=True)
+                    )
         context = StrategyContext(calendar)
         context.bind_data(DataHandlerPortal(data_handler))
         strategy = self._strategy_class(context, **self._strategy_kwargs)
-        strategy.initialize()
+        try:
+            strategy.initialize()
+        except BaseException:
+            try:
+                strategy.teardown()
+            except Exception:
+                pass
+            raise
         scheduler = RebalanceScheduler(
             calendar,
             frequency=rebalance_frequency,
@@ -161,10 +198,10 @@ class BacktestEngine:
         recorder = Recorder(output_dir=output_dir)
 
         recorder.set_meta("strategy", self._strategy_class.__name__)
-        spec = getattr(self._strategy_class, "SPEC", None)
         if isinstance(spec, StrategySpec):
             recorder.set_meta("strategy_spec", spec.as_dict(f"{self._strategy_class.__module__}.{self._strategy_class.__name__}"))
             recorder.set_meta("strategy_params", dict(strategy.params))
+            recorder.set_meta("strategy_data_requirements", requirement_reports)
         recorder.set_meta("start_date", str(start))
         recorder.set_meta("end_date", str(end))
         recorder.set_meta("initial_capital", initial_capital)
@@ -194,8 +231,14 @@ class BacktestEngine:
         pending_target: dict[str, float] | None = None
         pending_signal_date: date | None = None
 
+        def managed_trading_days():
+            try:
+                yield from trading_days
+            finally:
+                strategy.teardown()
+
         # ---- 主循环 ----
-        for i, day in enumerate(trading_days):
+        for i, day in enumerate(managed_trading_days()):
             if cancel_check is not None and cancel_check():
                 raise BacktestCancelled("backtest cancelled")
             if max_seconds is not None and time.monotonic() - started_at > max_seconds:
@@ -247,7 +290,10 @@ class BacktestEngine:
                 recorder.record_signal(day, target)
                 recorder.record_strategy_output(day, output.diagnostics)
                 for row in context.drain_diagnostics():
-                    recorder.record_strategy_output(row["date"] or day, {row["key"]: row["value"]})
+                    diagnostics = normalize_strategy_diagnostics(
+                        {row["key"]: row["value"]}, spec=spec,
+                    )
+                    recorder.record_strategy_output(row["date"] or day, diagnostics)
                 pending_target = dict(target)
                 pending_signal_date = day
 
@@ -266,7 +312,6 @@ class BacktestEngine:
             recorder.record_portfolio(day, portfolio)
 
         # ---- 结束 ----
-        strategy.teardown()
         recorder.set_meta("final_value", portfolio.total_value)
         recorder.set_meta("total_return",
                           (portfolio.total_value - initial_capital) / initial_capital)

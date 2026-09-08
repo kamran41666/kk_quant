@@ -8,7 +8,6 @@ from unittest.mock import Mock, patch, MagicMock
 import pandas as pd
 
 from quant_engine.backtest.strategy import Strategy
-from quant_engine.backtest.context import StrategyContext
 from quant_engine.backtest.engine import BacktestEngine
 from quant_engine.backtest.types import Trade, OrderSide
 
@@ -271,7 +270,6 @@ class TestBacktestEngine:
 
     def test_signals_to_orders_buy_new_position(self, mock_data_api):
         """信号转订单: 新买入一只股票"""
-        from quant_engine.backtest.engine import BacktestEngine as BE
         from quant_engine.backtest.portfolio import Portfolio
         from quant_engine.backtest.order_manager import OrderManager
         from quant_engine.backtest.cost_model import CostModel
@@ -295,7 +293,6 @@ class TestBacktestEngine:
 
     def test_signals_to_orders_sell_existing(self, mock_data_api):
         """信号转订单: 卖出不在新信号中的持仓"""
-        from quant_engine.backtest.engine import BacktestEngine as BE
         from quant_engine.backtest.portfolio import Portfolio
         from quant_engine.backtest.order_manager import OrderManager
         from quant_engine.backtest.cost_model import CostModel
@@ -329,7 +326,6 @@ class TestBacktestEngine:
 
     def test_signals_to_orders_respects_t1_lock(self, mock_data_api):
         """信号转订单: T+1 锁仓的股票不应被卖出"""
-        from quant_engine.backtest.engine import BacktestEngine as BE
         from quant_engine.backtest.portfolio import Portfolio
         from quant_engine.backtest.order_manager import OrderManager
         from quant_engine.backtest.cost_model import CostModel
@@ -408,6 +404,29 @@ class TestBacktestEngine:
         assert first_trade > first_signal
         assert first_signal.dayofweek == 4  # Friday
         assert first_trade.dayofweek == 0   # next Monday
+
+    def test_strategy_teardown_runs_when_signal_generation_fails(self, mock_data_api, tmp_path):
+        events = []
+
+        class FailingStrategy(Strategy):
+            def initialize(self):
+                events.append("initialize")
+
+            def generate_signals(self, dt):
+                raise RuntimeError("signal failed")
+
+            def teardown(self):
+                events.append("teardown")
+
+        engine = BacktestEngine(FailingStrategy, stock_list=["000001.SZ"])
+        with pytest.raises(RuntimeError, match="signal failed"):
+            engine.run(
+                start=date(2024, 1, 2),
+                end=date(2024, 1, 8),
+                rebalance_frequency="daily",
+                output_dir=str(tmp_path / "failed_strategy"),
+            )
+        assert events == ["initialize", "teardown"]
 
     def test_empty_target_liquidates_on_next_session(self, mock_data_api, tmp_path):
         class BuyThenCashStrategy(Strategy):
