@@ -24,15 +24,16 @@ A股个人量化交易平台，面向低频/中频策略（日线，周频调仓
 ## 项目结构
 
 ```
-quant/
+kk_quant/
 ├── quant_engine/         # 阶段一：研究平台（数据层 + 回测引擎 + 因子 + 绩效）
 │   ├── data/             # 日历、复权、存储、采集、API
-│   ├── backtest/         # 事件驱动引擎（10个模块）
-│   ├── factor/           # FactorMeta自动注册 + 12个内置因子 + IC/分层/Fama-MacBeth
+│   ├── backtest/         # 事件驱动引擎与统一策略协议
+│   ├── factor/           # 因子注册、内置因子与因子评价
 │   └── analytics/        # Sharpe/MaxDD/CAPM/Fama-French
-├── server/               # 阶段二：FastAPI后端（6个REST模块 + WebSocket）
-├── web/                  # 阶段二：Vue 3前端（5页面）
-├── tests/                # 210+测试
+├── server/               # FastAPI API、业务服务、持久化与 WebSocket
+├── web/                  # Vue 3 工作台
+├── strategies/           # Strategy Protocol v2 策略实现与模板
+├── tests/                # 自动化回归测试
 └── Dockerfile.*          # 生产部署
 ```
 
@@ -54,11 +55,11 @@ quant/
 
 ## 当前状态
 
-- 阶段一 ✅：研究平台完整（数据→回测→因子→绩效）
-- 阶段二 ✅：Web平台完整（Server + 前端 + Docker）
-- 阶段三 ⏳：实盘对接（券商接口 + 风控 + 监控 + Linux部署）
+- 当前权威进度：[`docs/project-status.md`](docs/project-status.md)。接手开发、判断阶段完成度或恢复施工时必须先读取该文件。
+- 研究/回测、Web 工作台和 A 股/基金纸面链路已可用；Strategy Protocol v2 P0 已完成。
+- 当前主线：稳定策略实现 → 固定真实数据集 → 样本外验证 → 连续纸面观察。
+- 真实券商适配、完整认证与对账仍未完成，实盘能力保持关闭。
 
 ## 知识库与外部参考
 
 - **知识库**: [`docs/knowledge-base.md`](docs/knowledge-base.md) — 量化策略、因子研究、过拟合防御、风控与仓位、系统架构、市场微观结构、因子衰减 7 大分类，40+ 条带评级的可落地知识
-
