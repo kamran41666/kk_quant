@@ -24,8 +24,7 @@
     </nav>
 
     <div class="nav-footer">
-      <div class="status-row"><span class="status-dot is-live" aria-hidden="true"></span> 本地服务</div>
-      <span>v0.3 · Phase 3A</span>
+      <span>个人研究工作台</span>
     </div>
   </aside>
 </template>
@@ -34,10 +33,11 @@
 const navItems = [
   { path: '/', label: '总览', icon: 'M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z' },
   { path: '/market', label: '市场行情', icon: 'M4 18 9 13l3 3 7-8m-5 0h5v5' },
+  { path: '/data', label: '研究数据', icon: 'M5 6c0-1.1 3.1-2 7-2s7 .9 7 2-3.1 2-7 2-7-.9-7-2Zm0 0v6c0 1.1 3.1 2 7 2s7-.9 7-2V6m-14 6v6c0 1.1 3.1 2 7 2s7-.9 7-2v-6' },
   { path: '/strategies', label: '策略', icon: 'M6 4h12v16H6V4Zm3 4h6M9 12h6m-6 4h4' },
   { path: '/backtest', label: '回测', icon: 'M12 3a9 9 0 1 0 9 9M12 7v5l3 2m2-10v5h-5' },
   { path: '/paper', label: '模拟交易', icon: 'M4 19V9m5 10V5m6 14v-7m5 7V3' },
-  { path: '/live', label: '实盘准备', icon: 'M12 3 4 7v5c0 4.6 3.4 8.6 8 9 4.6-.4 8-4.4 8-9V7l-8-4Zm0 5v4m0 4h.01' },
+  { path: '/live', label: '账户接入', icon: 'M12 3 4 7v5c0 4.6 3.4 8.6 8 9 4.6-.4 8-4.4 8-9V7l-8-4Zm0 5v4m0 4h.01' },
 ]
 </script>
 
@@ -132,7 +132,7 @@ const navItems = [
     backdrop-filter: blur(12px);
   }
   .brand-block, .nav-footer, .skip-link { display: none; }
-  .nav-list { display: grid; height: 100%; grid-template-columns: repeat(6, 1fr); gap: 2px; }
+  .nav-list { display: grid; height: 100%; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; }
   .nav-item {
     min-width: 0;
     min-height: 0;
@@ -140,8 +140,13 @@ const navItems = [
     justify-content: center;
     gap: 3px;
     padding: 4px 2px;
-    font-size: 9px;
+    font-size: clamp(7px, 2.25vw, 9px);
   }
   .nav-icon { width: 18px; height: 18px; }
+}
+@media (max-width: 360px) {
+  .sidenav { padding-inline: 3px; }
+  .nav-item { gap: 2px; padding-inline: 0; }
+  .nav-icon { width: 16px; height: 16px; }
 }
 </style>

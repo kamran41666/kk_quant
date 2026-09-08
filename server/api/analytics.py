@@ -44,7 +44,7 @@ def _run_evidence(run: Run) -> dict:
                 and has_rows(item)
                 for item in dataset_manifests
             )
-    data_content_hash = manifest.get("daily_data_content_hash") or (coverage or {}).get("dataset_hash")
+    data_content_hash = manifest.get("data_content_hash") or manifest.get("daily_data_content_hash") or (coverage or {}).get("dataset_hash")
     if not data_content_hash and fund_dataset_hashes:
         # A stable aggregate lets the compare table identify a multi-fund
         # archive without pretending it is one provider-issued hash.
@@ -64,7 +64,8 @@ def _run_evidence(run: Run) -> dict:
         "execution_model": getattr(run, "execution_model", None),
         "data_content_hash": data_content_hash,
         "dataset_hashes": fund_dataset_hashes,
-        "coverage_complete": (coverage or {}).get("complete") if coverage else fund_coverage_complete,
+        "coverage_complete": (manifest.get("validated") if manifest.get("research_experiment")
+                              else (coverage or {}).get("complete") if coverage else fund_coverage_complete),
         # A-share runs use the registered CostModel scenarios. Domestic fund
         # runs use their separate NAV fee sensitivity; never label one as the
         # other in a cross-run comparison.
@@ -90,6 +91,27 @@ def get_metrics(run_id: str, db: Session = Depends(get_db)):
     import pandas as pd
     df = pd.read_parquet(port_path)
     returns = df.set_index("date")["daily_return"].dropna()
+
+    try:
+        manifest = json.loads(run.data_manifest or "{}")
+    except (TypeError, ValueError):
+        manifest = {}
+    if not isinstance(manifest, dict):
+        manifest = {}
+    research_metrics = manifest.get("research_metrics") if manifest.get("research_experiment") else None
+    if isinstance(research_metrics, dict):
+        # Use the experiment's frozen metric conventions. Corporate-action
+        # share changes make legacy trade-only win-rate calculations invalid.
+        return {"annual_return": research_metrics["annual_return"],
+                "annual_volatility": research_metrics["annual_volatility"],
+                "sharpe_ratio": research_metrics["sharpe"],
+                "max_drawdown": research_metrics["max_drawdown"],
+                "calmar_ratio": research_metrics["calmar"],
+                "sortino_ratio": None, "downside_volatility": None,
+                "win_rate": None, "profit_loss_ratio": None,
+                "n_trading_days": research_metrics["trading_days"],
+                "metric_convention": research_metrics["annualization"],
+                "trade_metrics_note": "公司行动账户不能套用未经股数调整的交易胜率统计"}
 
     from quant_engine.analytics.metrics import (
         annual_return, annual_volatility, downside_volatility,

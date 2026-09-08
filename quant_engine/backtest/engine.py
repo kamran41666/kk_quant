@@ -242,6 +242,12 @@ class BacktestEngine:
         recorder.set_meta("end_date", str(end))
         recorder.set_meta("initial_capital", initial_capital)
         recorder.set_meta("benchmark", benchmark)
+        recorder.set_meta("universe_selection", (
+            "explicit_static" if self._stock_list is not None
+            else "initial_index_snapshot_static"
+        ))
+        recorder.set_meta("universe_count", len(stock_list))
+        recorder.set_meta("universe", list(stock_list))
         recorder.set_meta("rebalance_frequency", rebalance_frequency)
         recorder.set_meta("execution_model", "next_trading_day_open-v1")
         recorder.set_meta("calendar_version", calendar_report["calendar_version"])
@@ -279,9 +285,18 @@ class BacktestEngine:
                 raise BacktestCancelled("backtest cancelled")
             if max_seconds is not None and time.monotonic() - started_at > max_seconds:
                 raise BacktestCancelled("backtest deadline exceeded")
-            data_handler.push_day(day)
             context.set_date(day)
+            before_day = trading_days[i - 1] if i > 0 else None
+            if before_day is None:
+                prior = calendar.get_trading_days(data_start, day - timedelta(days=1))
+                before_day = prior[-1] if prior else None
+            data_handler.push_day(before_day)
             strategy.before_trading()
+
+            # The execution and close-signal phases may now observe today's
+            # bar. The pre-market hook above remains positioned on the last
+            # known session while context.current_date stays on execution day.
+            data_handler.push_day(day)
 
             # Execute the previous signal on the next trading day.  A strategy may
             # observe the signal day's close, so same-day OHLC/VWAP execution would
@@ -311,6 +326,17 @@ class BacktestEngine:
                 pending_target = None
                 context.set_portfolio(portfolio)
 
+            # Mark exactly once per session before a close-based strategy
+            # reads its portfolio. Daily return retains the previous session's
+            # close as denominator, including today's fills and costs.
+            prices = {}
+            for code in stock_list:
+                p = data_handler.get_price(code, 'close')
+                if not pd.isna(p):
+                    prices[code] = float(p)
+            portfolio.update_market_values(prices, day)
+            context.set_portfolio(portfolio)
+
             # Rebalance day: generate a target for the *next* trading day.  An empty
             # mapping is a valid target and means liquidate all sellable holdings.
             if scheduler.is_rebalance_day(day):
@@ -333,16 +359,6 @@ class BacktestEngine:
                     recorder.record_strategy_output(row["date"] or day, diagnostics)
                 pending_target = dict(target)
                 pending_signal_date = day
-
-            # 每日估值（所有交易日）
-            prices = {}
-            for code in stock_list:
-                p = data_handler.get_price(code, 'close')
-                if not pd.isna(p):
-                    prices[code] = float(p)
-
-            portfolio.update_market_values(prices, day)
-            context.set_portfolio(portfolio)
 
             # 日终记录
             recorder.record_positions(day, portfolio.positions)
@@ -371,7 +387,7 @@ class BacktestEngine:
             api = DataAPI()
             codes = api.index_components('000300', first_day)
             if codes:
-                return codes[:50]  # 限制数量以加快回测
+                return list(codes)
         except Exception:
             pass
 
@@ -399,7 +415,15 @@ class BacktestEngine:
         - 与当前持仓比较，差额部分生成买卖订单
         """
         orders = []
-        total_value = portfolio.total_value
+        # Target weights execute at this session's opening prices. Using
+        # yesterday's close would manufacture turnover after an overnight gap.
+        # This is a sizing mark only; EOD accounting must still happen once.
+        total_value = portfolio.cash
+        for held_code, position in portfolio.positions.items():
+            opening = data_handler.get_price(held_code, "open")
+            total_value += (position.shares * float(opening)
+                            if pd.notna(opening) and float(opening) > 0
+                            else position.market_value)
 
         for code, target_weight in signals.items():
             # Orders generated from the prior session's signal execute at the

@@ -63,6 +63,7 @@ export interface StrategySpec {
     max_gross_exposure: number
   }
   implementation: string
+  extensions?: Record<string, unknown>
   tags: string[]
 }
 
@@ -73,6 +74,7 @@ export interface StrategyCatalog {
 
 export interface RunSummary {
   id: string
+  error_message?: string | null
   strategy_id?: string
   run_type: 'backtest' | 'paper'
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'

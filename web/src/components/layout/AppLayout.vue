@@ -5,8 +5,8 @@
       <header class="topbar">
         <div class="mobile-brand" aria-label="kk quant">KQ</div>
         <div class="market-context">
-          <span class="eyebrow">A 股研究与交易工作台</span>
-          <span class="market-session"><span class="status-dot is-live" aria-hidden="true"></span> Asia/Shanghai</span>
+          <span class="eyebrow">个人量化研究工作台</span>
+          <span class="market-session">Asia/Shanghai</span>
         </div>
         <div class="environment-badge" title="当前不会向真实券商发送委托">研究 / 模拟环境</div>
       </header>

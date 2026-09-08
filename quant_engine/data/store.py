@@ -165,6 +165,12 @@ class PriceStore:
             if parts:
                 df = pd.concat(parts)
                 df["code"] = code
+                # Execution metadata is optional in older OHLCV archives.
+                # Preserve any recorded values and represent absent evidence
+                # explicitly; required research fields remain strict below.
+                for field in set(fields) & {"up_limit", "down_limit", "is_suspended"}:
+                    if field not in df.columns:
+                        df[field] = float("nan")
                 dfs.append(df[["code", "date"] + fields])
 
         if not dfs:
@@ -176,6 +182,45 @@ class PriceStore:
         result = pd.concat(dfs, ignore_index=True)
         result["date"] = pd.to_datetime(result["date"]).dt.date
         return result.set_index(["code", "date"]).sort_index()
+
+    def inventory(self) -> list[dict]:
+        """Inspect the daily Parquet files that physically exist in this store.
+
+        A file only contributes rows and dates after its ``date`` column has
+        been read and validated.  Unreadable files remain visible in the file
+        count and carry an error, so this inventory cannot be mistaken for
+        proof of complete market coverage.
+        """
+        by_code: dict[str, dict] = {}
+        for path in sorted(self._base.glob("year=*/quarter=*/*.parquet")):
+            code = path.stem
+            item = by_code.setdefault(code, {
+                "code": code,
+                "file_count": 0,
+                "row_count": 0,
+                "start_date": None,
+                "end_date": None,
+                "read_errors": [],
+            })
+            item["file_count"] += 1
+            try:
+                parquet_file = pq.ParquetFile(path)
+                dates = parquet_file.read(columns=["date"]).column("date").to_pandas()
+                parsed = pd.to_datetime(dates, errors="coerce")
+                if parsed.isna().any():
+                    raise ValueError("date column contains null or invalid values")
+                item["row_count"] += int(parquet_file.metadata.num_rows)
+                if len(parsed):
+                    file_start = parsed.min().date().isoformat()
+                    file_end = parsed.max().date().isoformat()
+                    if item["start_date"] is None or file_start < item["start_date"]:
+                        item["start_date"] = file_start
+                    if item["end_date"] is None or file_end > item["end_date"]:
+                        item["end_date"] = file_end
+            except Exception as exc:  # noqa: BLE001 - corrupt Parquet may raise several backend errors
+                relative = path.relative_to(self._base).as_posix()
+                item["read_errors"].append(f"{relative}: {type(exc).__name__}: {exc}")
+        return [by_code[code] for code in sorted(by_code)]
 
 
 class AdjustStore:

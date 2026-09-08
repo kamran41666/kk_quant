@@ -19,4 +19,8 @@ defineEmits<{ 'update:start': [value: string]; 'update:end': [value: string] }>(
 <style scoped>
 .date-range { display: flex; gap: 16px; }
 .date-range label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--text-secondary); }
+@media (max-width: 480px) {
+  .date-range { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); }
+  .date-range input { width: 100%; min-width: 0; }
+}
 </style>

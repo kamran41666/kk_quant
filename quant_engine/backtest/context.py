@@ -29,6 +29,8 @@ class StrategyDataPortal(Protocol):
 
     def current(self, code: str, field: str) -> float: ...
 
+    def factor(self, name: str, as_of: date) -> pd.Series: ...
+
 
 class DataHandlerPortal:
     """Adapter that keeps the concrete A-share DataHandler out of strategies."""
@@ -45,6 +47,9 @@ class DataHandlerPortal:
 
     def current(self, code: str, field: str) -> float:
         return self._handler.get_price(code, field)
+
+    def factor(self, name: str, as_of: date) -> pd.Series:
+        return self._handler.get_factor(name, as_of)
 
 
 class FundNavPortal:
@@ -87,6 +92,9 @@ class FundNavPortal:
         if frame.empty or field not in frame:
             return float("nan")
         return float(frame.iloc[-1][field])
+
+    def factor(self, name: str, as_of: date) -> pd.Series:
+        raise ValueError(f"panel factor {name!r} is not supported for fund NAV data")
 
 
 class StrategyContext:
@@ -161,8 +169,14 @@ class StrategyContext:
         return rows
 
     def get_factor(self, name: str, dt: date) -> pd.Series:
-        """获取因子值。当前阶段返回空 Series (因子模块完成后实现)。"""
-        return pd.Series(dtype=float)
+        """Return one point-in-time factor cross-section for exactly ``dt``."""
+        if self._data is None:
+            raise RuntimeError("strategy data portal is not bound")
+        if self._current_date is None:
+            raise RuntimeError("strategy context is not positioned on a trading date")
+        if dt > self._current_date:
+            raise ValueError("factor as_of date cannot be later than the current simulation date")
+        return self._data.factor(name, dt)
 
     def log(self, message: str):
         self._logs.append(f"[{self._current_date}] {message}")

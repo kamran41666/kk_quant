@@ -28,6 +28,9 @@ dev = [
     "ruff>=0.1",
     "mypy>=1.5",
 ]
+research = [
+    "baostock==0.9.3",
+]
 server = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",

@@ -44,6 +44,7 @@ Thumbs.db
 
 # Backtest results
 backtest_result/
+outputs/
 
 # Web build artifacts
 web/node_modules/

@@ -13,7 +13,7 @@
         <select v-model="selectedRunId" @change="loadMetrics">
           <option value="">-- 选择已完成的回测 --</option>
           <option v-for="r in completedRuns" :key="r.id" :value="r.id">
-            {{ r.id?.slice(0, 8) }} · {{ r.created_at?.slice(0, 10) }} · {{ ((r.total_return ?? 0) * 100).toFixed(1) }}%
+            {{ r.data_manifest?.research_label || r.id?.slice(0, 8) }} · {{ ((r.total_return ?? 0) * 100).toFixed(1) }}%
           </option>
         </select>
       </label>
@@ -31,7 +31,7 @@
         <label>选择 2–8 组已完成回测
           <select v-model="compareIds" multiple size="4" :disabled="comparing">
             <option v-for="r in completedRuns" :key="r.id" :value="r.id">
-              {{ r.id?.slice(0, 8) }} · {{ marketLabel(r.market) }} · {{ r.created_at?.slice(0, 10) }}
+              {{ r.data_manifest?.research_label || r.id?.slice(0, 8) }} · {{ marketLabel(r.market) }}
             </option>
           </select>
         </label>

@@ -58,6 +58,10 @@ class DataAPI:
             return self._apply_event_driven_adjust(df, fields)
         raise ValueError(f"Unknown adjust method: {adjust}")
 
+    def daily_inventory(self) -> list[dict]:
+        """Return the physical local daily-file inventory."""
+        return self._price_store.inventory()
+
     def daily_coverage(
         self,
         codes: list[str],
@@ -82,6 +86,11 @@ class DataAPI:
             str(code).strip().upper() for code in codes if str(code).strip()
         ))
         selected_fields = list(dict.fromkeys(fields or ["open", "high", "low", "close", "volume"]))
+        # Execution constraints change fills even when OHLCV is identical.
+        # Bind optional rule columns into the data identity without treating
+        # their absence as verified historical exchange-rule coverage.
+        execution_fields = ["up_limit", "down_limit", "is_suspended"]
+        identity_fields = list(dict.fromkeys(selected_fields + execution_fields))
         # Backtests pass the exact calendar instance that drives their event
         # loop.  Falling back to the API singleton is retained for the
         # read-only HTTP report, but execution evidence must never be based on
@@ -94,9 +103,9 @@ class DataAPI:
         for code in requested_codes:
             read_error: Optional[str] = None
             try:
-                frame = self._price_store.read_range([code], start, end, selected_fields)
+                frame = self._price_store.read_range([code], start, end, identity_fields)
                 if adjust == "event_driven":
-                    frame = self._apply_event_driven_adjust(frame, selected_fields)
+                    frame = self._apply_event_driven_adjust(frame, identity_fields)
             except Exception as exc:
                 frame = pd.DataFrame(columns=selected_fields)
                 read_error = f"{type(exc).__name__}: {exc}"
@@ -113,22 +122,31 @@ class DataAPI:
             duplicate_rows = max(0, len(observed_dates) - len(set(observed_dates)))
             field_valid_counts: dict[str, int] = {}
             invalid_field_rows = 0
+            numeric_fields: dict[str, pd.Series] = {}
+            valid_fields: dict[str, pd.Series] = {}
             for field in selected_fields:
                 if field not in frame.columns:
-                    field_valid_counts[field] = 0
+                    valid_fields[field] = pd.Series(False, index=frame.index)
                     continue
                 numeric = pd.to_numeric(frame[field], errors="coerce")
+                numeric_fields[field] = numeric
                 valid = numeric.notna() & numeric.map(lambda value: bool(pd.notna(value) and math.isfinite(float(value))))
-                field_valid_counts[field] = int(valid.sum())
+                if field in {"open", "high", "low", "close"}:
+                    valid &= numeric > 0
+                elif field in {"volume", "amount", "turnover_rate"}:
+                    valid &= numeric >= 0
+                valid_fields[field] = valid
+            # Finite prices alone are not valid bars. Check every available
+            # pair so projected field requests retain their own guarantees.
+            for lower, upper in (("low", "high"), ("low", "open"),
+                                 ("low", "close"), ("open", "high"), ("close", "high")):
+                if lower in numeric_fields and upper in numeric_fields:
+                    ordered = numeric_fields[lower] <= numeric_fields[upper]
+                    valid_fields[lower] &= ordered
+                    valid_fields[upper] &= ordered
+            field_valid_counts = {field: int(valid.sum()) for field, valid in valid_fields.items()}
             if selected_fields and not frame.empty:
-                valid_matrix = []
-                for field in selected_fields:
-                    if field not in frame.columns:
-                        valid_matrix.append(pd.Series(False, index=frame.index))
-                    else:
-                        numeric = pd.to_numeric(frame[field], errors="coerce")
-                        valid_matrix.append(numeric.notna() & numeric.map(lambda value: bool(pd.notna(value) and math.isfinite(float(value)))))
-                invalid_field_rows = int((~pd.concat(valid_matrix, axis=1).all(axis=1)).sum())
+                invalid_field_rows = int((~pd.concat(valid_fields.values(), axis=1).all(axis=1)).sum())
             missing_dates = sorted(expected - observed_set)
             content_hash = None
             if read_error is None and not frame.empty:
@@ -138,11 +156,15 @@ class DataAPI:
                 # adjustment surface changes.
                 canonical = frame.reset_index()
                 canonical["date"] = pd.to_datetime(canonical["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-                ordered = ["code", "date"] + selected_fields
-                for field in selected_fields:
+                ordered = ["code", "date"] + identity_fields
+                for field in identity_fields:
                     if field in canonical.columns:
-                        numeric = pd.to_numeric(canonical[field], errors="coerce")
-                        canonical[field] = numeric.where(numeric.notna(), None)
+                        # Preserve suspension value types: the consumer must
+                        # not get identical evidence for integer 0 and string
+                        # "0", which have different truth semantics.
+                        values = (canonical[field] if field == "is_suspended"
+                                  else pd.to_numeric(canonical[field], errors="coerce"))
+                        canonical[field] = values.astype(object).where(values.notna(), None)
                 records = canonical[[field for field in ordered if field in canonical.columns]].sort_values(
                     [field for field in ("code", "date") if field in canonical.columns]
                 ).to_dict("records")
@@ -176,6 +198,10 @@ class DataAPI:
                 "duplicate_rows": duplicate_rows,
                 "invalid_field_rows": invalid_field_rows,
                 "field_valid_counts": field_valid_counts,
+                "execution_field_counts": {
+                    field: int(frame[field].notna().sum()) if field in frame.columns else 0
+                    for field in execution_fields
+                },
                 "first_observed": min(observed_set).isoformat() if observed_set else None,
                 "last_observed": max(observed_set).isoformat() if observed_set else None,
                 "read_error": read_error,
@@ -252,10 +278,15 @@ class DataAPI:
 
     @staticmethod
     def daily_coverage_hash(report: dict) -> str:
-        """Recompute the complete coverage-report hash, excluding derived hashes."""
+        """Recompute evidence identity without derived/HTTP presentation fields.
+
+        The HTTP route appends ``meta`` after the report is hashed. Its
+        explanatory labels are not execution evidence; dates, calendar,
+        per-security checks and data identity remain covered by this hash.
+        """
         payload = {
             key: value for key, value in report.items()
-            if key not in {"complete", "coverage_hash"}
+            if key not in {"complete", "coverage_hash", "meta"}
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -263,7 +294,7 @@ class DataAPI:
     def _apply_event_driven_adjust(
         self, df: pd.DataFrame, fields: list[str]
     ) -> pd.DataFrame:
-        price_fields = {"open", "high", "low", "close"} & set(fields)
+        price_fields = {"open", "high", "low", "close", "up_limit", "down_limit"} & set(fields)
         if not price_fields:
             return df
 

@@ -9,6 +9,7 @@ import pandas as pd
 
 from quant_engine.backtest.strategy import Strategy
 from quant_engine.backtest.engine import BacktestEngine
+from quant_engine.backtest.protocol import DataRequirement, StrategySpec
 from quant_engine.backtest.types import Trade, OrderSide
 
 
@@ -422,6 +423,75 @@ class TestBacktestEngine:
         assert first_signal.dayofweek == 4  # Friday
         assert first_trade.dayofweek == 0   # next Monday
 
+    def test_before_trading_factor_sees_prior_session_but_close_signal_sees_today(
+        self,
+        mock_data_api,
+        tmp_path,
+    ):
+        base = mock_data_api.daily.return_value.copy()
+
+        def execute(frame, output_name):
+            mock_data_api.daily.return_value = frame
+            observed = {"before": [], "current_rejected": [], "signal": []}
+
+            class FactorPhaseStrategy(Strategy):
+                SPEC = StrategySpec(
+                    id="factor-phase-test",
+                    name="factor phase test",
+                    version="1.0.0",
+                    description="test phase-specific point-in-time access",
+                    markets=("a-share",),
+                    data=(DataRequirement(
+                        "a_share_daily",
+                        (),
+                        1,
+                        factors=("raw_volume_change_2_volume",),
+                    ),),
+                )
+
+                def initialize(self):
+                    pass
+
+                def before_trading(self):
+                    day = self.ctx.current_date
+                    previous = self.ctx.calendar.prev_trading_day(day)
+                    observed["before"].append(self.ctx.get_factor(
+                        "raw_volume_change_2_volume", previous,
+                    ))
+                    try:
+                        self.ctx.get_factor("raw_volume_change_2_volume", day)
+                    except ValueError:
+                        observed["current_rejected"].append(day)
+
+                def generate_signals(self, day):
+                    observed["signal"].append(self.ctx.get_factor(
+                        "raw_volume_change_2_volume", day,
+                    ))
+                    return {}
+
+            BacktestEngine(
+                FactorPhaseStrategy,
+                stock_list=["000001.SZ", "000002.SZ", "000858.SZ", "002415.SZ", "600000.SH"],
+            ).run(
+                start=date(2024, 2, 1),
+                end=date(2024, 2, 2),
+                rebalance_frequency="daily",
+                output_dir=str(tmp_path / output_name),
+            )
+            return observed
+
+        baseline = execute(base, "factor_phase_baseline")
+        changed = base.copy()
+        changed.loc[("000001.SZ", date(2024, 2, 1)), "volume"] *= 1_000
+        mutated = execute(changed, "factor_phase_mutated")
+
+        pd.testing.assert_series_equal(baseline["before"][0], mutated["before"][0])
+        assert baseline["signal"][0]["000001.SZ"] != mutated["signal"][0]["000001.SZ"]
+        assert baseline["current_rejected"] == mutated["current_rejected"] == [
+            date(2024, 2, 1),
+            date(2024, 2, 2),
+        ]
+
     def test_strategy_teardown_runs_when_signal_generation_fails(self, mock_data_api, tmp_path):
         events = []
 
@@ -468,3 +538,74 @@ class TestBacktestEngine:
         trades = pd.read_parquet(Path(result_dir) / 'trades.parquet')
         assert trades['side'].tolist() == ['buy', 'sell']
         assert pd.Timestamp(trades.iloc[1]['date']) > pd.Timestamp(date(2024, 1, 12))
+
+    def test_signals_observe_current_close_equity_and_one_daily_return(self, mock_data_api, tmp_path, monkeypatch):
+        from quant_engine.backtest.portfolio import Portfolio
+
+        frame = mock_data_api.daily.return_value.copy()
+        frame["up_limit"] = 50.
+        for day, close in [("2024-01-03", 12.), ("2024-01-04", 14.)]:
+            frame.loc[("000001.SZ", pd.Timestamp(day)), "close"] = close
+            frame.loc[("000001.SZ", pd.Timestamp(day)), "high"] = close
+        mock_data_api.daily.return_value = frame
+        observed = []
+        marks = []
+        original_mark = Portfolio.update_market_values
+
+        def mark(portfolio, prices, dt):
+            marks.append(dt)
+            return original_mark(portfolio, prices, dt)
+
+        monkeypatch.setattr(Portfolio, "update_market_values", mark)
+
+        class InspectEquityStrategy(Strategy):
+            def initialize(self):
+                pass
+
+            def generate_signals(self, dt):
+                portfolio = self.ctx.portfolio
+                observed.append(None if portfolio is None else {
+                    "date": dt, "equity": portfolio.total_value,
+                    "market_value": portfolio.market_value,
+                    "daily_return": portfolio.daily_return,
+                    "shares": sum(pos.shares for pos in portfolio.positions.values()),
+                    "close": self.ctx.current("000001.SZ"),
+                })
+                return {"000001.SZ": 0.5}
+
+        result = Path(BacktestEngine(InspectEquityStrategy, stock_list=["000001.SZ"]).run(
+            start=date(2024, 1, 2), end=date(2024, 1, 4), initial_capital=100000.,
+            rebalance_frequency="daily", output_dir=str(tmp_path / "equity"),
+        ))
+        assert observed[0] is not None
+        assert observed[0]["equity"] == 100000.
+        assert observed[1]["shares"] > 0
+        assert observed[1]["daily_return"] > 0
+        assert marks == [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        recorded = pd.read_parquet(result / "daily_portfolio.parquet")
+        previous = 100000.
+        for view, row in zip(observed, recorded.to_dict("records")):
+            assert view["market_value"] == pytest.approx(view["shares"] * view["close"])
+            assert view["equity"] == pytest.approx(row["total_value"])
+            assert view["daily_return"] == pytest.approx(row["total_value"] / previous - 1.)
+            assert row["daily_return"] == pytest.approx(view["daily_return"])
+            previous = row["total_value"]
+        summary = json.loads((result / "summary.json").read_text())
+        assert summary["universe_selection"] == "explicit_static"
+        assert summary["universe_count"] == 1
+        assert summary["universe"] == ["000001.SZ"]
+
+    def test_default_index_universe_retains_more_than_fifty_constituents(self, mock_data_api, tmp_path):
+        codes = [f"{number:06d}.SZ" for number in range(1, 62)]
+        with patch("quant_engine.backtest.engine.DataAPI") as index_api:
+            index_api.return_value.index_components.return_value = codes
+            engine = BacktestEngine(SimpleTestStrategy)
+            assert engine._get_stock_pool(date(2024, 1, 2)) == codes
+            result = Path(engine.run(
+                start=date(2024, 1, 2), end=date(2024, 1, 2),
+                rebalance_frequency="daily", output_dir=str(tmp_path / "full_universe"),
+            ))
+        summary = json.loads((result / "summary.json").read_text())
+        assert summary["universe_selection"] == "initial_index_snapshot_static"
+        assert summary["universe_count"] == 61
+        assert summary["universe"] == codes

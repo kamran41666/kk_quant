@@ -98,10 +98,13 @@ class DataRequirement:
     optional: bool = False
     lookback_parameter: str | None = None
     lookback_offset: int = 0
+    factors: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.dataset or not self.fields or self.lookback < 1:
-            raise StrategyProtocolError("data requirement needs dataset, fields and lookback >= 1")
+        if not self.dataset or (not self.fields and not self.factors) or self.lookback < 1:
+            raise StrategyProtocolError(
+                "data requirement needs dataset, fields or factors, and lookback >= 1"
+            )
         if self.lookback_offset < 0:
             raise StrategyProtocolError("data requirement lookback_offset must be >= 0")
 
@@ -122,6 +125,7 @@ class DataRequirement:
             "adjustment": self.adjustment, "optional": self.optional,
             "lookback_parameter": self.lookback_parameter,
             "lookback_offset": self.lookback_offset,
+            "factors": list(self.factors),
         }
 
 
@@ -238,6 +242,7 @@ class ResolvedDataRequirement:
     required_bars: int
     frequency: str
     adjustment: str
+    factors: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -246,6 +251,7 @@ class ResolvedDataRequirement:
             "required_bars": self.required_bars,
             "frequency": self.frequency,
             "adjustment": self.adjustment,
+            "factors": list(self.factors),
         }
 
 
@@ -267,15 +273,33 @@ def resolve_strategy_data_requirements(
                 "strategy_data_requirement_unsupported: "
                 f"{requirement.dataset}:{requirement.frequency}:{requirement.adjustment}"
             )
+        fields = list(requirement.fields)
+        required_bars = requirement.resolved_lookback(normalized_params)
+        if requirement.factors:
+            if requirement.dataset != "a_share_daily":
+                raise StrategyProtocolError(
+                    "panel factors currently require the a_share_daily dataset"
+                )
+            from quant_engine.factor import get_factor_definition
+
+            for factor_name in requirement.factors:
+                try:
+                    definition = get_factor_definition(factor_name)
+                except KeyError as exc:
+                    raise StrategyProtocolError(str(exc)) from exc
+                if definition.category != "raw_fundamental":
+                    fields.extend(definition.inputs)
+                required_bars = max(required_bars, definition.window)
         resolved.append(ResolvedDataRequirement(
             dataset=requirement.dataset,
-            fields=requirement.fields,
+            fields=tuple(dict.fromkeys(fields)),
             required_bars=max(
                 spec.warmup_bars,
-                requirement.resolved_lookback(normalized_params),
+                required_bars,
             ),
             frequency=requirement.frequency,
             adjustment=requirement.adjustment,
+            factors=requirement.factors,
         ))
     return tuple(resolved)
 

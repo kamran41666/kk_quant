@@ -788,6 +788,60 @@ def get_daily_coverage(
     return report
 
 
+@router.get("/inventory/daily")
+def get_daily_inventory():
+    """Describe local daily Parquet inventory without claiming coverage."""
+    items = DataAPI().daily_inventory()
+    starts = [item["start_date"] for item in items if item["start_date"] is not None]
+    ends = [item["end_date"] for item in items if item["end_date"] is not None]
+    return {
+        "items": items,
+        "summary": {
+            "security_count": len(items),
+            "file_count": sum(item["file_count"] for item in items),
+            "row_count": sum(item["row_count"] for item in items),
+            "start_date": min(starts) if starts else None,
+            "end_date": max(ends) if ends else None,
+            "error_count": sum(len(item["read_errors"]) for item in items),
+        },
+        "source": "local:parquet",
+        "coverage_verified": False,
+    }
+
+
+@router.get("/research-datasets")
+def list_research_datasets():
+    """List frozen research manifests separately from the mutable daily cache."""
+    import json
+    datasets, errors = [], []
+    paths = sorted(Path(settings.data_dir).glob("research/*/normalized-*/manifest.json"))
+    latest = {}
+    for path in paths:
+        group = path.parent.parent.name
+        if group not in latest or path.stat().st_mtime > latest[group].stat().st_mtime:
+            latest[group] = path
+    for path in paths:
+        try:
+            manifest = json.loads(path.read_text())
+            quality = manifest["quality"]
+            datasets.append({
+                "dataset_id": manifest["dataset_id"], "content_hash": manifest["content_hash"],
+                "universe_count": manifest["universe_count"],
+                "start_date": manifest["start_date"], "end_date": manifest["end_date"],
+                "row_count": sum(item["rows"] for item in quality),
+                "action_count": sum(item["corporate_action_count"] for item in quality),
+                "missing_count": sum(item["missing_count"] for item in quality),
+                "invalid_rows": sum(item["invalid_trading_rows"] for item in quality),
+                "unresolved_actions": sum(len(item["unexplained_reference_adjustments"]) for item in quality),
+                "source": manifest["source"], "signal_adjustment": manifest.get("signal_adjustment", "vendor_factor"),
+                "latest": path == latest[path.parent.parent.name],
+            })
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            errors.append({"dataset": path.parent.parent.name + "/" + path.parent.name,
+                           "error": f"{type(exc).__name__}: {exc}"})
+    return {"data": datasets, "errors": errors, "meta": {"research_only": True, "counts_from_archived_manifest": True}}
+
+
 @router.get("/calendar/coverage")
 def get_calendar_coverage(
     start_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),

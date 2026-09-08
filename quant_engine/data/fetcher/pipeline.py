@@ -90,6 +90,7 @@ class DataPipeline:
             cols = {
                 "date", "open", "high", "low", "close", "volume",
                 "amount", "turnover_rate",
+                "up_limit", "down_limit", "is_suspended",
             }
             available = list(cols & set(group.columns))
             if "date" not in available:

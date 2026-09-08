@@ -103,7 +103,7 @@ class TestPortfolio:
         assert sellable_tomorrow == 1000
 
     def test_sell_more_than_owned(self, portfolio):
-        """卖出手数超过持仓 -> 卖出全部持仓"""
+        """Reject an inconsistent fill without creating cash or changing shares."""
         buy = Trade(
             trade_id="t1", order_id="o1",
             code="000001.SZ", date=date(2024, 6, 10),
@@ -118,11 +118,11 @@ class TestPortfolio:
             side=OrderSide.SELL, shares=1000,  # 想卖1000但只有500
             price=12.0, amount=12000.0, commission=5.0, stamp_duty=12.0, slippage=12.0,
         )
-        portfolio.apply_trade(sell)
-
-        # 持仓清零
-        pos = portfolio.positions.get("000001.SZ")
-        assert pos is None or pos.shares == 0
+        cash_before = portfolio.cash
+        with pytest.raises(ValueError, match="Insufficient shares"):
+            portfolio.apply_trade(sell)
+        assert portfolio.cash == cash_before
+        assert portfolio.positions["000001.SZ"].shares == 500
 
     def test_daily_return(self, portfolio):
         """验证日收益率计算"""
@@ -161,3 +161,67 @@ class TestPortfolio:
             p.apply_trade(trade)
         assert p.cash == 1_000.0
         assert p.positions == {}
+
+
+def fill(side, shares, day):
+    return Trade(trade_id="test", order_id="test", code="000001.SZ",
+                 date=day, side=side, shares=shares, price=10., amount=shares * 10.)
+
+
+def test_top_up_preserves_equity_and_previously_sellable_shares():
+    portfolio = Portfolio(10000.)
+    portfolio.apply_trade(fill(OrderSide.BUY, 500, date(2024, 6, 13)))
+    portfolio.update_market_values({"000001.SZ": 10.}, date(2024, 6, 13))
+    portfolio.apply_trade(fill(OrderSide.BUY, 100, date(2024, 6, 14)))
+    assert portfolio.total_value == 10000.
+    assert portfolio.get_sellable_shares("000001.SZ", date(2024, 6, 14)) == 500
+    portfolio.apply_trade(fill(OrderSide.SELL, 500, date(2024, 6, 14)))
+    assert portfolio.total_value == 10000.
+    assert portfolio.positions["000001.SZ"].shares == 100
+    assert portfolio.get_sellable_shares("000001.SZ", date(2024, 6, 14)) == 0
+    assert portfolio.get_sellable_shares("000001.SZ", date(2024, 6, 17)) == 100
+
+
+def test_same_day_multiple_buys_unlock_by_lot():
+    portfolio = Portfolio(10000.)
+    portfolio.apply_trade(fill(OrderSide.BUY, 200, date(2024, 6, 13)))
+    portfolio.apply_trade(fill(OrderSide.BUY, 100, date(2024, 6, 14)))
+    portfolio.apply_trade(fill(OrderSide.BUY, 100, date(2024, 6, 14)))
+    assert portfolio.get_sellable_shares("000001.SZ", date(2024, 6, 14)) == 200
+    assert portfolio.get_sellable_shares("000001.SZ", date(2024, 6, 17)) == 400
+
+
+def test_sell_without_position_is_atomic():
+    portfolio = Portfolio(10000.)
+    with pytest.raises(ValueError, match="Insufficient shares"):
+        portfolio.apply_trade(fill(OrderSide.SELL, 100, date(2024, 6, 14)))
+    assert portfolio.cash == 10000.
+    assert portfolio.positions == {}
+
+
+def test_partial_sell_updates_value_before_next_mark():
+    portfolio = Portfolio(10000.)
+    portfolio.apply_trade(fill(OrderSide.BUY, 500, date(2024, 6, 13)))
+    portfolio.apply_trade(fill(OrderSide.SELL, 200, date(2024, 6, 14)))
+    assert portfolio.positions["000001.SZ"].market_value == 3000.
+    assert portfolio.total_value == 10000.
+
+
+def test_locked_sell_does_not_mutate_portfolio():
+    portfolio = Portfolio(10000.)
+    portfolio.apply_trade(fill(OrderSide.BUY, 100, date(2024, 6, 14)))
+    with pytest.raises(ValueError, match="Insufficient sellable shares"):
+        portfolio.apply_trade(fill(OrderSide.SELL, 100, date(2024, 6, 14)))
+    assert portfolio.cash == 9000.
+    assert portfolio.positions["000001.SZ"].shares == 100
+
+
+def test_top_up_of_legacy_restored_position_retains_original_unlock():
+    portfolio = Portfolio(5000.)
+    portfolio._positions["000001.SZ"] = Position(
+        code="000001.SZ", shares=500, avg_cost=10., market_value=5000.,
+        unlock_date=date(2024, 6, 14),
+    )
+    portfolio.apply_trade(fill(OrderSide.BUY, 100, date(2024, 6, 14)))
+    assert portfolio.get_sellable_shares("000001.SZ", date(2024, 6, 14)) == 500
+    assert portfolio.get_sellable_shares("000001.SZ", date(2024, 6, 17)) == 600

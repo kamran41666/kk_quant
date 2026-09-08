@@ -383,6 +383,10 @@ def _execute_backtest(run_id: str, req: BacktestRunRequest):
                     strategy_requirements = summary.get("strategy_data_requirements")
                     if isinstance(strategy_requirements, list):
                         manifest_payload["strategy_data_requirements"] = strategy_requirements
+                    if isinstance(summary.get("universe"), list):
+                        manifest_payload["universe"] = summary["universe"]
+                        manifest_payload["universe_count"] = summary.get("universe_count")
+                        manifest_payload["universe_selection"] = summary.get("universe_selection")
                     run.data_manifest = serialize_manifest(manifest_payload)
 
         # Compute metrics if we have daily data
@@ -461,6 +465,11 @@ def run_backtest(
     except StrategyProtocolError as exc:
         status_code = 409 if str(exc) == "strategy_market_mismatch" else 422
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    if registered.spec.extensions.get("research_engine_required"):
+        raise HTTPException(status_code=422, detail={
+            "code": "FROZEN_RESEARCH_ENGINE_REQUIRED",
+            "message": "该候选需要原价成交与公司行动研究引擎。请使用已冻结数据集的研究矩阵入口，不能通过旧回测路径执行。",
+        })
     if market == "cn-fund" and not req.symbols:
         raise HTTPException(status_code=422, detail="symbols are required for a domestic-fund backtest")
     if market == "cn-fund" and isinstance(params, dict) and "paper_fee_rate" in params:
@@ -632,6 +641,26 @@ def get_equity(run_id: str, db: Session = Depends(get_db)):
     cols = ["date", "total_value", "daily_return", "cumulative_return", "cash", "market_value", "n_positions"]
     available = [c for c in cols if c in df.columns]
     return df[available].to_dict(orient="records")
+
+
+@router.get("/runs/{run_id}/comparison")
+def get_research_comparison(run_id: str, db: Session = Depends(get_db)):
+    """Serve the exact benchmark/interval artifact attached to a research run."""
+    import hashlib
+    run = db.query(Run).filter(Run.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    manifest = _manifest_payload(run) or {}
+    if run.status != "completed" or not run.result_dir or not manifest.get("research_experiment"):
+        raise HTTPException(status_code=400, detail="Completed research experiment required")
+    target = Path(run.result_dir) / "comparison.json"
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Research comparison has not been generated")
+    content = target.read_bytes()
+    expected = manifest.get("comparison_content_hash")
+    if not expected or hashlib.sha256(content).hexdigest() != expected:
+        raise HTTPException(status_code=409, detail="Research comparison content hash mismatch")
+    return json.loads(content)
 
 
 @router.get("/runs/{run_id}/trades")

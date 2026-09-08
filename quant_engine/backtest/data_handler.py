@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from quant_engine.data.api import DataAPI
+from quant_engine.factor import compute_factor, get_factor_definition
 
 
 class DataHandler:
@@ -67,7 +68,7 @@ class DataHandler:
                 start=start,
                 end=end,
                 fields=["open", "high", "low", "close", "volume", "amount",
-                        "turnover_rate"],
+                        "turnover_rate", "up_limit", "down_limit", "is_suspended"],
                 adjust="event_driven",
             )
         except Exception as exc:
@@ -88,6 +89,7 @@ class DataHandler:
             )
 
         self._current_date: Optional[date] = None
+        self._factor_cache: dict[tuple[str, date], pd.Series] = {}
 
     @property
     def current_date(self) -> Optional[date]:
@@ -180,19 +182,34 @@ class DataHandler:
 
         suspended = []
         for code in self._codes:
-            if "is_suspended" not in self._daily_data.columns:
-                if (code, self._current_date) not in self._daily_data.index:
-                    suspended.append(code)
-                continue
             try:
-                is_susp = self._daily_data.loc[
-                    (code, self._current_date), 'is_suspended'
-                ]
-                if is_susp:
+                row = self._daily_data.loc[(code, self._current_date)]
+                is_susp = row.get("is_suspended", float("nan"))
+                volume = row.get("volume", float("nan"))
+                # No trades in the daily bar means no simulated fill. An
+                # absent suspension flag remains unknown, not verified false.
+                if self._suspension_blocks_trading(is_susp) or (
+                    pd.notna(volume) and float(volume) <= 0
+                ):
                     suspended.append(code)
             except KeyError:
                 suspended.append(code)  # 无数据 = 视为停牌
         return suspended
+
+    @staticmethod
+    def _suspension_blocks_trading(value) -> bool:
+        """Parse stored flags; malformed explicit values block execution.
+
+        Missing optional archive values retain the existing unknown-data
+        policy. In particular, the string "False" is not a true flag.
+        """
+        if value is None or value is pd.NA:
+            return False
+        if isinstance(value, str):
+            return value.strip().lower() not in {"false", "0"}
+        if isinstance(value, (bool, np.bool_, int, float, np.integer, np.floating)):
+            return bool(pd.notna(value) and value != 0)
+        return True
 
     def is_suspended(self, code: str) -> bool:
         """判断某只股票在当前交易日是否停牌"""
@@ -208,15 +225,15 @@ class DataHandler:
             raise RuntimeError("DataHandler not initialized")
 
         try:
-            up = float(
-                self._daily_data.loc[(code, self._current_date), 'up_limit']
-            )
-            down = float(
-                self._daily_data.loc[(code, self._current_date), 'down_limit']
-            )
-            return down, up
+            row = self._daily_data.loc[(code, self._current_date)]
         except KeyError:
             return 0.0, float('inf')
+        up = row.get("up_limit", float("nan"))
+        down = row.get("down_limit", float("nan"))
+        return (
+            float(down) if pd.notna(down) else 0.0,
+            float(up) if pd.notna(up) else float("inf"),
+        )
 
     def get_historical_prices(
         self, code: str, lookback: int, field: str = 'close'
@@ -263,3 +280,59 @@ class DataHandler:
         mask = code_values.isin(selected_codes) & (date_values <= self._current_date)
         history = self._daily_data.loc[mask, available]
         return history.groupby(level="code", group_keys=False).tail(lookback)
+
+    def get_factor(self, name: str, as_of: date) -> pd.Series:
+        """Compute a registered panel factor using only rows visible at ``as_of``."""
+        if self._current_date is None:
+            raise RuntimeError("DataHandler not initialized: call push_day() first")
+        if as_of > self._current_date:
+            raise ValueError("factor as_of date cannot exceed current simulation date")
+        cache_key = (name, as_of)
+        cached = self._factor_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
+
+        definition = get_factor_definition(name)
+        if definition.category == "raw_fundamental":
+            result = self._get_fundamental_factor(name, as_of)
+            self._factor_cache[cache_key] = result.copy()
+            return result
+        missing = sorted(set(definition.inputs) - set(self._daily_data.columns))
+        if missing:
+            raise ValueError(f"factor {name} requires unavailable fields: {', '.join(missing)}")
+        dates = self._daily_data.index.get_level_values("date")
+        visible = self._daily_data.loc[dates <= as_of, list(definition.inputs)]
+        visible = visible.groupby(level="code", group_keys=False).tail(definition.window)
+        calculated = compute_factor(name, visible)
+        factor_dates = calculated.index.get_level_values("date")
+        current = calculated.loc[factor_dates == as_of]
+        if current.empty:
+            result = pd.Series(index=self._codes, dtype=float, name=name)
+        else:
+            result = current.droplevel("date").reindex(self._codes)
+            result.index.name = "code"
+            result.name = name
+        self._factor_cache[cache_key] = result.copy()
+        return result
+
+    def _get_fundamental_factor(self, name: str, as_of: date) -> pd.Series:
+        """Build a latest-announced cross-section without backfilling revisions."""
+        definition = get_factor_definition(name)
+        observations = self._api.fundamentals(
+            self._codes,
+            fields=list(definition.inputs),
+            as_of=as_of,
+        )
+        if observations.empty:
+            return pd.Series(index=self._codes, dtype=float, name=name)
+        tidy = observations.reset_index().sort_values(
+            ["code", "field", "report_date", "announce_date"]
+        )
+        latest = tidy.drop_duplicates(["code", "field"], keep="last")
+        snapshot = latest.pivot(index="code", columns="field", values="value")
+        snapshot = snapshot.reindex(index=self._codes, columns=list(definition.inputs))
+        snapshot["date"] = as_of
+        panel = snapshot.reset_index().set_index(["code", "date"])
+        result = compute_factor(name, panel).droplevel("date").reindex(self._codes)
+        result.index.name = "code"
+        return result.rename(name)

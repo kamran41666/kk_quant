@@ -69,9 +69,9 @@ class TestStrategyContext:
         assert context.portfolio is not None
         assert context.portfolio.cash == 50000.0
 
-    def test_get_factor_returns_empty(self, context):
-        result = context.get_factor("momentum", date(2024, 6, 14))
-        assert len(result) == 0
+    def test_get_factor_requires_bound_data_portal(self, context):
+        with pytest.raises(RuntimeError, match="not bound"):
+            context.get_factor("momentum", date(2024, 6, 14))
 
 
 class TestStrategyBase:
