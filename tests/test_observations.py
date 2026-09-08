@@ -22,6 +22,8 @@ from server.services.observation import (
     _execute_rebalance_plan,
     _default_fund_signal_provider,
     _default_signal_provider,
+    _bound_a_share_universe,
+    ObservationBlocked,
     _get_or_create_rebalance_plan,
     retry_rebalance_plan,
 )
@@ -90,6 +92,18 @@ def test_default_a_share_signal_provider_accepts_v2_output_and_public_context(mo
         market="a-share",
     )
     db.add(definition)
+    db.flush()
+    run = Run(
+        strategy_id=definition.id,
+        run_type="backtest",
+        status="completed",
+        data_manifest=serialize_manifest({
+            "daily_data_coverage": {
+                "items": [{"code": "000001.SZ", "status": "complete"}],
+            },
+        }),
+    )
+    db.add(run)
     db.commit()
     events = []
 
@@ -136,18 +150,36 @@ def test_default_a_share_signal_provider_accepts_v2_output_and_public_context(mo
 
     class Api:
         def index_components(self, _index, _as_of):
-            return ["000001.SZ"]
+            raise AssertionError("v2 observation must reuse the backtest universe")
 
     monkeypatch.setattr("server.services.observation.DataAPI", lambda: Api())
     monkeypatch.setattr("server.services.observation.DataHandler", Handler)
     monkeypatch.setattr("server.services.observation._verified_trading_calendar", lambda _day: object())
     monkeypatch.setattr("server.api.backtest._import_strategy", lambda _path: V2Ashare)
-    observation = StrategyObservation(strategy_id=definition.id)
+    observation = StrategyObservation(
+        strategy_id=definition.id,
+        backtest_run_id=run.id,
+    )
 
     assert _default_signal_provider(db, observation, date(2024, 6, 14)) == {
         "000001.SZ": 0.5,
     }
     assert events == ["initialize", "before_trading", "teardown"]
+
+
+def test_v2_observation_fails_closed_when_bound_universe_is_missing():
+    db = _db()
+    run = Run(
+        run_type="backtest",
+        status="completed",
+        data_manifest="{}",
+    )
+    db.add(run)
+    db.commit()
+    observation = StrategyObservation(backtest_run_id=run.id)
+    with pytest.raises(ObservationBlocked) as exc:
+        _bound_a_share_universe(db, observation, date(2024, 6, 14))
+    assert exc.value.code == "BACKTEST_UNIVERSE_UNAVAILABLE"
 
 
 def test_default_fund_signal_provider_accepts_v2_output_and_public_context(monkeypatch):

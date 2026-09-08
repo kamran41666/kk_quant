@@ -12,6 +12,7 @@ import hashlib
 import math
 import re
 import threading
+from types import SimpleNamespace
 from uuid import uuid4
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional, Protocol
@@ -975,6 +976,76 @@ def stop_observation(db: Session, account_id: str, observation_id: str) -> dict[
     return _transition(db, account_id=account_id, observation_id=observation_id, action="stop")
 
 
+def _bound_a_share_universe(
+    db: Session,
+    observation: StrategyObservation,
+    as_of: date,
+) -> list[str]:
+    """Reuse the exact backtest universe; fall back only for legacy evidence."""
+    run_id = getattr(observation, "backtest_run_id", None)
+    run = db.query(Run).filter(Run.id == run_id).first() if run_id else None
+    if run is not None:
+        try:
+            manifest = json.loads(run.data_manifest or "{}")
+        except (TypeError, ValueError):
+            manifest = {}
+        coverage = manifest.get("daily_data_coverage") if isinstance(manifest, dict) else None
+        items = coverage.get("items") if isinstance(coverage, dict) else None
+        codes = [
+            str(item["code"])
+            for item in items or []
+            if isinstance(item, dict)
+            and item.get("status") == "complete"
+            and _CODE_RE.fullmatch(str(item.get("code", "")))
+        ]
+        if codes:
+            return sorted(dict.fromkeys(codes))
+        if run.data_manifest:
+            raise ObservationBlocked(
+                "BACKTEST_UNIVERSE_UNAVAILABLE",
+                "The bound backtest does not contain a complete A-share universe.",
+            )
+    return DataAPI().index_components("000300", as_of)[:50]
+
+
+def _strategy_portfolio_view(
+    db: Session,
+    observation: StrategyObservation,
+) -> SimpleNamespace:
+    lots = db.query(PaperLot).filter(
+        PaperLot.account_id == observation.account_id,
+        PaperLot.owner == "strategy",
+        PaperLot.owner_id == observation.id,
+        PaperLot.remaining_quantity > 0,
+    ).all()
+    grouped: dict[str, list[PaperLot]] = {}
+    for lot in lots:
+        grouped.setdefault(lot.code, []).append(lot)
+    positions = {}
+    for code, code_lots in grouped.items():
+        shares = sum(float(lot.remaining_quantity) for lot in code_lots)
+        cost = 0.0
+        for lot in code_lots:
+            lot_shares = float(lot.remaining_quantity)
+            gross = lot_shares * float(lot.buy_price)
+            commission, stamp = fee_for(normalize_market(lot.market), gross, "buy")
+            cost += gross + commission + stamp
+        positions[code] = SimpleNamespace(
+            code=code,
+            shares=shares,
+            avg_cost=cost / shares if shares > 0 else 0.0,
+            market_value=cost,
+        )
+    allocated = float(observation.allocated_capital or 0.0)
+    market_value = sum(item.market_value for item in positions.values())
+    return SimpleNamespace(
+        cash=max(0.0, allocated - market_value),
+        market_value=market_value,
+        total_value=allocated,
+        positions=positions,
+    )
+
+
 def _default_signal_provider(db: Session, observation: StrategyObservation, as_of: date) -> dict[str, float]:
     """Generate a signal only when a complete point-in-time local window exists."""
     strategy = db.query(Strategy).filter(Strategy.id == observation.strategy_id).first()
@@ -994,8 +1065,7 @@ def _default_signal_provider(db: Session, observation: StrategyObservation, as_o
             if isinstance(spec, StrategySpec)
             else ()
         )
-        api = DataAPI()
-        codes = api.index_components("000300", as_of)[:50]
+        codes = _bound_a_share_universe(db, observation, as_of)
         if not codes:
             raise ObservationBlocked("PIT_STOCK_POOL_EMPTY", "No point-in-time stock pool is available for this observation date.")
         calendar = _verified_trading_calendar(as_of)
@@ -1025,6 +1095,7 @@ def _default_signal_provider(db: Session, observation: StrategyObservation, as_o
             strategy_instance.initialize()
             handler.push_day(as_of)
             context.set_date(as_of)
+            context.set_portfolio(_strategy_portfolio_view(db, observation))
             strategy_instance.before_trading()
             signals = normalize_strategy_output(
                 strategy_instance.generate_signals(as_of),
@@ -1124,6 +1195,7 @@ def _default_fund_signal_provider(db: Session, observation: StrategyObservation,
             strategy_instance._fund_history = filtered_history
             portal.set_date(as_of)
             context.set_date(as_of)
+            context.set_portfolio(_strategy_portfolio_view(db, observation))
             strategy_instance.before_trading()
             signals = normalize_strategy_output(
                 strategy_instance.generate_signals(as_of),

@@ -6,7 +6,7 @@
 
 | 编号 | 策略 | 市场方向 | 研究状态 | 报告日期 | 文档 |
 |---|---|---|---|---|---|
-| STR-001 | Cycle of Price Action | A股纯多头 | 规则化方案完成，尚未回测 | 2026-09-05 | [cycle-of-price-action.md](cycle-of-price-action.md) |
+| STR-001 | Cycle of Price Action | A股纯多头 | 价格量能版实现完成，尚未真实数据回测 | 2026-09-08 | [cycle-of-price-action.md](cycle-of-price-action.md) |
 
 ## 状态定义
 
@@ -38,4 +38,3 @@
 4. 适配A股制度及项目现有能力，列出实现缺口。
 5. 冻结研究假设、消融实验、样本外验证和压力测试方案。
 6. 更新本索引；只有用户明确要求后，才进入代码实现或回测。
-

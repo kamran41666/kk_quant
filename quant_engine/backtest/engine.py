@@ -5,7 +5,7 @@ Portfolio、Recorder 串联，按交易日迭代执行完整回测流程。
 """
 import time
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Type
 
@@ -96,10 +96,52 @@ class BacktestEngine:
         # 股票池: 从 strategy_kwargs 中获取，或默认用沪深300成分
         stock_list = self._get_stock_pool(trading_days[0])
 
+        spec = getattr(self._strategy_class, "SPEC", None)
+        requirements = (
+            resolve_strategy_data_requirements(
+                spec,
+                self._strategy_kwargs,
+                supported={"a_share_daily": ("1d", "event_driven")},
+            )
+            if isinstance(spec, StrategySpec)
+            else ()
+        )
+        data_start = trading_days[0]
+        required_warmup = max((item.required_bars for item in requirements), default=0)
+        if required_warmup:
+            warmup_candidate = data_start - timedelta(days=required_warmup * 2 + 30)
+            warmup_report = calendar.ensure_coverage(warmup_candidate, end)
+            if not warmup_report.get("complete"):
+                raise ValueError(
+                    "strategy_warmup_calendar_insufficient: "
+                    + json.dumps(warmup_report, ensure_ascii=False, sort_keys=True)
+                )
+            warmup_days = calendar.get_trading_days(
+                warmup_candidate,
+                data_start - timedelta(days=1),
+            )
+            if len(warmup_days) < required_warmup and type(calendar) is TradingCalendar:
+                calendar = TradingCalendar(
+                    start_year=warmup_candidate.year,
+                    end_year=end.year,
+                )
+                calendar_report = calendar.ensure_coverage(start, end)
+                warmup_report = calendar.ensure_coverage(warmup_candidate, end)
+                warmup_days = calendar.get_trading_days(
+                    warmup_candidate,
+                    data_start - timedelta(days=1),
+                )
+            if len(warmup_days) < required_warmup:
+                raise ValueError(
+                    f"strategy_warmup_history_insufficient: required={required_warmup} "
+                    f"available={len(warmup_days)}"
+                )
+            data_start = warmup_days[-required_warmup]
+
         # 组件初始化
         data_handler = DataHandler(
             codes=stock_list,
-            start=trading_days[0],
+            start=data_start,
             end=trading_days[-1],
             calendar=calendar,
         )
@@ -150,14 +192,8 @@ class BacktestEngine:
                 raise ValueError("daily_data_coverage_hash_invalid")
         elif data_handler.load_error:
             raise ValueError("daily_data_load_failed: " + data_handler.load_error)
-        spec = getattr(self._strategy_class, "SPEC", None)
         if isinstance(spec, StrategySpec):
             requirement_reports = []
-            requirements = resolve_strategy_data_requirements(
-                spec,
-                self._strategy_kwargs,
-                supported={"a_share_daily": ("1d", "event_driven")},
-            )
             for requirement in requirements:
                 report = data_handler.requirement_coverage(list(requirement.fields))
                 insufficient = {
@@ -273,6 +309,7 @@ class BacktestEngine:
                     # Record after matching so persisted status reflects the result.
                     recorder.record_order(order)
                 pending_target = None
+                context.set_portfolio(portfolio)
 
             # Rebalance day: generate a target for the *next* trading day.  An empty
             # mapping is a valid target and means liquidate all sellable holdings.
