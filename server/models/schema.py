@@ -600,6 +600,108 @@ class ManualAccount(Base):
     )
 
 
+class StrategyRelease(Base):
+    """Immutable release envelope; qualification never comes from Paper* rows."""
+    __tablename__ = "strategy_release"
+    __table_args__ = (
+        UniqueConstraint("strategy_key", "version", name="uq_strategy_release_key_version"),
+        UniqueConstraint("release_hash", name="uq_strategy_release_hash"),
+        CheckConstraint("market = 'a-share'", name="ck_strategy_release_market"),
+        CheckConstraint(
+            "status IN ('draft', 'research_blocked', 'research_passed', 'portfolio_passed', 'holdout_passed', 'paper_observing', 'paper_passed', 'manual_ready', 'suspended', 'retired')",
+            name="ck_strategy_release_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    version: Mapped[str] = mapped_column(String(40), nullable=False)
+    strategy_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    bundle_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    release_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    market: Mapped[str] = mapped_column(String(20), nullable=False, default="a-share")
+    research_evidence: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    execution_policy: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    risk_policy: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    promotion_policy: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="draft")
+    approved_by: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    approved_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    updated_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualExecutionAuthorization(Base):
+    """User/account-specific limits; it is not a broker authorization token."""
+    __tablename__ = "manual_execution_authorization"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'active', 'reconcile', 'suspended', 'revoked', 'expired')",
+            name="ck_manual_authorization_status",
+        ),
+        CheckConstraint("capital_limit > 0 AND max_order_notional > 0", name="ck_manual_authorization_money_positive"),
+        CheckConstraint("max_gross_exposure > 0 AND max_gross_exposure <= 1", name="ck_manual_authorization_exposure"),
+        CheckConstraint("max_single_weight > 0 AND max_single_weight <= 1", name="ck_manual_authorization_weight"),
+        CheckConstraint("max_daily_items > 0", name="ck_manual_authorization_items_positive"),
+        CheckConstraint("max_daily_loss > 0 AND max_drawdown > 0", name="ck_manual_authorization_loss_positive"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    release_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    capital_limit: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    max_order_notional: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    max_gross_exposure: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
+    max_single_weight: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
+    max_daily_items: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_daily_loss: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    max_drawdown: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False)
+    revocation_policy: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    revocation_policy_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    valid_from: Mapped[str] = mapped_column(String(40), nullable=False)
+    valid_until: Mapped[str] = mapped_column(String(40), nullable=False)
+    first_fill_event_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    first_fill_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    approved_by: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    approved_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    revoked_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    updated_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ResearchHoldoutWindow(Base):
+    """Sealed holdout lifecycle; opening is itself an append-only access fact."""
+    __tablename__ = "research_holdout_window"
+    __table_args__ = (
+        CheckConstraint("status IN ('sealed', 'opened', 'invalidated', 'completed')", name="ck_holdout_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    dataset_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    data_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    end_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    policy_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="sealed")
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    opened_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    invalidated_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+
+
+class ResearchHoldoutAccess(Base):
+    """Append-only record of every holdout open/read attempt."""
+    __tablename__ = "research_holdout_access"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    window_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    accessed_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    accessed_by: Mapped[str] = mapped_column(String(80), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(160), nullable=False)
+    result_exposed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
 class ManualExecutionEvent(Base):
     """An immutable user-reported execution fact, never a broker submission."""
     __tablename__ = "manual_execution_event"

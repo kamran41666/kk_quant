@@ -690,3 +690,12 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - 新增原价输入组合回测`run_manual_daily_portfolio`：从注入的归档日历和bars读取，不访问网络/数据库；同日只在收盘捕获signal，后续交易日开盘使用信号，退出使用收盘；共享现金、A股整手买入、全部持仓零股清仓、停牌/缺bar审计、baseline/stress费用和结果hash均为可重放结果。输出明确为研究结果，不产生paper或manual成交。
 - 因子实验新增完整`label_spec`身份并保留旧默认open/open标签；SQLite旧库由`init_db()`追加`factor_experiment.label_spec`，旧研究结果不被重解释。
 - 实际验证：M3专项与因子/研究回归共71项通过；结果hash重复运行一致。下一阶段需实现M4发布晋级、真实holdout访问证据和人工授权状态门。
+
+## 21. M4实施记录
+
+### 2026-09-09 22:51 CST
+
+- 新增`StrategyRelease`不可变发布包模型和`ManualDailyPromotionPolicyV1`证据评估。manual_ready需要研究哈希/训练/验证、baseline/stress组合指标、重放一致性、holdout访问、30日观察及P0/P1状态全部满足；缺失证据默认失败，不能从旧paper记录推导资格。
+- 新增holdout生命周期：创建即`sealed`，读取会追加`ResearchHoldoutAccess`并转`opened`，可完成或失效，不能重新sealed；已完成/失效窗口禁止继续读取或完成。
+- 新增账户级`ManualExecutionAuthorization`和服务：限额、有效期、撤销policy必须完整；只能对`manual_ready`发布创建，用户批准写`AuditEvent`，首笔成交后才进入`active`，撤销同样写审计。授权不保存券商凭证，也不提供下单接口。
+- 实际验证：M4专项7项通过，Ruff通过；后续阶段需将授权绑定到日决策、计划和人工成交事件。

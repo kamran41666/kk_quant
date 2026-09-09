@@ -17,6 +17,14 @@
 
 ## 记录
 
+### 2026-09-09 22:51 CST — M4发布晋级、holdout与人工授权
+
+- Git：`phase4-factor-develop`；最新本地提交`1e59cfd`，包含M3；M2和M3 push均因网络连接GitHub失败，未确认远端同步；M4尚未提交。已有未跟踪目录未触碰。
+- 修改：新增`StrategyRelease`、`ManualExecutionAuthorization`、`ResearchHoldoutWindow/Access`模型；新增发布证据门、`ManualDailyPromotionPolicyV1`、sealed→opened→completed/invalidated holdout生命周期、账户级限额授权、用户批准/首笔成交激活/撤销和审计。发布与授权分离，manual_ready要求研究、组合、holdout、30日观察证据全部满足，历史paper结果不自动继承。
+- 验证：M4专项`7 passed`；Ruff通过。M4后的后端全量尚未再次运行。
+- 边界：M4尚未接入日决策/计划、HTTP/UI、worker/备份/日终复盘、30日真实前瞻观察和首次人工成交；本地三个阶段提交待网络恢复后补推。live路径仍关闭。
+- 入口：[`M4实施记录`](docs/manual-daily-trading-implementation-plan.md#21-m4实施记录)、[`晋级服务`](server/services/strategy_promotion.py)、[`授权服务`](server/services/manual_authorization.py)、[`holdout服务`](server/services/research_holdout.py)。
+
 ### 2026-09-09 22:44 CST — M3日频标签、策略包与双批组合回测
 
 - Git：`phase4-factor-develop`；M2本地提交为`6f8c4db`，两次push均因外网连接失败未同步远端；本条M3尚未提交。已有`.playwright-cli/`、`output/`、`tmp_*`未跟踪目录继续保留。
