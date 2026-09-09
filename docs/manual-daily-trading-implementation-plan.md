@@ -699,3 +699,12 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - 新增holdout生命周期：创建即`sealed`，读取会追加`ResearchHoldoutAccess`并转`opened`，可完成或失效，不能重新sealed；已完成/失效窗口禁止继续读取或完成。
 - 新增账户级`ManualExecutionAuthorization`和服务：限额、有效期、撤销policy必须完整；只能对`manual_ready`发布创建，用户批准写`AuditEvent`，首笔成交后才进入`active`，撤销同样写审计。授权不保存券商凭证，也不提供下单接口。
 - 实际验证：M4专项7项通过，Ruff通过；后续阶段需将授权绑定到日决策、计划和人工成交事件。
+
+## 22. M5实施记录
+
+### 2026-09-09 22:59 CST
+
+- 新增`DailyDecision`、`ManualCohort`、`ManualExecutionPlan`和`ManualExecutionItem`持久模型，决策按输入变化递增revision并将旧记录置为`superseded`；cohort固定两个sleeve、由注入交易日历计算T+1进入/T+2退出。
+- 新增数据就绪和风险preflight，交易日历不完整、行情缺失、账户对账或授权状态不满足时返回阻断；风险检查覆盖确认现金、单笔金额、单票权重、总敞口和每日项数。
+- M1纯计划输出可持久化为人工清单；计划项含参考价、来源、时间、预计费用、顺序和`confirmed_cash`依赖。查看计划只改变计划状态，不写成交事件，不更新人工账本，不触碰Paper表。
+- 实际验证：M5专项2项通过；下一阶段实现统一HTTP幂等边界和人工操作台，所有操作继续显示`user_reported`且不提供提交券商按钮。

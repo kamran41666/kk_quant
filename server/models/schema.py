@@ -702,6 +702,142 @@ class ResearchHoldoutAccess(Base):
     result_exposed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
+class DailyDecision(Base):
+    """Immutable daily signal decision bound to one release and authorization."""
+    __tablename__ = "daily_decision"
+    __table_args__ = (
+        UniqueConstraint("authorization_id", "signal_date", "release_id", "revision", name="uq_manual_daily_decision_revision"),
+        UniqueConstraint("decision_hash", name="uq_manual_daily_decision_hash"),
+        CheckConstraint("action IN ('hold', 'rebalance', 'reduce', 'flat', 'blocked', 'reconcile')", name="ck_manual_decision_action"),
+        CheckConstraint("status IN ('draft', 'ready', 'blocked', 'superseded', 'reviewed')", name="ck_manual_decision_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    release_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    authorization_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    signal_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    data_as_of: Mapped[str] = mapped_column(String(40), nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    risk_state: Mapped[str] = mapped_column(String(30), nullable=False, default="normal")
+    target_weights: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    reason_codes: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    supersedes_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualCohort(Base):
+    """One of the two rolling manual sleeves for a daily decision."""
+    __tablename__ = "manual_cohort"
+    __table_args__ = (
+        UniqueConstraint("authorization_id", "signal_date", "sleeve_index", name="uq_manual_cohort_sleeve"),
+        CheckConstraint("sleeve_index IN (0, 1)", name="ck_manual_cohort_sleeve"),
+        CheckConstraint("status IN ('planned', 'entering', 'open', 'exiting', 'closed', 'blocked', 'cancelled')", name="ck_manual_cohort_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    authorization_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    decision_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    signal_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    planned_entry_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    planned_exit_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    sleeve_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    budget: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="planned")
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    closed_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+
+
+class ManualExecutionPlan(Base):
+    """Versioned human-readable order list; never an order submission."""
+    __tablename__ = "manual_execution_plan"
+    __table_args__ = (
+        UniqueConstraint("authorization_id", "execution_date", "execution_session", "plan_type", "version", name="uq_manual_plan_version"),
+        UniqueConstraint("idempotency_key", name="uq_manual_plan_idempotency"),
+        UniqueConstraint("plan_hash", name="uq_manual_plan_hash"),
+        CheckConstraint("execution_session IN ('open', 'close')", name="ck_manual_plan_session"),
+        CheckConstraint("plan_type IN ('entry', 'exit', 'rebalance', 'risk', 'mixed')", name="ck_manual_plan_type"),
+        CheckConstraint("status IN ('draft', 'ready', 'viewed', 'partially_filled', 'completed', 'expired', 'cancelled', 'blocked', 'superseded')", name="ck_manual_plan_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    decision_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    authorization_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    execution_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    execution_session: Mapped[str] = mapped_column(String(10), nullable=False)
+    plan_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    account_snapshot_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    quote_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    authorization_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    trading_rule_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    trading_rule_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    trading_rule_effective_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    cash_before: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    expected_cash_after: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    expected_fees: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    viewed_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    supersedes_plan_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    updated_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualExecutionItem(Base):
+    """One planned human action; it is not an execution receipt."""
+    __tablename__ = "manual_execution_item"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "cohort_id", "code", "side", name="uq_manual_plan_cohort_code_side"),
+        UniqueConstraint("idempotency_key", name="uq_manual_item_idempotency"),
+        CheckConstraint("side IN ('buy', 'sell')", name="ck_manual_item_side"),
+        CheckConstraint("phase IN ('sell', 'buy')", name="ck_manual_item_phase"),
+        CheckConstraint("cash_dependency_type = 'confirmed_cash' OR cash_dependency_type IS NULL", name="ck_manual_item_cash_dependency"),
+        CheckConstraint("status IN ('planned', 'submitted', 'cancelled', 'skipped', 'partially_filled', 'filled', 'unfilled', 'rejected', 'expired', 'blocked')", name="ck_manual_item_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    plan_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    cohort_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    phase: Mapped[str] = mapped_column(String(8), nullable=False)
+    pre_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
+    available_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
+    available_cash_before: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    target_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    target_weight: Mapped[Decimal] = mapped_column(Numeric(12, 8), nullable=False, default=Decimal("0"))
+    planned_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    cash_required: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    cash_dependency_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    depends_on_item_ids: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    reference_price: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    price_source: Mapped[str] = mapped_column(String(80), nullable=False)
+    price_as_of: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    min_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True)
+    max_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True)
+    expected_notional: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    estimated_commission: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    estimated_tax: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    estimated_other_fee: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    order_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason_codes: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="planned")
+    confirmed_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    updated_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
 class ManualExecutionEvent(Base):
     """An immutable user-reported execution fact, never a broker submission."""
     __tablename__ = "manual_execution_event"

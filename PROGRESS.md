@@ -17,6 +17,14 @@
 
 ## 记录
 
+### 2026-09-09 22:59 CST — M5日决策、双cohort与持久计划
+
+- Git：`phase4-factor-develop`；最新本地提交`be2be68`，M4 push仍因网络连接重置未同步；M5尚未提交。已有未跟踪目录未触碰。
+- 修改：新增`DailyDecision`、`ManualCohort`、`ManualExecutionPlan/Item`模型；新增数据就绪、风险前置检查、日决策revision、T+1/T+2双cohort和纯计划持久化/标记已读服务。计划落库只写`manual_*`，买入只依赖确认现金，买卖项按顺序保存；标记已读不会改变影子现金/持仓。
+- 验证：M5集成专项`2 passed`，Ruff通过；M5后的后端全量尚未再次运行。
+- 边界：M5尚未提供HTTP/API和前端操作台、worker/备份/复盘、30日前瞻纸面和首次人工执行；M2—M4提交仍待网络恢复补推。live路径仍`can_submit_live=false`。
+- 入口：[`M5实施记录`](docs/manual-daily-trading-implementation-plan.md#22-m5实施记录)、[`计划持久化`](server/services/manual_plan_persistence.py)、[`人工决策`](server/services/manual_decision.py)。
+
 ### 2026-09-09 22:51 CST — M4发布晋级、holdout与人工授权
 
 - Git：`phase4-factor-develop`；最新本地提交`1e59cfd`，包含M3；M2和M3 push均因网络连接GitHub失败，未确认远端同步；M4尚未提交。已有未跟踪目录未触碰。
