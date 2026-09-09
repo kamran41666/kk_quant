@@ -1,5 +1,6 @@
 """M8 prospective-paper lifecycle tests, including the hard real-forward gate."""
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 
 import pytest
 
@@ -34,8 +35,8 @@ def _release(db_session):
     return release
 
 
-def _hash(char: str) -> str:
-    return char * 64
+def _hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def test_synthetic_engineering_can_validate_code_but_never_pass_pilot(db_session):
@@ -53,7 +54,7 @@ def test_synthetic_engineering_can_validate_code_but_never_pass_pilot(db_session
         "research_passed": True, "portfolio_passed": True, "holdout_passed": True,
         "replay_consistent": True, "risk_rules_passed": True, "data_health_passed": True,
         "p0_count": 0, "p1_count": 0, "max_drawdown": "0", "daily_loss_breaches": 0,
-    })
+    }, calendar=WeekdayCalendar())
     assert finalized.status == "failed"
     assert "synthetic_engineering_not_eligible_for_pass" in finalized.blocked_reason
 
@@ -87,7 +88,45 @@ def test_real_forward_data_arrival_and_exact_30_days_gate(db_session):
         "research_passed": True, "portfolio_passed": True, "holdout_passed": True,
         "replay_consistent": True, "risk_rules_passed": True, "data_health_passed": True,
         "p0_count": 0, "p1_count": 0, "max_drawdown": "0.10", "daily_loss_breaches": 0,
-    })
+    }, calendar=WeekdayCalendar())
     assert finalized.status == "passed"
     assert finalized.report_hash and len(finalized.report_hash) == 64
     assert db_session.get(StrategyRelease, release.id).status == "holdout_passed"
+
+
+def test_real_forward_finalize_rejects_non_consecutive_observation_window(db_session):
+    release = _release(db_session)
+    pilot = create_pilot(
+        db_session, release_id=release.id, strategy_fingerprint="c" * 64,
+        start_date="2024-01-01", data_mode="real_forward", pilot_key="pilot-real-gap",
+    )
+    days = []
+    current = date(2024, 1, 2)
+    while len(days) < 31:
+        if WeekdayCalendar().is_trading_day(current):
+            days.append(current)
+        current += timedelta(days=1)
+    for index, day in enumerate(days[:10] + days[11:]):
+        record_pilot_observation(
+            db_session, pilot.id, observation_date=day, data_as_of=day,
+            received_at=datetime(day.year, day.month, day.day, 8, tzinfo=timezone.utc),
+            input_hash=_hash(f"gap-input-{index}"), signal_hash=_hash(f"gap-signal-{index}"),
+            observed_action="hold", reconciled=True, idempotency_key=f"pilot-gap-{index}", calendar=WeekdayCalendar(),
+        )
+    finalized = finalize_pilot(db_session, pilot.id, evidence={
+        "research_passed": True, "portfolio_passed": True, "holdout_passed": True,
+        "replay_consistent": True, "risk_rules_passed": True, "data_health_passed": True,
+        "p0_count": 0, "p1_count": 0, "max_drawdown": "0", "daily_loss_breaches": 0,
+    }, calendar=WeekdayCalendar())
+    assert finalized.status == "failed"
+    assert "exact_trading_day_sequence" in finalized.blocked_reason
+
+
+def test_finalize_rejects_malformed_numeric_evidence(db_session):
+    release = _release(db_session)
+    pilot = create_pilot(
+        db_session, release_id=release.id, strategy_fingerprint="d" * 64,
+        start_date="2024-01-01", data_mode="synthetic_engineering", pilot_key="pilot-bad-evidence",
+    )
+    with pytest.raises(ManualPilotError, match="p0_count_must_be_integer"):
+        finalize_pilot(db_session, pilot.id, evidence={"p0_count": "not-an-int"}, calendar=WeekdayCalendar())

@@ -441,7 +441,12 @@ def _pilot(row: ManualProspectivePilot) -> dict[str, Any]:
 
 
 def _pilot_calendar(value: Any) -> TradingCalendar:
-    moment = value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
+    if isinstance(value, datetime):
+        moment = value.date()
+    elif isinstance(value, date):
+        moment = value
+    else:
+        moment = date.fromisoformat(str(value)[:10])
     calendar = TradingCalendar(start_year=moment.year, end_year=moment.year + 1)
     report = calendar.ensure_coverage(moment, moment + timedelta(days=90))
     if not report.get("complete"):
@@ -481,7 +486,10 @@ def add_pilot_observation(pilot_id: str, req: PilotObservationRequest, db: Sessi
 @router.post("/pilots/{pilot_id}/finalize", status_code=201)
 def finalize_pilot_report(pilot_id: str, req: PilotFinalizeRequest, db: Session = Depends(get_db)):
     try:
-        row = finalize_pilot(db, pilot_id, evidence=req.evidence)
+        pilot = db.get(ManualProspectivePilot, pilot_id)
+        if pilot is None:
+            raise ManualPilotError("manual_pilot_not_found")
+        row = finalize_pilot(db, pilot_id, evidence=req.evidence, calendar=_pilot_calendar(pilot.start_date))
         return _envelope(_pilot(row), evidence_status=row.status)
     except (ManualPilotError, ValueError) as exc:
         raise _error(exc) from exc

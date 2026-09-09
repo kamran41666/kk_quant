@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -33,6 +33,8 @@ class ManualProspectivePolicyV1:
     def __post_init__(self) -> None:
         if self.target_days != 30:
             raise ManualPilotError("manual_pilot_target_days_must_be_30")
+        if self.maximum_daily_loss_breaches < 0:
+            raise ManualPilotError("maximum_daily_loss_breaches_must_not_be_negative")
         value = self.maximum_drawdown if isinstance(self.maximum_drawdown, Decimal) else Decimal(str(self.maximum_drawdown))
         if not value.is_finite() or value < 0 or value > 1:
             raise ManualPilotError("maximum_drawdown_must_be_ratio")
@@ -84,6 +86,47 @@ def _return(value: Any) -> Decimal:
     if not result.is_finite():
         raise ManualPilotError("actual_return_must_be_finite")
     return result.quantize(Decimal("0.0000000001"))
+
+
+def _evidence_int(evidence: Mapping[str, Any], field: str, default: int) -> int:
+    value = evidence.get(field, default)
+    if isinstance(value, bool):
+        raise ManualPilotError(f"{field}_must_be_integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ManualPilotError(f"{field}_must_be_integer") from exc
+    if str(value).strip() != str(result) and not isinstance(value, int):
+        raise ManualPilotError(f"{field}_must_be_integer")
+    return result
+
+
+def _evidence_decimal(evidence: Mapping[str, Any], field: str, default: str) -> Decimal:
+    try:
+        result = Decimal(str(evidence.get(field, default)))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ManualPilotError(f"{field}_must_be_numeric") from exc
+    if not result.is_finite():
+        raise ManualPilotError(f"{field}_must_be_finite")
+    return result
+
+
+def _expected_trading_days(start_date: date, target_days: int, calendar: CalendarLike) -> list[date]:
+    expected: list[date] = []
+    cursor = start_date + timedelta(days=1)
+    # A 30-trading-day window should fit comfortably in this bound even with
+    # exchange holidays. A bound keeps a broken calendar from looping forever.
+    deadline = start_date + timedelta(days=3660)
+    try:
+        while cursor <= deadline and len(expected) < target_days:
+            if calendar.is_trading_day(cursor):
+                expected.append(cursor)
+            cursor += timedelta(days=1)
+    except Exception as exc:
+        raise ManualPilotError("TRADING_CALENDAR_UNAVAILABLE") from exc
+    if len(expected) != target_days:
+        raise ManualPilotError("TRADING_CALENDAR_UNAVAILABLE")
+    return expected
 
 
 def create_pilot(
@@ -199,6 +242,7 @@ def finalize_pilot(
     pilot_id: str,
     *,
     evidence: Mapping[str, Any],
+    calendar: CalendarLike,
     policy: ManualProspectivePolicyV1 | None = None,
 ) -> ManualProspectivePilot:
     pilot = db.get(ManualProspectivePilot, pilot_id)
@@ -212,6 +256,8 @@ def finalize_pilot(
     ).order_by(ManualPilotObservation.observation_date.asc())).all()
     pilot.observation_days = len(observations)
     pilot.valid_days = sum(1 for item in observations if item.reconciled)
+    expected_days = _expected_trading_days(_date(pilot.start_date, "pilot_start_date"), pilot.target_days, calendar)
+    observed_days = [_date(item.observation_date, "observation_date") for item in observations]
     required = {
         "research_passed": bool(evidence.get("research_passed")),
         "portfolio_passed": bool(evidence.get("portfolio_passed")),
@@ -219,10 +265,11 @@ def finalize_pilot(
         "replay_consistent": bool(evidence.get("replay_consistent")),
         "risk_rules_passed": bool(evidence.get("risk_rules_passed")),
         "data_health_passed": bool(evidence.get("data_health_passed")),
-        "all_days_reconciled": pilot.valid_days == pilot.target_days,
-        "no_p0_p1": int(evidence.get("p0_count", 1)) == 0 and int(evidence.get("p1_count", 1)) == 0,
-        "daily_loss_breaches": int(evidence.get("daily_loss_breaches", 1)) == policy.maximum_daily_loss_breaches,
-        "drawdown_gate": Decimal(str(evidence.get("max_drawdown", "1"))) <= policy.maximum_drawdown,
+        "all_days_reconciled": pilot.valid_days == pilot.target_days and len(observations) == pilot.target_days,
+        "exact_trading_day_sequence": observed_days == expected_days,
+        "no_p0_p1": _evidence_int(evidence, "p0_count", 1) == 0 and _evidence_int(evidence, "p1_count", 1) == 0,
+        "daily_loss_breaches": _evidence_int(evidence, "daily_loss_breaches", 1) == policy.maximum_daily_loss_breaches,
+        "drawdown_gate": _evidence_decimal(evidence, "max_drawdown", "1") <= policy.maximum_drawdown,
     }
     failed = [name for name, passed in required.items() if not passed]
     if pilot.data_mode == "synthetic_engineering":
