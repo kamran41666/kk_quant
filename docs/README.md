@@ -15,6 +15,8 @@
 | 研究质量 | [`phase-4e-research-quality-plan.md`](phase-4e-research-quality-plan.md) | 数据证据、样本外、成本和观察门；完成状态以 Progress 为准 |
 | 自动因子路线 | [`research-runs/forum-502342-factor-mining-review.md`](research-runs/forum-502342-factor-mining-review.md) | 自动候选、回测反馈、审查缺陷和人工日频执行设计 |
 | 因子研究工作流 | [`factor-research-workflow.md`](factor-research-workflow.md) | 受限表达式、持久候选/实验、worker、接口和当前评价边界 |
+| 日频人工执行 | [`manual-daily-trading-implementation-plan.md`](manual-daily-trading-implementation-plan.md) | 用户人工买卖方向下的研究晋级、两批日频计划、成交回填、影子账本和实施阶段 |
+| 人工执行语言 | [`CONTEXT.md`](../CONTEXT.md) | 修改人工执行领域对象、状态或接口前统一术语 |
 
 ## 数据与研究
 

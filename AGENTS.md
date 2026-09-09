@@ -11,6 +11,7 @@
    - 策略协议或新增策略：看 [`docs/strategy-protocol-v2.md`](docs/strategy-protocol-v2.md) 和 [`docs/strategy-library/README.md`](docs/strategy-library/README.md)。
    - 因子发现、因子评价或自动研究：看 [`docs/research-runs/forum-502342-factor-mining-review.md`](docs/research-runs/forum-502342-factor-mining-review.md) 与 [`docs/research-runs/factor-materials-v1.md`](docs/research-runs/factor-materials-v1.md)。
    - 纸面观察、实盘控制面或券商适配：看 [`docs/phase-4c-validation.md`](docs/phase-4c-validation.md)、[`docs/phase-4d-evidence-gated-observation.md`](docs/phase-4d-evidence-gated-observation.md) 和 [`docs/phase-3-plan.md`](docs/phase-3-plan.md)。
+   - A股日频人工执行、策略晋级、成交回填或日终循环：先看 [`CONTEXT.md`](CONTEXT.md) 和 [`docs/manual-daily-trading-implementation-plan.md`](docs/manual-daily-trading-implementation-plan.md)。
    - 不确定文档用途或时效：查 [`docs/README.md`](docs/README.md)，以其中状态分类为准。
 4. 在修改前核对实现和测试。事实优先级为：当前代码/运行结果/数据 manifest → `PROGRESS.md` 中后续变更 → 最新状态审查与当前专业规范 → 历史验收和施工记录。历史测试数字只证明当时版本。
 
