@@ -34,6 +34,7 @@ const navItems = [
   { path: '/', label: '总览', icon: 'M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z' },
   { path: '/market', label: '市场行情', icon: 'M4 18 9 13l3 3 7-8m-5 0h5v5' },
   { path: '/data', label: '研究数据', icon: 'M5 6c0-1.1 3.1-2 7-2s7 .9 7 2-3.1 2-7 2-7-.9-7-2Zm0 0v6c0 1.1 3.1 2 7 2s7-.9 7-2V6m-14 6v6c0 1.1 3.1 2 7 2s7-.9 7-2v-6' },
+  { path: '/factors', label: '因子研究', icon: 'M5 5h14M7 9h10M9 13h6m-4 4h2' },
   { path: '/strategies', label: '策略', icon: 'M6 4h12v16H6V4Zm3 4h6M9 12h6m-6 4h4' },
   { path: '/backtest', label: '回测', icon: 'M12 3a9 9 0 1 0 9 9M12 7v5l3 2m2-10v5h-5' },
   { path: '/paper', label: '模拟交易', icon: 'M4 19V9m5 10V5m6 14v-7m5 7V3' },
@@ -132,7 +133,7 @@ const navItems = [
     backdrop-filter: blur(12px);
   }
   .brand-block, .nav-footer, .skip-link { display: none; }
-  .nav-list { display: grid; height: 100%; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; }
+  .nav-list { display: grid; height: 100%; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 1px; }
   .nav-item {
     min-width: 0;
     min-height: 0;

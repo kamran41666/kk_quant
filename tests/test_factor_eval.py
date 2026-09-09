@@ -90,6 +90,14 @@ class TestICAnalysis:
         # < 3 valid stocks per cross-section -> 所有期都被跳过
         assert len(ic) == 0
 
+    def test_calc_ic_skips_constant_cross_sections_without_runtime_warning(self):
+        dates = pd.date_range("2024-03-01", periods=2, freq="B")
+        factor = pd.DataFrame([[1, 1, 1], [1, 2, 3]], index=dates, columns=list("ABC"))
+        returns = pd.DataFrame([[1, 2, 3], [0, 0, 0]], index=dates, columns=list("ABC"))
+        with np.errstate(all="raise"):
+            ic = calc_ic(factor, returns, method="rank")
+        assert ic.empty
+
     def test_ic_summary(self, sample_data):
         factor, fwd_ret = sample_data
         ic = calc_ic(factor, fwd_ret, method="rank")

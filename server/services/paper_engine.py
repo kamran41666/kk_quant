@@ -71,6 +71,9 @@ class SimulationAccount:
             if last:
                 self._portfolio = Portfolio(initial_capital=self._initial_capital)
                 self._portfolio._cash = last.cash
+                self._portfolio._previous_total = last.total_value
+                self._portfolio._current_total = last.total_value
+                snapshot_day = date.fromisoformat(last.date[:10])
                 # Load positions
                 positions = (
                     db.query(PaperPositionModel)
@@ -79,15 +82,42 @@ class SimulationAccount:
                 )
                 for pp in positions:
                     from quant_engine.backtest.types import Position
-                    # Reconstruct position (unlock_date unknown, assume unlocked)
+                    stored_unlock = None
+                    if pp.unlock_date:
+                        try:
+                            stored_unlock = date.fromisoformat(pp.unlock_date)
+                        except ValueError:
+                            stored_unlock = None
+                    # Older rows lack lot metadata. A same-day restore must be
+                    # conservative; an older snapshot is already past T+1.
+                    fallback_unlock = (
+                        snapshot_day + timedelta(days=1)
+                        if snapshot_day >= _trade_date()
+                        else snapshot_day
+                    )
+                    locked_lots = []
+                    try:
+                        payload = json.loads(pp.locked_lots or "[]")
+                        for item in payload if isinstance(payload, list) else []:
+                            unlock = date.fromisoformat(str(item["unlock_date"]))
+                            shares = int(item["shares"])
+                            if shares > 0:
+                                locked_lots.append((unlock, shares))
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        locked_lots = []
+                    unlock_date = stored_unlock or fallback_unlock
+                    if locked_lots:
+                        unlock_date = max(unlock for unlock, _ in locked_lots)
                     pos = Position(
                         code=pp.code,
                         shares=pp.shares,
                         avg_cost=pp.avg_cost,
                         market_value=pp.market_value,
-                        unlock_date=_trade_date(),  # assume already unlocked
+                        unlock_date=unlock_date,
                     )
                     self._portfolio._positions[pp.code] = pos
+                    if locked_lots:
+                        self._portfolio._locked_lots[pp.code] = locked_lots
         finally:
             db.close()
 
@@ -97,8 +127,10 @@ class SimulationAccount:
         n_pos = len([p for p in self._portfolio.positions.values() if p.shares > 0])
 
         # Daily return: compare with previous day
+        day_text = dt.isoformat()
         prev = (
             db.query(PaperSnapshot)
+            .filter(PaperSnapshot.date < day_text)
             .order_by(PaperSnapshot.date.desc())
             .first()
         )
@@ -106,8 +138,17 @@ class SimulationAccount:
         if prev and prev.total_value > 0:
             daily_ret = (total_value - prev.total_value) / prev.total_value
 
+        # A retry for the same date replaces that date's snapshot atomically
+        # within the caller transaction instead of creating duplicate history.
+        db.query(PaperPositionModel).filter(
+            PaperPositionModel.snapshot_date == day_text
+        ).delete(synchronize_session=False)
+        db.query(PaperSnapshot).filter(
+            PaperSnapshot.date == day_text
+        ).delete(synchronize_session=False)
+
         snapshot = PaperSnapshot(
-            date=dt.isoformat(),
+            date=day_text,
             cash=self._portfolio.cash,
             market_value=self._portfolio.market_value,
             total_value=total_value,
@@ -121,15 +162,25 @@ class SimulationAccount:
         total_mv = self._portfolio.market_value
         for code, pos in self._portfolio.positions.items():
             if pos.shares > 0:
+                locked_lots = [
+                    {"unlock_date": unlock.isoformat(), "shares": shares}
+                    for unlock, shares in self._portfolio._locked_lots.get(code, [])
+                    if shares > 0 and unlock > dt
+                ]
                 pp = PaperPositionModel(
-                    snapshot_date=dt.isoformat(),
+                    snapshot_date=day_text,
                     code=code,
                     shares=pos.shares,
                     avg_cost=pos.avg_cost,
                     market_value=pos.market_value,
                     weight=pos.market_value / total_mv if total_mv > 0 else 0.0,
+                    unlock_date=pos.unlock_date.isoformat(),
+                    locked_lots=json.dumps(locked_lots, sort_keys=True),
                 )
                 db.add(pp)
+        # SessionLocal uses autoflush=False. Materialize the replacement rows
+        # so another same-day save in the same transaction can delete them.
+        db.flush()
 
     def run_daily(self, dt: Optional[date] = None) -> dict:
         """Execute one day's paper trading.

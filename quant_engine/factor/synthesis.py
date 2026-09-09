@@ -166,19 +166,26 @@ def neutralize(
         ind = ind[common]
         mcap = mcap[common]
 
-        # 行业哑变量
+        # 行业哑变量。drop_first 与显式截距配套，避免基准行业的
+        # 公共水平被错误地压到市值系数中。
         ind_dummies = pd.get_dummies(ind, drop_first=True, dtype=float)
         ind_dummies.index = common
 
-        # log 市值（剔除 <=0 的异常值）
-        mcap_clean = mcap.replace([np.inf, -np.inf], np.nan)
-        log_mcap = np.log(mcap_clean.clip(lower=1e-10))
+        # 只有有限正市值才有可解释的对数暴露。零或负值必须退出
+        # 当日拟合，不能裁成极端有限值后污染其他证券的残差。
+        mcap_clean = pd.to_numeric(mcap, errors="coerce").replace(
+            [np.inf, -np.inf], np.nan
+        )
+        log_mcap = np.log(mcap_clean.where(mcap_clean > 0))
 
         # 设计矩阵
-        X = pd.concat([ind_dummies, log_mcap.rename("log_mcap")], axis=1)
+        intercept = pd.Series(1.0, index=common, name="intercept")
+        X = pd.concat(
+            [intercept, ind_dummies, log_mcap.rename("log_mcap")], axis=1
+        )
 
         # 有效行
-        valid = a.notna() & X.notna().all(axis=1)
+        valid = a.notna() & ind.notna() & X.notna().all(axis=1)
         n_valid = int(valid.sum())
         if n_valid < X.shape[1] + 1:
             continue

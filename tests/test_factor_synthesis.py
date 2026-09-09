@@ -224,20 +224,37 @@ class TestNeutralize:
         result = neutralize(alpha, ind, mcap)
         assert np.isnan(result.loc[alpha.index[0], alpha.columns[0]])
 
-    def test_neutralize_invalid_mcap_handled(self):
-        """市值含 0/负值时应不崩溃。"""
+    def test_neutralize_invalid_mcap_is_excluded(self):
+        """非正市值必须退出拟合并保持 NaN。"""
         dates = pd.date_range("2024-01-01", periods=3, freq="B")
         codes = [f"S{i}" for i in range(30)]
         alpha = pd.DataFrame(np.random.randn(3, 30), index=dates, columns=codes)
         industry = pd.DataFrame("Tech", index=dates, columns=codes)
-        mcap = pd.DataFrame(
-            np.random.choice([1e8, -1, 0, 1e10], size=(3, 30)),
-            index=dates,
-            columns=codes,
-        )
+        mcap = pd.DataFrame(1e8, index=dates, columns=codes)
+        mcap.iloc[0, 0] = 0
+        mcap.iloc[1, 1] = -1
+        mcap.iloc[2, 2] = np.inf
 
         result = neutralize(alpha, industry, mcap)
         assert result.shape == (3, 30)
+        assert np.isnan(result.iloc[0, 0])
+        assert np.isnan(result.iloc[1, 1])
+        assert np.isnan(result.iloc[2, 2])
+
+    def test_neutralize_removes_known_intercept_size_and_industry_exposure(self):
+        """精确线性暴露的残差应只剩浮点误差。"""
+        dates = pd.DatetimeIndex(["2024-01-02"])
+        codes = [f"S{i:02d}" for i in range(12)]
+        log_mcap = np.arange(1.0, 13.0)
+        industries = np.array(["A"] * 6 + ["B"] * 6)
+        alpha_values = 3.0 + 2.0 * log_mcap + (industries == "B") * 5.0
+        alpha = pd.DataFrame([alpha_values], index=dates, columns=codes)
+        industry = pd.DataFrame([industries], index=dates, columns=codes)
+        market_cap = pd.DataFrame([np.exp(log_mcap)], index=dates, columns=codes)
+
+        result = neutralize(alpha, industry, market_cap)
+
+        assert np.nanmax(np.abs(result.to_numpy())) < 1e-10
 
     def test_neutralize_single_industry(self):
         """单一行业 — 行业哑变量会被 drop_first 移除，仅剩市值回归。"""

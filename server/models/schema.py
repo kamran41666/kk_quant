@@ -59,6 +59,61 @@ class Run(Base):
     completed_at: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
 
 
+class FactorCandidate(Base):
+    """A deduplicated restricted factor proposal; expression_spec is canonical JSON."""
+    __tablename__ = "factor_candidate"
+    __table_args__ = (
+        UniqueConstraint("expression_hash", name="uq_factor_candidate_expression_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    expression_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    expression_spec: Mapped[str] = mapped_column(Text, nullable=False)
+    hypothesis: Mapped[str] = mapped_column(Text, nullable=False)
+    direction: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    source: Mapped[str] = mapped_column(String(120), nullable=False)
+    parent_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="registered")
+    rejection_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_str)
+    updated_at: Mapped[str] = mapped_column(String(40), default=now_str)
+
+
+class FactorExperiment(Base):
+    """Persistent queue record for one candidate/data/protocol evaluation."""
+    __tablename__ = "factor_experiment"
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_id", "dataset_id", "start_date", "end_date",
+            "forward_horizon", name="uq_factor_experiment_identity",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    candidate_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    dataset_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    data_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    end_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    forward_horizon: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    stage: Mapped[str] = mapped_column(String(20), nullable=False, default="training")
+    evaluation_policy: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="queued", index=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    lease_until: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    result_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    artifact_dir: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_str)
+    started_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    completed_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    updated_at: Mapped[str] = mapped_column(String(40), default=now_str)
+
+
 class PaperSnapshot(Base):
     __tablename__ = "paper_snapshot"
 
@@ -81,6 +136,11 @@ class PaperPosition(Base):
     avg_cost: Mapped[float] = mapped_column(Float, default=0.0)
     market_value: Mapped[float] = mapped_column(Float, default=0.0)
     weight: Mapped[float] = mapped_column(Float, default=0.0)
+    # Legacy single-account snapshots now retain enough lot state to enforce
+    # T+1 after a process restart. Nullable unlock_date keeps older SQLite
+    # files readable; locked_lots is a JSON list of {unlock_date, shares}.
+    unlock_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    locked_lots: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
 
 
 class Deviation(Base):

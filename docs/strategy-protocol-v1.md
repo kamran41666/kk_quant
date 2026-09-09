@@ -1,5 +1,7 @@
 # kk_quant 统一策略协议 v1.0
 
+> 文档状态：旧协议，仅用于兼容和历史解释。新增或修改策略统一使用 [`strategy-protocol-v2.md`](strategy-protocol-v2.md)。
+
 策略必须实现 `quant_engine.backtest.strategy.Strategy`，并且只能通过本地 `strategies.<module>.<ClassName>` 类路径登记。
 
 ## 最小实现

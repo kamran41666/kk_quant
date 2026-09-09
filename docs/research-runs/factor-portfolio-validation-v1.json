@@ -1,0 +1,68 @@
+{
+  "protocol_version": "factor-portfolio-validation-v1",
+  "dataset_id": "ashare-inception-2014-v1/normalized-v2",
+  "data_content_hash": "d6ac8ba247888a1042f9c5360c2f88f3d49e479526ce1e2081b42d0aec1f187f",
+  "start_date": "2019-01-02",
+  "end_date": "2022-12-30",
+  "top_n": 50,
+  "gross_exposure": 0.9,
+  "rebalance_frequency": "weekly",
+  "validated": false,
+  "paper_authorized": false,
+  "runs": [
+    {
+      "candidate": "template_short_reversal_5",
+      "bundle_hash": "5945984e98866baf822f9b4763d509c1090244f4cb09853a86fe00a781af62b2",
+      "cost": "baseline",
+      "total_return": -0.16525489918300162,
+      "cagr": -0.04421108486686032,
+      "sharpe": -0.09946697417520854,
+      "max_drawdown": -0.39671872508963846,
+      "annual_turnover": 74.27862483298341,
+      "explicit_fees": 243806.215683,
+      "trade_count": 17871
+    },
+    {
+      "candidate": "template_short_reversal_5",
+      "bundle_hash": "5945984e98866baf822f9b4763d509c1090244f4cb09853a86fe00a781af62b2",
+      "cost": "stress",
+      "total_return": -0.5746219345260031,
+      "cagr": -0.19263770698721439,
+      "sharpe": -0.9012027382047499,
+      "max_drawdown": -0.6708659726853692,
+      "annual_turnover": 73.47180405462586,
+      "explicit_fees": 224546.879886,
+      "trade_count": 17624
+    },
+    {
+      "candidate": "template_volume_price_divergence_10",
+      "bundle_hash": "14a103485007c4b2f9de5a546d02931cd72edf712e029b027c36808b1a1c38e2",
+      "cost": "baseline",
+      "total_return": 0.08973725816500178,
+      "cagr": 0.021746240179503662,
+      "sharpe": 0.21238811781577124,
+      "max_drawdown": -0.31135713463149084,
+      "annual_turnover": 55.95938925993292,
+      "explicit_fees": 213052.40063500003,
+      "trade_count": 13988
+    },
+    {
+      "candidate": "template_volume_price_divergence_10",
+      "bundle_hash": "14a103485007c4b2f9de5a546d02931cd72edf712e029b027c36808b1a1c38e2",
+      "cost": "stress",
+      "total_return": -0.36823853904399995,
+      "cagr": -0.10860343325294064,
+      "sharpe": -0.5260227599805622,
+      "max_drawdown": -0.5103124438529445,
+      "annual_turnover": 55.40087022597556,
+      "explicit_fees": 212302.064804,
+      "trade_count": 13633
+    }
+  ],
+  "limitations": [
+    "portfolio period reuses previously opened factor validation data",
+    "no new sealed holdout is available in the current dataset",
+    "corporate action and market-rule evidence limitations remain",
+    "historical results do not authorize paper or live execution"
+  ]
+}

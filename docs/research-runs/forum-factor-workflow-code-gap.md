@@ -8,7 +8,7 @@
 
 结论先行：项目已经有可靠的面板因子计算、PIT 防未来约束、相关性筛选、Rank IC 统计、回测因子数据接口，以及有证据门禁的日频纸面观察；但当前因子候选是代码中固定登记的 5 个高级候选，不是自动发现。因子脚本是一次性批处理，不包含 LLM 表达式生成、受限表达式解释器、因子实验队列、多轮反馈、失败记忆或增量更新，也不会把通过相关性门的候选自动变成策略和回测。纸面观察可以在 D 日保存目标并在下一有效交易日自动产生模拟订单，但没有“次日人工下单清单 → 用户回填真实成交 → 差异对账”的手工实盘辅助闭环。
 
-真实交易边界必须保持原样：当前没有真实券商适配器，`paper_only=true`、`live_execution=false`、`can_submit_live=false`。项目状态对此有明确说明（[`project-status.md`](../project-status.md#L7-L27)）。
+真实交易边界必须保持原样：当前没有真实券商适配器，`paper_only=true`、`live_execution=false`、`can_submit_live=false`。建立记录机制时的状态审查对此有明确说明（[`project-state-audit-2026-09-09.md`](../project-state-audit-2026-09-09.md)）。
 
 ## 代码事实：因子候选、计算与筛选
 
@@ -27,7 +27,7 @@
 | 因子接入回测 | Strategy Protocol 可声明 `DataRequirement.factors`，解析输入列和预热窗口；`StrategyContext.get_factor` 返回当日 PIT 截面。 | 已接通计算接口。 | [`factor-materials-v1.md`](factor-materials-v1.md#L44-L65)、[`test_factor_pipeline.py`](../../tests/test_factor_pipeline.py#L152-L187) |
 | 候选组合、分层和正式回测 | 库内有 `quantile_analysis`、多因子合成及中性化函数，但 `run_factor_research.py` 没有调用它们，也没有创建 Strategy 或启动事件驱动回测。 | 基础函数部分具备；候选到策略的流水线缺失。 | [`evaluation.py`](../../quant_engine/factor/evaluation.py#L143-L205)、[`synthesis.py`](../../quant_engine/factor/synthesis.py#L42-L115)、[`run_factor_research.py`](../../scripts/run_factor_research.py#L65-L153) |
 
-当前 13 只本地证券的结果只能证明链路可运行。项目文档记录 5 个候选都过 0.70 相关性门，但 IC 很弱，并明确指出当前股票池不是历史动态成分，存在代表性和生存者偏差，不能晋级策略（[`factor-materials-v1.md`](factor-materials-v1.md#L21-L42)、[`project-status.md`](../project-status.md#L39-L47)）。
+当前 13 只本地证券的结果只能证明链路可运行。项目文档记录 5 个候选都过 0.70 相关性门，但 IC 很弱，并明确指出当前股票池不是历史动态成分，存在代表性和生存者偏差，不能晋级策略（[`factor-materials-v1.md`](factor-materials-v1.md)、[`project-state-audit-2026-09-09.md`](../project-state-audit-2026-09-09.md)）。
 
 另一个会影响自动扩展的细节是候选顺序。目录列表按名称排序，贪心门又把“先入选候选”加入后续比较，因此候选集合增大后，名称顺序可能影响最终集合。自动流水线需要冻结候选顺序或改成顺序无关的聚类/图选择，并把规则写入实验协议。
 
@@ -199,3 +199,7 @@ vol1 = pct.groupby(level="ticker", sort=False).shift(1)
 前 9 只在剔除非法行时本可得到零残差，但零市值行被映射到极端有限值后反转了系数并污染全部有效股票。建议先以 `market_cap > 0` 构造 valid mask，再取对数；零、负数和无穷值均保留为 NaN 并从当日回归剔除，同时在实验报告记录被剔除数量。截距修复和非法市值修复应分别测试，避免一个改动掩盖另一个问题。
 
 本附录复现命令使用项目 `.venv`、pandas/numpy 和当前 `quant_engine.factor.synthesis.neutralize`，没有修改业务代码。两个面板例子各 6 行，两个中性化例子各 10 只股票；针对跨股值、未来日期值、乘法符号、截距残差和非法市值残差的数值断言已通过。
+
+## 2026-09-09 实现状态更新
+
+本文件前文保留了审查发生时的代码事实。后续 P0/P1 快速迭代已经完成：中性化修复、500股隔离因子门户、受限表达式AST、候选/实验持久化、租约与失败重试、冻结数据校验、基线相关性、分层/稳定性训练门及结构化memory。PIT 基本面适配、模型候选生成、独立验证编排、正式因子策略回测和人工成交回填仍未实现。现行接口见 [`factor-research-workflow.md`](../factor-research-workflow.md)，最新变更按根目录 `PROGRESS.md` 继续记录。

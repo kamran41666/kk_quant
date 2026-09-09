@@ -1,5 +1,7 @@
 # Phase 4B：策略观察期（模拟）
 
+> 文档状态：Phase 4B 历史交付说明。其“基金/跨市场未开放”边界已由 Phase 4C/4D 后续实现更新；当前状态见 [`project-state-audit-2026-09-09.md`](project-state-audit-2026-09-09.md)，现行证据门见 [`phase-4d-evidence-gated-observation.md`](phase-4d-evidence-gated-observation.md)。
+
 ## 交付边界
 
 Phase 4B 提供一个由回测结果进入有限期模拟观察的控制面。用户选择已完成回测的策略、7 天或 30 天时长、账户资金分配比例，并可以启动、暂停、恢复和停止任务。观察记录和事件写入本地数据库，自动订单与用户手动订单共用 `paper_trading.submit_order`，因此继续遵守 A 股 100 股整手、T+1、现金、仓位、日亏损和报价时间戳校验。

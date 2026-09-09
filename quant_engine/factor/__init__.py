@@ -10,11 +10,29 @@ from quant_engine.factor.catalog import (
     get_factor_definition,
     list_factor_definitions,
 )
+from quant_engine.factor.expression import (
+    EXPRESSION_PROTOCOL_VERSION,
+    FactorExpressionError,
+    FactorExpressionSpec,
+)
+from quant_engine.factor.gates import FactorGateError, FactorGatePolicy
+from quant_engine.factor.generation import FactorCandidateGenerator, GENERATORS
+from quant_engine.factor.frozen import FrozenFactorStrategyBundle
+from quant_engine.factor.strategy import build_expression_rank_strategy
 
 __all__ = [
     "Factor",
     "FactorDefinition",
     "FactorMeta",
+    "FactorExpressionError",
+    "FactorExpressionSpec",
+    "EXPRESSION_PROTOCOL_VERSION",
+    "FactorGateError",
+    "FactorGatePolicy",
+    "FactorCandidateGenerator",
+    "GENERATORS",
+    "FrozenFactorStrategyBundle",
+    "build_expression_rank_strategy",
     "compute_factor",
     "get_factor_definition",
     "list_factor_definitions",

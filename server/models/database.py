@@ -37,6 +37,14 @@ def init_db():
             "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",
             "validation_only": "BOOLEAN NOT NULL DEFAULT 0",
         },
+        "paper_position": {
+            "unlock_date": "VARCHAR(10)",
+            "locked_lots": "TEXT NOT NULL DEFAULT '[]'",
+        },
+        "factor_experiment": {
+            "stage": "VARCHAR(20) NOT NULL DEFAULT 'training'",
+            "evaluation_policy": "TEXT NOT NULL DEFAULT '{}'",
+        },
         "paper_account_position": {
             "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",
             "last_price_source": "VARCHAR(80) NOT NULL DEFAULT 'manual_input'",

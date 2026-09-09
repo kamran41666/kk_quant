@@ -260,6 +260,7 @@ def resolve_strategy_data_requirements(
     params: Mapping[str, Any],
     *,
     supported: Mapping[str, tuple[str, str]],
+    factor_definitions: Mapping[str, Any] | None = None,
 ) -> tuple[ResolvedDataRequirement, ...]:
     """Resolve dynamic lookbacks and reject unsupported engine data contracts."""
     normalized_params = spec.validate_params(params)
@@ -283,13 +284,26 @@ def resolve_strategy_data_requirements(
             from quant_engine.factor import get_factor_definition
 
             for factor_name in requirement.factors:
-                try:
-                    definition = get_factor_definition(factor_name)
-                except KeyError as exc:
-                    raise StrategyProtocolError(str(exc)) from exc
-                if definition.category != "raw_fundamental":
-                    fields.extend(definition.inputs)
-                required_bars = max(required_bars, definition.window)
+                definition = (factor_definitions or {}).get(factor_name)
+                if definition is None:
+                    try:
+                        definition = get_factor_definition(factor_name)
+                    except KeyError as exc:
+                        raise StrategyProtocolError(str(exc)) from exc
+                category = getattr(definition, "category", None)
+                factor_fields = getattr(
+                    definition, "required_fields", getattr(definition, "inputs", ())
+                )
+                factor_window = getattr(
+                    definition, "lookback", getattr(definition, "window", None)
+                )
+                if not factor_fields or not isinstance(factor_window, int):
+                    raise StrategyProtocolError(
+                        f"factor definition is incomplete: {factor_name}"
+                    )
+                if category != "raw_fundamental":
+                    fields.extend(factor_fields)
+                required_bars = max(required_bars, factor_window)
         resolved.append(ResolvedDataRequirement(
             dataset=requirement.dataset,
             fields=tuple(dict.fromkeys(fields)),

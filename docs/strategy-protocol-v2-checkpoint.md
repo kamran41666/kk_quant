@@ -1,5 +1,7 @@
 # Strategy Protocol v2 改造检查点
 
+> 文档状态：已完成施工检查点。文中“尚未实现”和恢复顺序是当时快照；现行协议以 [`strategy-protocol-v2.md`](strategy-protocol-v2.md) 和代码为准。
+
 首次记录：2026-09-07；最近更新：2026-09-08（Asia/Shanghai）
 
 基础分支：`codex/phase-3-live-readiness`

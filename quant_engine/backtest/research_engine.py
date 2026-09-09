@@ -21,6 +21,7 @@ from quant_engine.backtest.recorder import Recorder
 from quant_engine.backtest.research_ledger import (
     ResearchAction, ResearchLedger, canonical_code, finite_positive, main_board,
 )
+from quant_engine.factor import compute_factor, get_factor_definition
 
 
 DAILY_FIELDS = ("open", "high", "low", "close", "preclose", "volume", "amount",
@@ -35,7 +36,13 @@ def _date(value):
 
 class ResearchDataPortal:
     """Dense date-indexed signal views; gaps remain explicit NaNs."""
-    def __init__(self, daily: pd.DataFrame, securities: pd.DataFrame, days: list[date]):
+    def __init__(
+        self,
+        daily: pd.DataFrame,
+        securities: pd.DataFrame,
+        days: list[date],
+        factor_expressions: dict[str, object] | None = None,
+    ):
         self.days = days
         self.codes = sorted(securities["code"].tolist())
         self._code_indices = {code: i for i, code in enumerate(self.codes)}
@@ -52,6 +59,8 @@ class ResearchDataPortal:
             self._signals[field] = self._raw[field] * ratio
         self._signals["close"] = self._raw["adjusted_close"]
         self._cursor = -1
+        self._factor_cache: dict[tuple[str, date], pd.Series] = {}
+        self._factor_expressions = dict(factor_expressions or {})
 
     def set_date(self, day: date | None):
         self._cursor = self._day_indices.get(day, -1)
@@ -90,7 +99,7 @@ class ResearchDataPortal:
             result[code] = row
         return result
 
-    def history(self, codes, lookback, fields):
+    def _history_at(self, cursor: int, codes, lookback, fields):
         selected = list(codes) if codes else list(self.codes)
         unknown = set(selected) - set(self._code_indices)
         if unknown:
@@ -98,14 +107,46 @@ class ResearchDataPortal:
         missing = set(fields) - set(self._signals)
         if missing:
             raise ValueError(f"unsupported research history fields: {sorted(missing)}")
-        if self._cursor < 0:
+        if cursor < 0:
             return pd.DataFrame(columns=list(fields), index=pd.MultiIndex.from_arrays([[], []], names=["code", "date"]))
-        first = max(0, self._cursor - lookback + 1)
-        window = self.days[first:self._cursor + 1]
+        first = max(0, cursor - lookback + 1)
+        window = self.days[first:cursor + 1]
         indices = [self._code_indices[code] for code in selected]
         index = pd.MultiIndex.from_product([selected, window], names=["code", "date"])
-        return pd.DataFrame({field: self._signals[field][first:self._cursor + 1, indices].T.reshape(-1)
+        return pd.DataFrame({field: self._signals[field][first:cursor + 1, indices].T.reshape(-1)
                              for field in fields}, index=index)
+
+    def history(self, codes, lookback, fields):
+        return self._history_at(self._cursor, codes, lookback, fields)
+
+    def _factor_history_at(self, cursor: int, lookback: int, fields) -> pd.DataFrame:
+        """Factor panel with eligibility evaluated independently on every date."""
+        panel = self._history_at(cursor, self.codes, lookback, fields)
+        if panel.empty:
+            return panel
+        first = max(0, cursor - lookback + 1)
+        window = self.days[first:cursor + 1]
+        eligible = (
+            np.isfinite(self._raw["close"][first:cursor + 1])
+            & (self._raw["close"][first:cursor + 1] > 0)
+            & (self._raw["is_suspended"][first:cursor + 1] == 0)
+            & (self._raw["is_st"][first:cursor + 1] == 0)
+        )
+        for code_index, code in enumerate(self.codes):
+            security = self.securities[code]
+            ipo, out = security["ipo_date"], security["out_date"]
+            active = np.fromiter(
+                (
+                    bool(ipo and (day - ipo).days >= 180 and (out is None or day < out))
+                    for day in window
+                ),
+                dtype=bool,
+                count=len(window),
+            )
+            eligible[:, code_index] &= active
+        valid_rows = pd.Series(eligible.T.reshape(-1), index=panel.index)
+        panel.loc[~valid_rows, :] = np.nan
+        return panel
 
     def current(self, code, field):
         if self._cursor < 0 or code not in self._code_indices:
@@ -115,16 +156,66 @@ class ResearchDataPortal:
         return float(self._signals[field][self._cursor, self._code_indices[code]])
 
     def factor(self, name: str, as_of: date) -> pd.Series:
-        raise ValueError(
-            f"panel factor {name!r} is not supported by the isolated research engine"
+        """Return a factor cross-section computed from the frozen signal view."""
+        if self._cursor < 0:
+            raise RuntimeError("research data portal is not positioned on a trading date")
+        as_of_cursor = self._day_indices.get(as_of)
+        if as_of_cursor is None:
+            raise ValueError(f"factor as_of date is outside the research calendar: {as_of}")
+        if as_of_cursor > self._cursor:
+            raise ValueError("factor as_of date cannot exceed the visible research date")
+        cache_key = (name, as_of)
+        cached = self._factor_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
+
+        expression = self._factor_expressions.get(name)
+        definition = expression or get_factor_definition(name)
+        if getattr(definition, "category", None) == "raw_fundamental":
+            raise ValueError(
+                f"research factor {name!r} requires a point-in-time fundamental adapter"
+            )
+        inputs = tuple(
+            getattr(definition, "required_fields", getattr(definition, "inputs", ()))
         )
+        window = getattr(definition, "lookback", getattr(definition, "window", None))
+        if not inputs or not isinstance(window, int):
+            raise ValueError(f"research factor definition is incomplete: {name}")
+        missing = sorted(set(inputs) - set(self._signals))
+        if missing:
+            raise ValueError(
+                f"research factor {name!r} requires unavailable fields: {', '.join(missing)}"
+            )
+        panel = self._factor_history_at(
+            as_of_cursor,
+            window,
+            inputs,
+        )
+        calculated = expression.compute(panel) if expression else compute_factor(name, panel)
+        factor_dates = calculated.index.get_level_values("date")
+        current = calculated.loc[factor_dates == as_of]
+        if current.empty:
+            result = pd.Series(index=self.codes, dtype=float, name=name)
+        else:
+            result = current.droplevel("date").reindex(self.codes)
+            result.index.name = "code"
+            result.name = name
+        self._factor_cache[cache_key] = result.copy()
+        return result
 
 
 class ResearchBacktestEngine:
-    def __init__(self, strategy_class, parameters: dict | None = None, cost_scenario="baseline"):
+    def __init__(
+        self,
+        strategy_class,
+        parameters: dict | None = None,
+        cost_scenario="baseline",
+        factor_expressions: dict[str, object] | None = None,
+    ):
         self.strategy_class = strategy_class
         self.parameters = dict(parameters or {})
         self.cost_scenario = cost_scenario
+        self.factor_expressions = dict(factor_expressions or {})
 
     def run(self, *, daily: pd.DataFrame, actions: pd.DataFrame, securities: pd.DataFrame,
             start: date, end: date, calendar, output_dir: str,
@@ -172,7 +263,9 @@ class ResearchBacktestEngine:
         for field in DAILY_FIELDS:
             daily[field] = pd.to_numeric(daily[field], errors="coerce")
         daily.loc[daily["is_suspended"] == 1, ["volume", "amount"]] = 0.
-        portal = ResearchDataPortal(daily, securities, days)
+        portal = ResearchDataPortal(
+            daily, securities, days, factor_expressions=self.factor_expressions
+        )
         for code, security in portal.securities.items():
             if security["ipo_date"] is None:
                 ledger.issue(start, code, "ipo_date_unresolved")
@@ -182,10 +275,15 @@ class ResearchBacktestEngine:
             if "a-share" not in spec.markets:
                 raise ValueError("research strategy must support a-share")
             requirements = resolve_strategy_data_requirements(spec, self.parameters,
-                              supported={"a_share_daily": ("1d", "event_driven")})
+                              supported={"a_share_daily": ("1d", "event_driven")},
+                              factor_definitions=self.factor_expressions)
             for requirement in requirements:
-                if requirement.factors:
-                    raise ValueError("research_strategy_factors_unsupported")
+                for factor_name in requirement.factors:
+                    definition = self.factor_expressions.get(factor_name)
+                    if definition is None:
+                        definition = get_factor_definition(factor_name)
+                    if getattr(definition, "category", None) == "raw_fundamental":
+                        raise ValueError("research_strategy_fundamental_factors_unsupported")
                 if set(requirement.fields) - set(portal._signals):
                     raise ValueError("research_strategy_fields_unsupported")
             required = max([spec.warmup_bars] + [item.required_bars for item in requirements])

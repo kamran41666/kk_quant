@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from server.models.database import init_db
-from server.api import strategies, backtest, market, analytics, paper, observations, live, sandbox
+from server.api import strategies, backtest, market, analytics, paper, observations, live, sandbox, factor_research
 from server.config import settings
 from server.services.paper_scheduler import PaperDailyScheduler
 from server.ws.manager import manager
@@ -82,6 +82,7 @@ app.include_router(paper.router, prefix="/api/v1")
 app.include_router(observations.router, prefix="/api/v1")
 app.include_router(live.router, prefix="/api/v1")
 app.include_router(sandbox.router, prefix="/api/v1")
+app.include_router(factor_research.router, prefix="/api/v1")
 
 
 @app.get("/api/health")

@@ -75,6 +75,10 @@ def calc_ic(
             continue
         x = x[mask]
         y = y[mask]
+        # Correlation is undefined for a constant cross-section. Skip it
+        # explicitly so large experiment batches do not emit NumPy warnings.
+        if x.nunique(dropna=True) < 2 or y.nunique(dropna=True) < 2:
+            continue
         if method == "rank":
             val = x.rank().corr(y.rank())
         elif method == "pearson":

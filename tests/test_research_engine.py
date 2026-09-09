@@ -10,6 +10,8 @@ from quant_engine.backtest.research_engine import ResearchBacktestEngine, Resear
 from quant_engine.backtest.research_ledger import ResearchAction, ResearchLedger
 from quant_engine.backtest.protocol import DataRequirement, StrategySpec
 from quant_engine.backtest.strategy import Strategy
+from quant_engine.factor.expression import FactorExpressionSpec
+from quant_engine.factor.strategy import build_expression_rank_strategy
 
 
 CODE = "600000.SH"
@@ -170,21 +172,25 @@ def test_portal_has_no_future_fill_and_dynamic_universe():
     assert CODE in portal.universe
 
 
-def test_research_engine_rejects_factor_requirements_before_strategy_execution(tmp_path):
-    daily, securities = frames()
+def test_research_engine_supports_point_in_time_panel_factors(tmp_path):
+    daily, securities = frames((CODE, OTHER))
     securities["ipo_date"] = securities["ipo_date"].map(lambda value: pd.Timestamp(value).date())
     portal = ResearchDataPortal(
         daily,
         securities,
         Calendar().get_trading_days(date(2023, 12, 1), date(2024, 1, 12)),
     )
-    with pytest.raises(ValueError, match="not supported by the isolated research engine"):
-        portal.factor("raw_return_lagged_1_close", date(2024, 1, 3))
+    portal.set_date(date(2024, 1, 5))
+    values = portal.factor("raw_return_lagged_1_close", date(2024, 1, 5))
+    assert values.index.tolist() == sorted([CODE, OTHER])
+    assert np.isfinite(values).all()
+    values.iloc[0] = 999
+    assert portal.factor("raw_return_lagged_1_close", date(2024, 1, 5)).iloc[0] != 999
 
     class FactorStrategy(BuyAndHold):
         SPEC = StrategySpec(
-            id="research-factor-unsupported-test",
-            name="unsupported factor",
+            id="research-factor-supported-test",
+            name="supported factor",
             version="1.0.0",
             description="research engine factor preflight",
             markets=("a-share",),
@@ -196,8 +202,127 @@ def test_research_engine_rejects_factor_requirements_before_strategy_execution(t
             ),),
         )
 
-    with pytest.raises(ValueError, match="research_strategy_factors_unsupported"):
-        run(tmp_path, daily, securities, strategy=FactorStrategy)
+        def generate_signals(self, day):
+            scores = self.get_factor("raw_return_lagged_1_close", day).dropna()
+            return {code: 0.5 / len(scores) for code in scores.index}
+
+    summary, _ = run(tmp_path, daily, securities, strategy=FactorStrategy)
+    requirement = summary["strategy_data_requirements"][0]
+    assert requirement["factors"] == ["raw_return_lagged_1_close"]
+    assert requirement["fields"] == ["close"]
+
+
+def test_research_engine_rejects_fundamental_factor_without_pit_adapter(tmp_path):
+    class FundamentalFactorStrategy(BuyAndHold):
+        SPEC = StrategySpec(
+            id="research-fundamental-factor-unsupported-test",
+            name="unsupported fundamental factor",
+            version="1.0.0",
+            description="research engine fundamental factor preflight",
+            markets=("a-share",),
+            data=(DataRequirement(
+                "a_share_daily",
+                (),
+                1,
+                factors=("raw_earnings_yield_1_fundamental",),
+            ),),
+        )
+
+    with pytest.raises(ValueError, match="research_strategy_fundamental_factors_unsupported"):
+        run(tmp_path, strategy=FundamentalFactorStrategy)
+
+
+def test_frozen_expression_strategy_runs_through_research_portal(tmp_path):
+    expression = FactorExpressionSpec.from_dict({
+        "name": "test_dynamic_reversal",
+        "hypothesis": "用于验证冻结表达式策略接缝。",
+        "direction": -1,
+        "role": "rank",
+        "source": "test",
+        "expression": {
+            "op": "winsorize_zscore",
+            "args": [{
+                "op": "sub",
+                "args": [
+                    {
+                        "op": "div",
+                        "args": [
+                            {"op": "delay", "args": [{"field": "close"}], "params": {"periods": 1}},
+                            {"op": "delay", "args": [{"field": "close"}], "params": {"periods": 3}},
+                        ],
+                    },
+                    {"constant": 1.0},
+                ],
+            }],
+        },
+    })
+    strategy = build_expression_rank_strategy(expression)
+    codes = tuple(f"6000{i:02d}.SH" for i in range(10))
+    history_days = pd.bdate_range("2023-01-02", "2024-01-12").date
+    daily = pd.DataFrame([
+        {"code": code, "date": day, **bar(price=10 + index + offset * 0.01)}
+        for index, code in enumerate(codes)
+        for offset, day in enumerate(history_days)
+    ])
+    securities = pd.DataFrame([
+        {"code": code, "ipo_date": "2000-01-01", "out_date": None}
+        for code in codes
+    ])
+    calendar = Calendar()
+    calendar.days = list(pd.bdate_range("2022-01-03", "2024-12-31").date)
+    result_dir = tmp_path / "dynamic-factor"
+    ResearchBacktestEngine(
+        strategy,
+        factor_expressions={expression.name: expression},
+    ).run(
+        daily=daily,
+        actions=pd.DataFrame(),
+        securities=securities,
+        start=date(2024, 1, 3),
+        end=date(2024, 1, 12),
+        calendar=calendar,
+        output_dir=str(result_dir),
+        rebalance_frequency="weekly",
+    )
+    summary = json.loads((result_dir / "summary.json").read_text())
+    requirement = summary["strategy_data_requirements"][0]
+    assert requirement["factors"] == [expression.name]
+    assert requirement["required_bars"] == 252
+    assert summary["strategy_spec"]["extensions"]["factor_expression_hash"] == expression.expression_hash
+    signals = pd.read_parquet(result_dir / "signals.parquet")
+    assert set(signals["code"]) == set(codes)
+
+
+def test_dynamic_factor_masks_historical_st_and_suspended_rows():
+    daily, securities = frames((CODE, OTHER))
+    securities["ipo_date"] = securities["ipo_date"].map(
+        lambda value: pd.Timestamp(value).date()
+    )
+    daily.loc[
+        (daily.code == CODE) & (daily.date == date(2024, 1, 4)), "is_st"
+    ] = True
+    expression = FactorExpressionSpec.from_dict({
+        "name": "test_eligible_rolling_mean",
+        "hypothesis": "测试历史逐日资格掩码。",
+        "direction": 1,
+        "role": "rank",
+        "source": "test",
+        "expression": {
+            "op": "ts_mean",
+            "args": [{"field": "close"}],
+            "params": {"window": 2, "min_periods": 2},
+        },
+    })
+    portal = ResearchDataPortal(
+        daily,
+        securities,
+        Calendar().get_trading_days(date(2023, 12, 1), date(2024, 1, 12)),
+        factor_expressions={expression.name: expression},
+    )
+    portal.set_date(date(2024, 1, 5))
+    factor = portal.factor(expression.name, date(2024, 1, 5))
+    assert np.isnan(factor[CODE])
+    assert np.isfinite(factor[OTHER])
 
 
 def test_strategy_observes_prior_session_before_trading_and_current_close_at_signal(tmp_path):

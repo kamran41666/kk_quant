@@ -1,5 +1,7 @@
 # Phase 3A-M M2 实施记录：多周期 K 线与推荐指标
 
+> 文档状态：历史里程碑。测试数字和后续计划仅反映 M2 完成时；当前状态见 [`project-state-audit-2026-09-09.md`](project-state-audit-2026-09-09.md)。
+
 ## 已交付
 
 - `GET /api/v1/market/candles/{code}` 支持 `1d`、`1w`、`1mo`，默认取最近一年；周/月请求扩大到 900 个自然日以提供足够的指标暖机数据。

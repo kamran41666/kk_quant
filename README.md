@@ -57,7 +57,7 @@ npm run build
 
 ## 开发入口
 
-[当前进度](docs/project-status.md) 是接手入口；[系统评估与后续路线](docs/research-platform-roadmap.md) 记录本轮发现、已完成内容与待补能力。策略开发见 [Strategy Protocol v2](docs/strategy-protocol-v2.md)。
+[Progress](PROGRESS.md) 统一记录 2026-09-09 之后各次对话的项目修改；[中期状态审查](docs/project-state-audit-2026-09-09.md) 是建立该机制时的全链路事实快照；[文档地图](docs/README.md) 按任务指向专业资料。Agent 接手规范见 [AGENTS.md](AGENTS.md)，策略开发见 [Strategy Protocol v2](docs/strategy-protocol-v2.md)。
 
 数据、数据库和结果目录属于本地资产，不随 Git 分发。代码具备某项能力不等于本机已导入所需数据。
 
