@@ -17,6 +17,20 @@
 
 ## 记录
 
+### 2026-09-09 23:51 CST — M6—M9远端同步补记
+
+- 事实更正：M9提交`ba8842a`的push已成功，`origin/phase4-factor-develop`当前与本地`HEAD`同为`ba8842a38c11a1bc5146d2302b40ba3eef5ebbe7`；该提交链包含M6 `1d98974`、M7 `981a7d9`、M8 `2f95342`和M9 `ba8842a`，此前各阶段记录中的网络失败状态不再是当前远端状态。
+- 未改动：`.playwright-cli/`、`output/`、`tmp_*`及本阶段之外的`docs/README.md`和`docs/research-runs/tradingagents-subjective-analysis-review.md`继续按接手时状态保留，未纳入本次同步补记提交。
+
+### 2026-09-09 23:51 CST — 外部 TradingAgents 主观分析框架评估
+
+- Git：`phase4-factor-develop`；记录时`HEAD=ba8842a`，与`origin/phase4-factor-develop`同步；`PROGRESS.md`、`docs/README.md`和本专题文档为本次未提交修改，既有未跟踪目录继续保留。本次只新增文档，没有创建提交或推送。
+- 修改：新增[`TradingAgents/TradingAgents-CN专题评估`](docs/research-runs/tradingagents-subjective-analysis-review.md)，覆盖两个仓库的完整Git跟踪文件清单与目录分类、核心分析/数据/记忆/输出/纸面链路、测试和许可证边界；同步将专题入口加入[`文档地图`](docs/README.md)。没有修改代码、数据、策略协议、研究结果或实盘能力。
+- 结论：上游`TradingAgents`的多角色分析、反方论证、风险复核和报告组织可作为`kk_quant`的主观研究复核层；必须改接`kk_quant`冻结as-of快照、manifest/哈希、结构化`SubjectiveReview`和fail-closed状态。CN版适合选择性参考中国数据适配和展示，不整体引入`app/`、`frontend/`、Chroma记忆、默认目标价/默认Hold信号解析或纸面订单链路。两个项目都不能直接生成量化交易动作、仓位或订单。
+- 验证：两个临时审计副本的Python文件均通过`compileall`；上游全量pytest因当前环境缺少`langchain_core`、`langgraph`、`yfinance`、`typer`等依赖，在收集阶段出现45个导入错误；CN版pytest收集到79个测试并出现28个收集错误，其中包含缺少`GOOGLE_API_KEY`后主动`SystemExit(1)`的环境检查脚本。上述结果仅记录当前机器可执行性，未被解释为生产正确性证明。
+- 边界：本次没有调用真实LLM、真实券商或下单接口；没有把外部项目测试数字、README能力或纸面成交描述为`kk_quant`已验收能力。后续若实施，仍须经过数据/PIT、结构化输出、审计、重复性、量化策略单独对照和真实开始后的前瞻观察门；当前M8/M9和既有Phase 4剩余门禁不变。
+- 入口：[`专题评估`](docs/research-runs/tradingagents-subjective-analysis-review.md)、[`文档地图`](docs/README.md)、[`人工日频实施方案`](docs/manual-daily-trading-implementation-plan.md)。
+
 ### 2026-09-09 23:48 CST — M9首次人工执行与持续循环门禁
 
 - Git：`phase4-factor-develop`；M8本地提交`2f95342`已生成但push因GitHub `443`连接失败；M9修改尚未提交。M6/M7 push同样待网络恢复，既有未跟踪目录未触碰。
