@@ -97,6 +97,9 @@ def init_db():
         "strategy": {
             "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",
         },
+        "manual_account": {
+            "create_idempotency_key": "VARCHAR(160)",
+        },
     }
     inspector = inspect(engine)
     with engine.begin() as connection:

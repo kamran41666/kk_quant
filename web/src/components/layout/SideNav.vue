@@ -38,6 +38,7 @@ const navItems = [
   { path: '/strategies', label: '策略', icon: 'M6 4h12v16H6V4Zm3 4h6M9 12h6m-6 4h4' },
   { path: '/backtest', label: '回测', icon: 'M12 3a9 9 0 1 0 9 9M12 7v5l3 2m2-10v5h-5' },
   { path: '/paper', label: '模拟交易', icon: 'M4 19V9m5 10V5m6 14v-7m5 7V3' },
+  { path: '/manual', label: '人工执行', icon: 'M5 5h14v14H5zM8 9h8M8 13h5' },
   { path: '/live', label: '账户接入', icon: 'M12 3 4 7v5c0 4.6 3.4 8.6 8 9 4.6-.4 8-4.4 8-9V7l-8-4Zm0 5v4m0 4h.01' },
 ]
 </script>
@@ -133,7 +134,7 @@ const navItems = [
     backdrop-filter: blur(12px);
   }
   .brand-block, .nav-footer, .skip-link { display: none; }
-  .nav-list { display: grid; height: 100%; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 1px; }
+  .nav-list { display: grid; height: 100%; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 1px; }
   .nav-item {
     min-width: 0;
     min-height: 0;

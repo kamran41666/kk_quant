@@ -11,6 +11,7 @@ const router = createRouter({
     { path: '/strategies', name: 'Strategies', component: () => import('../views/StrategyManager.vue') },
     { path: '/backtest', name: 'Backtest', component: () => import('../views/BacktestRunner.vue') },
     { path: '/paper', name: 'Paper', component: () => import('../views/PaperTrading.vue') },
+    { path: '/manual', name: 'ManualTrading', component: () => import('../views/ManualTrading.vue') },
     // Keep old bookmarks working while the performance view lives in BacktestRunner.
     { path: '/analytics', name: 'Analytics', redirect: { name: 'Backtest' } },
     { path: '/live', name: 'LiveReadiness', component: () => import('../views/LiveReadiness.vue') },

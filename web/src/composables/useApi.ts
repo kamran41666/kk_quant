@@ -7,7 +7,7 @@ const api = axios.create({
 
 api.interceptors.request.use((config) => {
   const url = config.url ?? ''
-  if (url.startsWith('/live') && typeof window !== 'undefined') {
+  if ((url.startsWith('/live') || url.startsWith('/manual-trading')) && typeof window !== 'undefined') {
     try {
       const token = window.sessionStorage.getItem('quant.operator.token')
       if (token) config.headers.set('X-Operator-Token', token)

@@ -582,6 +582,7 @@ class ManualAccount(Base):
     __tablename__ = "manual_account"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    create_idempotency_key: Mapped[Optional[str]] = mapped_column(String(160), nullable=True, unique=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     currency: Mapped[str] = mapped_column(String(8), nullable=False, default="CNY")
     broker_label: Mapped[str] = mapped_column(String(120), nullable=False, default="")

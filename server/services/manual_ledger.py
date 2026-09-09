@@ -347,13 +347,20 @@ def create_manual_account(
     currency: str = "CNY",
     broker_label: str = "",
     risk_policy: Mapping[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> ManualAccount:
     if str(currency).upper() != "CNY":
         raise ManualLedgerError("manual_a_share_account_currency_must_be_cny")
     if not str(name).strip():
         raise ManualLedgerError("manual_account_name_required")
+    key = str(idempotency_key or "").strip() or f"legacy:{_new_id()}"
+    existing = db.scalars(select(ManualAccount).where(ManualAccount.create_idempotency_key == key)).first()
+    if existing:
+        if existing.name != str(name).strip() or existing.broker_label != str(broker_label or ""):
+            raise ManualLedgerError("manual_account_idempotency_conflict")
+        return existing
     account = ManualAccount(
-        id=_new_id(), name=str(name).strip(), currency="CNY",
+        id=_new_id(), create_idempotency_key=key, name=str(name).strip(), currency="CNY",
         broker_label=str(broker_label or ""), risk_policy=_canonical_json(risk_policy or {}),
     )
     db.add(account)

@@ -708,3 +708,13 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - 新增数据就绪和风险preflight，交易日历不完整、行情缺失、账户对账或授权状态不满足时返回阻断；风险检查覆盖确认现金、单笔金额、单票权重、总敞口和每日项数。
 - M1纯计划输出可持久化为人工清单；计划项含参考价、来源、时间、预计费用、顺序和`confirmed_cash`依赖。查看计划只改变计划状态，不写成交事件，不更新人工账本，不触碰Paper表。
 - 实际验证：M5专项2项通过；下一阶段实现统一HTTP幂等边界和人工操作台，所有操作继续显示`user_reported`且不提供提交券商按钮。
+
+## 23. M6实施记录
+
+### 2026-09-09 23:10 CST
+
+- 新增`server/api/manual_trading.py`并挂载到`/api/v1/manual-trading`。接口只接受操作员保护下的人工事实：创建账户、现金事件、用户成交/更正、账户对账和计划标记已读；响应显式携带`manual_execution=true`、`broker_connected=false`、`user_reported_fills=true`和`live_order_submission=false`。没有真实委托、券商认证或Paper表写入路由。
+- 账户创建使用持久幂等键；现金事件沿用现金幂等键，成交沿用`client_event_id`，对账沿用快照幂等键；状态输出把Decimal转为字符串，前端不依赖浮点金额。交易日历覆盖检查使用跨月安全的日期加法，覆盖失败返回阻断错误。
+- 新增`web/src/views/ManualTrading.vue`、`web/src/types/manual.ts`、`web/src/utils/manual.ts`和`web/tests/manual.test.mjs`，页面展示今日计划/台账/对账入口并提供资金和成交回填表单；页面文案与路由反向约束均明确没有“提交订单”动作。前端操作员令牌拦截器覆盖`/manual-trading`，导航支持桌面和移动端。
+- 实际验收：人工账本+HTTP专项`5 passed`，前端测试`15 passed`，`npm run build`、Ruff、`compileall`通过；Playwright桌面、390px、320px真实页面检查通过，320px无横向溢出（`scrollWidth=320`），控制台错误为0。
+- 本阶段后端代码仍需在M6提交后纳入全量回归；M7持久worker/备份/复盘、M8真实前瞻观察和M9首次人工购入仍按原门禁执行。

@@ -17,6 +17,14 @@
 
 ## 记录
 
+### 2026-09-09 23:10 CST — M6人工执行HTTP接口与操作台
+
+- Git：`phase4-factor-develop`；M1—M5提交链已在本阶段开始前确认同步到`origin/phase4-factor-develop`，当前M6修改尚未提交；既有`.playwright-cli/`、`output/`、`tmp_*`未跟踪目录继续保留。此前M5/M4/M3记录中的“待提交/待推送”是当时快照，本记录确认其后已由`c9a13b0`统一推送。
+- 修改：新增`/api/v1/manual-trading`操作员保护接口，覆盖人工账户、现金事实、用户成交回填、追加式成交更正、账户对账、计划查看；新增人工执行Vue操作台、类型和幂等/错误工具，接入路由、导航和操作员令牌。账户创建幂等键落库；人工接口统一返回`manual_execution=true`、`broker_connected=false`、`live_order_submission=false`，没有提交券商委托路由；人工状态中的Decimal以字符串输出，避免前端精度漂移。
+- 验证：人工账本与HTTP专项`5 passed`；前端Node契约测试`15 passed`；`npm run build`通过；Ruff、`compileall`通过；Playwright真实页面在桌面、390px、320px检查通过，320px下`scrollWidth=320`且控制台错误为0。M6截图保存在既有未跟踪目录`output/playwright/`，未纳入代码提交。
+- 边界：M6只允许用户回填券商侧已发生的资金/成交事实，不能认证券商、发送订单或把回填事实伪装为broker确认；M7持久worker/备份/日终复盘、M8真实前瞻30日观察、M9首次人工购入仍未完成。后端全量回归将在M6提交后及后续阶段收口时再运行。
+- 入口：[`M6实施记录`](docs/manual-daily-trading-implementation-plan.md#23-m6实施记录)、[`人工HTTP接口`](server/api/manual_trading.py)、[`人工操作台`](web/src/views/ManualTrading.vue)。
+
 ### 2026-09-09 22:59 CST — M5日决策、双cohort与持久计划
 
 - Git：`phase4-factor-develop`；最新本地提交`be2be68`，M4 push仍因网络连接重置未同步；M5尚未提交。已有未跟踪目录未触碰。
