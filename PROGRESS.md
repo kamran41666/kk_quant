@@ -17,6 +17,14 @@
 
 ## 记录
 
+### 2026-09-09 18:20 CST — 提交并推送P0—P2累计进度
+
+- Git：`phase4-factor-develop`，功能快照提交 `633908e` 已推送到 `origin/phase4-factor-develop`；本条Progress记录随后单独提交并推送。
+- 提交范围：文档治理与跨对话记录、研究正确性修复、受限因子表达式与持久实验、自动模板生成、训练/验证门、结构化memory、冻结策略bundle、事件驱动成本组合回测和因子研究前端，共62个文件。
+- 验证基线：后端`700 passed, 1 warning`；前端`13 passed`、TypeScript与Vite构建通过；390px浏览器验收、compileall、文档链接、JSON解析和`git diff --check`通过。
+- 边界：本地数据库和`backtest_result/`未进入Git；可移植组合结果已保存到`docs/research-runs/factor-portfolio-validation-v1.json`。实盘继续关闭，因子候选没有观察或交易授权。
+- 入口：[`因子工作流`](docs/factor-research-workflow.md)、[`组合回测结果`](docs/research-runs/factor-portfolio-validation-v1.md)、[`文档地图`](docs/README.md)。
+
 ### 2026-09-09 14:12 CST — P2 冻结因子策略与成本组合回测
 
 - Git：`phase4-factor-develop` @ `55e5156`；累计P0—P2与文档治理改动仍在工作树中，尚未提交或推送。
