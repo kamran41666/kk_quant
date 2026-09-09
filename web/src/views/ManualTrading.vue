@@ -91,6 +91,29 @@
         </form>
       </section>
 
+      <section class="card review-section" aria-labelledby="review-title">
+        <div class="section-header compact"><div><h2 id="review-title">日终估值与复盘</h2><p>用户回填收盘资产后生成现金流中和收益、执行偏差和数据健康状态。</p></div><span class="manual-badge">研究修订独立排队</span></div>
+        <div class="two-column review-forms">
+          <form class="stack-form" @submit.prevent="recordValuation">
+            <strong class="form-title">记录用户报告的估值</strong>
+            <label>估值日期<input v-model="valuationForm.valuation_date" type="date" required /></label>
+            <div class="form-grid"><label>现金<input v-model="valuationForm.cash" type="number" min="0" step="0.01" required /></label><label>持仓市值<input v-model="valuationForm.market_value" type="number" min="0" step="0.01" required /></label></div>
+            <label>总资产<input v-model="valuationForm.total_asset" type="number" min="0" step="0.01" required /></label>
+            <label>价格/截图时间<input v-model="valuationForm.price_as_of" maxlength="40" placeholder="可选：券商收盘截图时间" /></label>
+            <button class="btn-secondary" type="submit" :disabled="saving">保存估值快照</button>
+          </form>
+          <form class="stack-form" @submit.prevent="createReview">
+            <strong class="form-title">生成日终复盘</strong>
+            <label>复盘日期<input v-model="reviewForm.review_date" type="date" required /></label>
+            <label>备注<textarea v-model="reviewForm.notes" rows="4" maxlength="1000" placeholder="记录未成交、滑点、数据异常或人工原因" /></label>
+            <button class="btn-secondary" type="submit" :disabled="saving || !valuations.length">生成复盘报告</button>
+            <small v-if="!valuations.length" class="hint warning">请先保存对应日期的估值快照。</small>
+          </form>
+        </div>
+        <div v-if="reviews.length" class="review-list"><article v-for="review in reviews.slice(0, 10)" :key="review.id" class="review-row"><div><strong>{{ review.review_date }} · {{ review.status === 'ready' ? '可用' : '已阻断' }}</strong><span>对账：{{ review.reconciliation_status }} · 计划 {{ review.planned_item_count }} 项 · 回填 {{ review.reported_fill_count }} 笔</span></div><span class="mono">偏差 {{ decimalText(review.execution_deviation) }}</span></article></div><p v-else class="empty-note">暂无日终复盘。</p>
+        <div v-if="valuations.length" class="valuation-list"><div v-for="valuation in valuations.slice(0, 5)" :key="valuation.id"><span>{{ valuation.valuation_date }} · 总资产 ¥{{ decimalText(valuation.total_asset) }}</span><strong :class="Number(valuation.daily_return) >= 0 ? 'positive' : 'negative'">收益 {{ decimalText(valuation.daily_return) }}</strong></div></div>
+      </section>
+
       <section class="card plan-section" aria-labelledby="plan-title">
         <div class="section-header compact"><div><h2 id="plan-title">人工执行计划</h2><p>计划是可读执行清单，不是订单；必须由人工逐项完成并回填。</p></div><span class="manual-badge">无提交按钮</span></div>
         <div v-if="plans.length" class="plan-list"><article v-for="plan in plans" :key="plan.id" class="plan-row"><div class="plan-head"><div><strong>{{ plan.execution_date }} · {{ plan.execution_session === 'open' ? '开盘' : '收盘' }} · {{ plan.plan_type }}</strong><span>版本 {{ plan.id.slice(-8) }} · {{ planStatus(plan.status) }}</span></div><button v-if="['draft', 'ready'].includes(plan.status)" class="link-button" type="button" @click="viewPlan(plan.id)">标记已查看</button></div><p v-if="plan.blocked_reason" class="hint warning">阻断原因：{{ plan.blocked_reason }}</p><div v-if="plan.items.length" class="data-table-wrap"><table class="data-table compact-table"><thead><tr><th>阶段</th><th>代码</th><th>方向</th><th>数量</th><th>参考价</th><th>状态</th></tr></thead><tbody><tr v-for="item in plan.items" :key="item.id"><td>{{ item.side === 'sell' ? '先卖' : '后买' }}</td><td class="mono">{{ item.code }}</td><td>{{ item.side === 'buy' ? '买入' : '卖出' }}</td><td>{{ decimalText(item.planned_quantity) }}</td><td>¥{{ decimalText(item.reference_price) }}</td><td>{{ planStatus(item.status) }}</td></tr></tbody></table></div><p v-else class="empty-note">该计划没有可执行条目。</p></article></div>
@@ -104,7 +127,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useApi } from '@/composables/useApi'
-import type { ManualAccount, ManualPlan, ManualState } from '@/types/manual'
+import type { ManualAccount, ManualPlan, ManualReview, ManualState, ManualValuation } from '@/types/manual'
 import { decimalText, manualError, newIdempotencyKey, unwrapManual } from '@/utils/manual'
 
 const { api } = useApi()
@@ -117,11 +140,15 @@ const accounts = ref<ManualAccount[]>([])
 const selectedAccountId = ref('')
 const state = ref<ManualState | null>(null)
 const plans = ref<ManualPlan[]>([])
+const valuations = ref<ManualValuation[]>([])
+const reviews = ref<ManualReview[]>([])
 const selectedAccount = computed(() => accounts.value.find(account => account.id === selectedAccountId.value) ?? null)
 const accountForm = reactive({ name: '', broker_label: '' })
 const cashForm = reactive({ event_type: 'opening_balance', amount: '', occurred_at: new Date().toISOString().slice(0, 16), note: '' })
 const fillForm = reactive({ code: '', side: 'buy', quantity: '100', price: '', commission: '0', stamp_duty: '0', traded_at: new Date().toISOString().slice(0, 16) })
 const reconcileForm = reactive({ cash: '', total_asset: '', positions_json: '' })
+const valuationForm = reactive({ valuation_date: new Date().toISOString().slice(0, 10), cash: '', market_value: '0', total_asset: '', price_as_of: '' })
+const reviewForm = reactive({ review_date: new Date().toISOString().slice(0, 10), notes: '' })
 
 function clearMessage() { notice.value = ''; errorMessage.value = '' }
 function accountStatus(value: string) { return ({ draft: '待开户余额', active: '可记录', reconcile: '对账异常', suspended: '已暂停', closed: '已关闭' } as Record<string, string>)[value] ?? value }
@@ -142,12 +169,16 @@ async function refreshAll() {
 async function loadAccountData() {
   if (!selectedAccountId.value) return
   try {
-    const [stateResponse, plansResponse] = await Promise.all([
+    const [stateResponse, plansResponse, valuationsResponse, reviewsResponse] = await Promise.all([
       api.get(`/manual-trading/accounts/${selectedAccountId.value}/state`),
       api.get(`/manual-trading/accounts/${selectedAccountId.value}/plans`),
+      api.get(`/manual-trading/accounts/${selectedAccountId.value}/valuations`),
+      api.get(`/manual-trading/accounts/${selectedAccountId.value}/reviews`),
     ])
     state.value = unwrapManual<ManualState>(stateResponse.data)
     plans.value = unwrapManual<ManualPlan[]>(plansResponse.data)
+    valuations.value = unwrapManual<ManualValuation[]>(valuationsResponse.data)
+    reviews.value = unwrapManual<ManualReview[]>(reviewsResponse.data)
   } catch (error: any) { errorMessage.value = manualError(error) }
 }
 
@@ -194,6 +225,26 @@ async function reconcile() {
     }
     await api.post(`/manual-trading/accounts/${selectedAccountId.value}/reconcile`, { idempotency_key: newIdempotencyKey('manual-reconcile'), as_of: new Date().toISOString(), cash: reconcileForm.cash, total_asset: reconcileForm.total_asset, positions })
     notice.value = '对账快照已保存；如有差异，账户会自动进入对账阻断状态。'
+    await refreshAll()
+  } catch (error: any) { errorMessage.value = manualError(error) } finally { saving.value = false }
+}
+
+async function recordValuation() {
+  if (!selectedAccountId.value) return
+  saving.value = true; clearMessage()
+  try {
+    await api.post(`/manual-trading/accounts/${selectedAccountId.value}/valuations`, { ...valuationForm, idempotency_key: newIdempotencyKey('manual-valuation') })
+    notice.value = '日终估值已保存；收益率已按外部现金流中和计算。'
+    await refreshAll()
+  } catch (error: any) { errorMessage.value = manualError(error) } finally { saving.value = false }
+}
+
+async function createReview() {
+  if (!selectedAccountId.value) return
+  saving.value = true; clearMessage()
+  try {
+    await api.post(`/manual-trading/accounts/${selectedAccountId.value}/reviews`, reviewForm)
+    notice.value = '日终复盘已生成；因子衰减只会进入研究队列，不改变人工授权。'
     await refreshAll()
   } catch (error: any) { errorMessage.value = manualError(error) } finally { saving.value = false }
 }
@@ -245,6 +296,11 @@ onMounted(() => { void refreshAll() })
 .plan-head span { color: var(--text-secondary); font-size: 11px; }
 .compact-table th, .compact-table td { padding: 8px 9px; }
 .empty-note { color: var(--text-secondary); font-size: 12px; }
+.form-title { color: var(--text-primary); font-size: 13px; }
+.review-list, .valuation-list { display: grid; gap: 8px; margin-top: 16px; }
+.review-row, .valuation-list > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding-top: 10px; font-size: 12px; }
+.review-row div { display: grid; gap: 3px; }
+.review-row span, .valuation-list span { color: var(--text-secondary); }
 .page-status { margin: 0 0 16px; color: var(--success); font-size: 13px; }
 .link-button { background: transparent; color: var(--accent); font-size: 12px; }
 .link-button:hover { color: var(--accent-hover); }

@@ -17,6 +17,14 @@
 
 ## 记录
 
+### 2026-09-09 23:31 CST — M7持久worker、备份与日终复盘
+
+- Git：`phase4-factor-develop`；M6本地提交`1d98974`已生成但两次push均因GitHub `443`连接失败未确认远端同步；M7修改尚未提交。既有未跟踪目录继续保留。
+- 修改：新增`ManualDailyJob`持久任务、lease/heartbeat/过期恢复/重试/阻断/幂等队列；新增跨平台Path原子写入、SHA-256内容寻址的人工表备份/空库恢复/校验；新增用户报告估值、现金流中和日终收益、执行偏差、对账阻断、研究修订队列和公司行动事实表。worker脚本为短周期可恢复进程，未配置显式handler的工作会失败关闭，不生成虚假行情/成交，不连接券商。人工API和操作台补充估值、复盘、研究修订、公司行动和任务只读入口。
+- 验证：M7调度/备份/复盘专项`6 passed`；连同HTTP回归共`7 passed`；前端测试`15 passed`；`npm run build`、Ruff、`compileall`通过。现金流中和测试确认首日开户余额不被误算为次日外部入金。
+- 边界：M7只提供持久化和人工事实处理，不自动估值、不自动交易；M8仍需真实开始后到达的30个交易日数据和不可变观察报告，M9仍需用户实际创建授权、在券商侧操作并回填首笔成交。M6/M7提交仍待本阶段结束后推送重试。
+- 入口：[`M7实施记录`](docs/manual-daily-trading-implementation-plan.md#24-m7实施记录)、[`持久worker`](server/services/manual_scheduler.py)、[`备份恢复`](server/services/manual_backup.py)、[`日终复盘`](server/services/manual_review.py)。
+
 ### 2026-09-09 23:10 CST — M6人工执行HTTP接口与操作台
 
 - Git：`phase4-factor-develop`；M1—M5提交链已在本阶段开始前确认同步到`origin/phase4-factor-develop`，当前M6修改尚未提交；既有`.playwright-cli/`、`output/`、`tmp_*`未跟踪目录继续保留。此前M5/M4/M3记录中的“待提交/待推送”是当时快照，本记录确认其后已由`c9a13b0`统一推送。

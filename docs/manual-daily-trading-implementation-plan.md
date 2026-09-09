@@ -718,3 +718,13 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - 新增`web/src/views/ManualTrading.vue`、`web/src/types/manual.ts`、`web/src/utils/manual.ts`和`web/tests/manual.test.mjs`，页面展示今日计划/台账/对账入口并提供资金和成交回填表单；页面文案与路由反向约束均明确没有“提交订单”动作。前端操作员令牌拦截器覆盖`/manual-trading`，导航支持桌面和移动端。
 - 实际验收：人工账本+HTTP专项`5 passed`，前端测试`15 passed`，`npm run build`、Ruff、`compileall`通过；Playwright桌面、390px、320px真实页面检查通过，320px无横向溢出（`scrollWidth=320`），控制台错误为0。
 - 本阶段后端代码仍需在M6提交后纳入全量回归；M7持久worker/备份/复盘、M8真实前瞻观察和M9首次人工购入仍按原门禁执行。
+
+## 24. M7实施记录
+
+### 2026-09-09 23:31 CST
+
+- 新增`ManualDailyJob`和`server/services/manual_scheduler.py`，任务以`job_key`去重，按交易日排队；worker使用显式lease owner、过期时间、heartbeat和attempt计数，支持崩溃恢复、临时失败重试和不可执行事项阻断。`scripts/run_manual_daily_worker.py`支持Windows/macOS的Python单次运行或短间隔循环，不引入平台专属守护进程；默认没有人工输入或审查handler时直接阻断。
+- 新增`server/services/manual_backup.py`，只使用`pathlib.Path`、UTF-8 JSON、临时文件和`os.replace`完成跨平台原子备份；备份涵盖manual领域表、发布/授权/holdout/决策/计划/账本/复盘/研究修订等证据，包含行数和内容hash。恢复只允许目标数据库为空，并在提交前校验schema和hash。
+- 新增`ManualValuation`、`ManualDailyReview`、`ResearchRevision`、`ManualCorporateActionFact`。估值要求现金+持仓市值=总资产，首日不计算虚假收益，后续收益按真实用户报告现金流中和；对账不同或账户处于`reconcile`时复盘为`blocked`。公司行动只保存`user_reported`事实，不自动改写持仓；研究修订只进研究队列，不改变已发布授权。
+- 人工HTTP和操作台新增估值、复盘、任务只读、研究修订和公司行动事实入口；新增数据仍不进入Paper链，也没有券商认证或订单提交能力。
+- 实际验证：M7专项调度/备份/复盘`6 passed`；连同人工HTTP回归`7 passed`；前端`15 passed`，`npm run build`、Ruff、`compileall`通过。M7不宣称已完成M8/M9的真实前瞻和用户首笔交易门。

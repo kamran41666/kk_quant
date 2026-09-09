@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from quant_engine.data.calendar import TradingCalendar
 from server.models.database import get_db
-from server.models.schema import ManualAccount, ManualExecutionItem, ManualExecutionPlan
+from server.models.schema import ManualAccount, ManualDailyJob, ManualDailyReview, ManualExecutionItem, ManualExecutionPlan, ManualValuation
 from server.services.manual_ledger import (
     ManualLedgerError,
     create_manual_account,
@@ -27,6 +27,13 @@ from server.services.manual_ledger import (
     record_fill_correction,
 )
 from server.services.manual_plan_persistence import mark_plan_viewed
+from server.services.manual_review import (
+    ManualReviewError,
+    create_daily_review,
+    queue_research_revision,
+    record_corporate_action_fact,
+    record_manual_valuation,
+)
 from server.services.operator_auth import require_operator
 
 
@@ -97,6 +104,38 @@ class ReconcileRequest(StrictModel):
     cash: Decimal = Field(ge=0)
     total_asset: Decimal = Field(ge=0)
     positions: list[PositionInput] = Field(default_factory=list)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class ValuationRequest(StrictModel):
+    idempotency_key: str = Field(min_length=8, max_length=160)
+    valuation_date: date | str
+    cash: Decimal = Field(ge=0)
+    market_value: Decimal = Field(ge=0)
+    total_asset: Decimal = Field(ge=0)
+    price_as_of: Optional[str] = Field(default=None, max_length=40)
+
+
+class ReviewRequest(StrictModel):
+    review_date: date | str
+    valuation_id: Optional[str] = None
+    notes: Optional[str] = Field(default=None, max_length=1000)
+
+
+class RevisionRequest(StrictModel):
+    review_date: date | str
+    reason_codes: list[str] = Field(min_length=1, max_length=30)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    release_id: Optional[str] = None
+
+
+class CorporateActionRequest(StrictModel):
+    idempotency_key: str = Field(min_length=8, max_length=160)
+    code: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
+    action_type: str = Field(min_length=1, max_length=40)
+    effective_date: date | str
+    factor: Decimal = Field(default=Decimal("1"), gt=0)
+    cash_amount: Decimal = Decimal("0")
     note: Optional[str] = Field(default=None, max_length=500)
 
 
@@ -221,6 +260,92 @@ def view_plan(account_id: str, plan_id: str, db: Session = Depends(get_db)):
         return _envelope({"id": mark_plan_viewed(db, plan_id).id, "status": db.get(ManualExecutionPlan, plan_id).status})
     except (ManualLedgerError, ValueError) as exc:
         raise _error(exc) from exc
+
+
+def _valuation(row: ManualValuation) -> dict[str, Any]:
+    return {
+        "id": row.id, "account_id": row.account_id, "valuation_date": row.valuation_date,
+        "cash": str(row.cash), "market_value": str(row.market_value), "total_asset": str(row.total_asset),
+        "daily_return": str(row.daily_return), "external_cash_flow": str(row.external_cash_flow),
+        "pnl": str(row.pnl), "price_source": row.price_source, "price_as_of": row.price_as_of,
+        "price_freshness": row.price_freshness, "ledger_checkpoint_hash": row.ledger_checkpoint_hash,
+    }
+
+
+def _review(row: ManualDailyReview) -> dict[str, Any]:
+    return {
+        "id": row.id, "account_id": row.account_id, "review_date": row.review_date,
+        "valuation_id": row.valuation_id, "status": row.status,
+        "reconciliation_status": row.reconciliation_status,
+        "planned_item_count": row.planned_item_count, "reported_fill_count": row.reported_fill_count,
+        "unfilled_item_count": row.unfilled_item_count, "execution_deviation": str(row.execution_deviation),
+        "factor_decay_status": row.factor_decay_status, "data_health": row.data_health,
+        "notes": row.notes, "review_hash": row.review_hash,
+    }
+
+
+@router.post("/accounts/{account_id}/valuations", status_code=201)
+def add_valuation(account_id: str, req: ValuationRequest, db: Session = Depends(get_db)):
+    try:
+        row = record_manual_valuation(db, account_id=account_id, **req.model_dump())
+        return _envelope(_valuation(row), as_of=row.valuation_date)
+    except (ManualReviewError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/accounts/{account_id}/valuations")
+def list_valuations(account_id: str, db: Session = Depends(get_db)):
+    rows = db.scalars(select(ManualValuation).where(
+        ManualValuation.account_id == account_id,
+    ).order_by(ManualValuation.valuation_date.desc()).limit(120)).all()
+    return _envelope([_valuation(row) for row in rows])
+
+
+@router.post("/accounts/{account_id}/reviews", status_code=201)
+def add_review(account_id: str, req: ReviewRequest, db: Session = Depends(get_db)):
+    try:
+        row = create_daily_review(db, account_id=account_id, **req.model_dump())
+        return _envelope(_review(row), as_of=row.review_date, evidence_status=row.status)
+    except (ManualReviewError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/accounts/{account_id}/reviews")
+def list_reviews(account_id: str, db: Session = Depends(get_db)):
+    rows = db.scalars(select(ManualDailyReview).where(
+        ManualDailyReview.account_id == account_id,
+    ).order_by(ManualDailyReview.review_date.desc()).limit(120)).all()
+    return _envelope([_review(row) for row in rows])
+
+
+@router.post("/accounts/{account_id}/research-revisions", status_code=201)
+def add_research_revision(account_id: str, req: RevisionRequest, db: Session = Depends(get_db)):
+    try:
+        row = queue_research_revision(db, account_id=account_id, **req.model_dump())
+        return _envelope({"id": row.id, "review_date": row.review_date, "reason_codes": row.reason_codes, "status": row.status, "revision_hash": row.revision_hash}, evidence_status="research_only")
+    except (ManualReviewError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/accounts/{account_id}/corporate-actions", status_code=201)
+def add_corporate_action(account_id: str, req: CorporateActionRequest, db: Session = Depends(get_db)):
+    try:
+        row = record_corporate_action_fact(db, account_id=account_id, **req.model_dump())
+        return _envelope({"id": row.id, "code": row.code, "action_type": row.action_type, "effective_date": row.effective_date, "source": row.source}, as_of=row.effective_date)
+    except (ManualReviewError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/accounts/{account_id}/jobs")
+def list_jobs(account_id: str, db: Session = Depends(get_db)):
+    rows = db.scalars(select(ManualDailyJob).where(
+        ManualDailyJob.account_id == account_id,
+    ).order_by(ManualDailyJob.run_date.desc(), ManualDailyJob.created_at.desc()).limit(120)).all()
+    return _envelope([{
+        "id": row.id, "job_key": row.job_key, "run_date": row.run_date, "job_type": row.job_type,
+        "status": row.status, "attempt_count": row.attempt_count, "blocked_reason": row.blocked_reason,
+        "result_hash": row.result_hash,
+    } for row in rows])
 
 
 __all__ = ["router"]

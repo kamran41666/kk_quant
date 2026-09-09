@@ -1011,3 +1011,139 @@ class ManualReconciliation(Base):
     ledger_checkpoint_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     calculated_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
     resolved_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+
+
+class ManualDailyJob(Base):
+    """Durable, idempotent work item for the manual daily cycle."""
+    __tablename__ = "manual_daily_job"
+    __table_args__ = (
+        UniqueConstraint("job_key", name="uq_manual_daily_job_key"),
+        CheckConstraint("job_type IN ('open_plan', 'close_plan', 'valuation', 'reconcile', 'review')", name="ck_manual_daily_job_type"),
+        CheckConstraint("status IN ('pending', 'leased', 'running', 'succeeded', 'blocked', 'failed')", name="ck_manual_daily_job_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    job_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    release_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    authorization_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    decision_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    run_date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    job_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    lease_until: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    heartbeat_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    result_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    started_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    completed_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    updated_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualBackupRecord(Base):
+    """Content-addressed metadata for a local manual-table backup."""
+    __tablename__ = "manual_backup_record"
+    __table_args__ = (
+        UniqueConstraint("content_hash", name="uq_manual_backup_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    account_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    backup_path: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(30), nullable=False, default="manual-backup-v1")
+    row_counts: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="written")
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualValuation(Base):
+    """User-reported end-of-day valuation; never a broker quote."""
+    __tablename__ = "manual_valuation"
+    __table_args__ = (
+        UniqueConstraint("account_id", "valuation_date", name="uq_manual_valuation_date"),
+        CheckConstraint("cash >= 0 AND market_value >= 0 AND total_asset >= 0", name="ck_manual_valuation_nonnegative"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    valuation_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    cash: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    market_value: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    total_asset: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    daily_return: Mapped[Decimal] = mapped_column(Numeric(18, 10), nullable=False, default=Decimal("0"))
+    external_cash_flow: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    pnl: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    price_source: Mapped[str] = mapped_column(String(80), nullable=False, default="user_reported")
+    price_as_of: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    price_freshness: Mapped[str] = mapped_column(String(20), nullable=False, default="user_reported")
+    ledger_checkpoint_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualDailyReview(Base):
+    """Cash-flow-neutral daily review and execution deviation snapshot."""
+    __tablename__ = "manual_daily_review"
+    __table_args__ = (
+        UniqueConstraint("account_id", "review_date", name="uq_manual_daily_review_date"),
+        CheckConstraint("status IN ('draft', 'ready', 'blocked', 'superseded')", name="ck_manual_daily_review_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    review_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    valuation_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    reconciliation_status: Mapped[str] = mapped_column(String(20), nullable=False, default="not_run")
+    planned_item_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reported_fill_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unfilled_item_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    execution_deviation: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    factor_decay_status: Mapped[str] = mapped_column(String(30), nullable=False, default="not_evaluated")
+    data_health: Mapped[str] = mapped_column(String(30), nullable=False, default="user_reported")
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    review_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ResearchRevision(Base):
+    """Research-only revision queue item; it cannot change a manual release."""
+    __tablename__ = "research_revision"
+    __table_args__ = (
+        CheckConstraint("status IN ('queued', 'in_review', 'accepted', 'rejected')", name="ck_research_revision_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    release_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    account_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    review_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    reason_codes: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    evidence: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    revision_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualCorporateActionFact(Base):
+    """Immutable user-reported corporate-action fact; no automatic adjustment."""
+    __tablename__ = "manual_corporate_action_fact"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_manual_corporate_action_key"),
+        CheckConstraint("source = 'user_reported'", name="ck_manual_corporate_action_source"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    action_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    effective_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    factor: Mapped[Decimal] = mapped_column(Numeric(20, 10), nullable=False, default=Decimal("1"))
+    cash_amount: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="user_reported")
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)

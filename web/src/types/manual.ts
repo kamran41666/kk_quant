@@ -55,3 +55,36 @@ export interface ManualPlan {
   blocked_reason?: string | null
   items: ManualPlanItem[]
 }
+
+export interface ManualValuation {
+  id: string
+  account_id: string
+  valuation_date: string
+  cash: string
+  market_value: string
+  total_asset: string
+  daily_return: string
+  external_cash_flow: string
+  pnl: string
+  price_source: string
+  price_as_of?: string | null
+  price_freshness: string
+  ledger_checkpoint_hash: string
+}
+
+export interface ManualReview {
+  id: string
+  account_id: string
+  review_date: string
+  valuation_id: string
+  status: string
+  reconciliation_status: string
+  planned_item_count: number
+  reported_fill_count: number
+  unfilled_item_count: number
+  execution_deviation: string
+  factor_decay_status: string
+  data_health: string
+  notes?: string | null
+  review_hash: string
+}
