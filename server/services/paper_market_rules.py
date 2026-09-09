@@ -14,6 +14,8 @@ from datetime import date, timedelta
 import calendar
 from typing import Optional
 
+from quant_engine.trading.effective_rules import legacy_paper_fee_for
+
 
 A_SHARE = "a-share"
 CN_FUND = "cn-fund"
@@ -240,15 +242,10 @@ def accepts_quote_freshness(market: str, freshness: str) -> bool:
 
 def fee_for(market: str, notional: float, side: str) -> tuple[float, float]:
     """Return (commission, stamp duty) in the account's base currency."""
-    market = normalize_market(market)
-    if market == A_SHARE:
-        commission = max(float(notional) * 0.00025, 5.0)
-        stamp = float(notional) * 0.001 if side == "sell" else 0.0
-        return commission, stamp
-    # The public fund/NAV and Yahoo research feeds do not provide a broker fee
-    # schedule.  Keep the paper fill deterministic and report zero fees rather
-    # than inventing a broker-specific commission.
-    return 0.0, 0.0
+    # Keep the persistent paper ledger on its historical schedule.  The new
+    # manual-execution planner resolves effective-dated rules separately; it
+    # must not rewrite existing paper rows or historical paper results.
+    return legacy_paper_fee_for(normalize_market(market), notional, side)
 
 
 def market_metadata(market: Optional[str]) -> dict[str, str]:

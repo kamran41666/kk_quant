@@ -659,3 +659,25 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 当前代码已具备受限因子生成、训练/验证门、冻结bundle、原价公司行动组合回测、纸面账户与观察、审计和前端因子工作台。人工执行链尚未创建。
 
 下一次开发从M1开始：先实现有效日期规则和纯计划状态机，不创建数据库表、不修改真实或纸面账户。M1完成并统一验证后进入M2。
+
+## 18. M1实施记录
+
+### 2026-09-09 22:16 CST
+
+- 已新增 `quant_engine/trading/manual_protocol.py`、`quant_engine/factor/manual_daily_label.py`、`quant_engine/trading/effective_rules.py` 和 `server/services/manual_planning.py`，并新增 `tests/test_manual_protocol.py`、`tests/test_manual_planning.py`。
+- 已实现 `manual-daily-label-v1` 的交易日历步进、按生效日期解析A股规则、`Decimal`费用估算、类型化策略/决策/批次/计划/计划项、卖出优先、只使用确认现金、A股买入100股整手、全部零股卖出、阻断/对账优先级以及draft刷新和ready/viewed版本修订。
+- `paper_market_rules.py` 仅复用独立的历史纸面费用适配器，既有持久纸面仍保持卖出印花税0.001；人工计划按生效日期读取规则，2023-08-28起的默认A股规则使用0.0005。
+- 本阶段实际验证：M1专项17项、纸面交易/跨市场回归23项和后端全量717项均通过；compileall、Ruff、`git diff --check`通过。全量测试有83个既有警告，未据此宣称失败或消失。
+- M1没有创建数据库表、写入账本、调用网络、访问当前时间、提交计划到券商或生成模拟成交。M2持久模型/影子账本仍未开始；本实施记录不改变后续阶段门禁。
+
+## 19. M2实施记录
+
+### 2026-09-09 22:36 CST
+
+- 已实现M2数据库模型、人工现金/成交事实写入、账户级哈希链账本、A股T+1批次重放、幂等更正和账户对账基础；本节记录当前施工快照，不代表后续阶段完成。
+- 人工链使用`manual_*`表，`source`固定为`user_reported`；服务不调用纸面提交服务，不创建或修改`PaperOrder`、`PaperFill`、`PaperLedgerEvent`、`PaperLot`等纸面对象。新经济字段采用SQLAlchemy `Numeric`并在服务入口量化为Decimal，不用Float承载成交、费用或现金。
+- 每个账户的`account_sequence`从1递增；事件哈希覆盖账户、序号、引用、交易日、现金/数量变动、代码、载荷及前哈希。人工现金事件和成交事件先形成不可变事实，再追加账本事件；物化批次由账本重放生成，账户现金与检查点哈希同步更新。
+- 买入必须传入可验证交易日历，解锁日为下一交易日；卖出按买入时间排序的可用批次消费，支持最后不足整手的全部卖出；费用拆分必须满足`total_fee=commission+stamp_duty+other_fee`。成交更正保留原事实，追加冲正事实和替代成交事实，不更新原记录。
+- 可保存用户回报的现金、总资产和持仓快照，比较账本现金/数量并落库`matched`或`different`；差异将账户置为`reconcile`，不自动修正账本。
+- 实际验证：`tests/test_manual_ledger.py`与`tests/test_manual_migrations.py`共5项通过；后续提交前须补跑后端全量回归和跨平台静态检查。
+- 下一步：M3实现策略发布包、组合批次和持仓归属，仍需保持人工成交链与研究/纸面链隔离。

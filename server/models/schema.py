@@ -1,8 +1,9 @@
 """ORM models for server database"""
-from datetime import datetime
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
 import uuid
-from sqlalchemy import Boolean, String, Float, Integer, Text, UniqueConstraint
+from sqlalchemy import Boolean, String, Float, Integer, Text, Numeric, CheckConstraint, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from server.models.database import Base
 
@@ -13,6 +14,11 @@ def uuid4_str() -> str:
 
 def now_str() -> str:
     return datetime.now().isoformat()
+
+
+def manual_now_str() -> str:
+    """UTC timestamp used by the append-only manual execution chain."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 class Strategy(Base):
@@ -566,3 +572,200 @@ class AuditEvent(Base):
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)
     details: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[str] = mapped_column(String(40), default=now_str)
+
+
+class ManualAccount(Base):
+    """A human-operated account; it has no broker connection or submit path."""
+    __tablename__ = "manual_account"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False, default="CNY")
+    broker_label: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    confirmed_cash: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    ledger_checkpoint_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    risk_policy: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    last_reconciled_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    updated_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+    __table_args__ = (
+        CheckConstraint("currency = 'CNY'", name="ck_manual_account_currency_cny"),
+        CheckConstraint("confirmed_cash >= 0", name="ck_manual_account_cash_nonnegative"),
+        CheckConstraint("status IN ('draft', 'active', 'reconcile', 'suspended', 'closed')", name="ck_manual_account_status"),
+    )
+
+
+class ManualExecutionEvent(Base):
+    """An immutable user-reported execution fact, never a broker submission."""
+    __tablename__ = "manual_execution_event"
+    __table_args__ = (
+        UniqueConstraint("client_event_id", name="uq_manual_execution_client_event"),
+        UniqueConstraint("account_id", "user_trade_ref", name="uq_manual_execution_trade_ref"),
+        CheckConstraint("source = 'user_reported'", name="ck_manual_execution_source"),
+        CheckConstraint(
+            "event_type IN ('submitted', 'partial_fill', 'fill', 'cancelled', 'rejected', 'skipped', 'fee_adjustment', 'fill_reversal', 'fill_correction')",
+            name="ck_manual_execution_event_type",
+        ),
+        CheckConstraint("side IN ('buy', 'sell') OR side IS NULL", name="ck_manual_execution_side"),
+        CheckConstraint("quantity IS NULL OR quantity > 0", name="ck_manual_execution_quantity_positive"),
+        CheckConstraint("price IS NULL OR price > 0", name="ck_manual_execution_price_positive"),
+        CheckConstraint("commission >= 0 AND stamp_duty >= 0 AND other_fee >= 0 AND total_fee >= 0", name="ck_manual_execution_fees_nonnegative"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    client_event_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    item_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    code: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
+    cohort_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    user_trade_ref: Mapped[Optional[str]] = mapped_column(String(160), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    quantity: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True)
+    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True)
+    commission: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    stamp_duty: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    other_fee: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    total_fee: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    traded_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="user_reported")
+    supersedes_event_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualCashEvent(Base):
+    """Append-only cash-flow fact used to establish and correct cash."""
+    __tablename__ = "manual_cash_event"
+    __table_args__ = (
+        UniqueConstraint("account_id", "idempotency_key", name="uq_manual_cash_idempotency"),
+        CheckConstraint("source = 'user_reported'", name="ck_manual_cash_source"),
+        CheckConstraint(
+            "event_type IN ('opening_balance', 'deposit', 'withdrawal', 'interest', 'fee_adjustment')",
+            name="ck_manual_cash_event_type",
+        ),
+        CheckConstraint("amount <> 0", name="ck_manual_cash_amount_nonzero"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="user_reported")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="confirmed")
+    correction_of: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualLedgerEvent(Base):
+    """Per-account hash-chained economic event, rebuilt from source facts."""
+    __tablename__ = "manual_ledger_event"
+    __table_args__ = (
+        UniqueConstraint("account_id", "account_sequence", name="uq_manual_ledger_account_sequence"),
+        CheckConstraint("cash_delta <> 0 OR quantity_delta <> 0", name="ck_manual_ledger_nonempty"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    account_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    reference_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    trade_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    cash_delta: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    quantity_delta: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
+    code: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
+    cohort_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    payload: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    previous_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    event_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualPositionLot(Base):
+    """Materialized A-share lots; source-of-truth remains the ledger."""
+    __tablename__ = "manual_position_lot"
+    __table_args__ = (
+        CheckConstraint("quantity > 0 AND remaining_quantity >= 0 AND remaining_quantity <= quantity", name="ck_manual_lot_quantity"),
+        CheckConstraint("avg_cost >= 0", name="ck_manual_lot_cost_nonnegative"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    cohort_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    remaining_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    avg_cost: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    buy_at: Mapped[str] = mapped_column(String(10), nullable=False)
+    unlock_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    planned_exit_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    updated_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualAccountSnapshot(Base):
+    """User-reported broker statement snapshot, separate from the ledger."""
+    __tablename__ = "manual_account_snapshot"
+    __table_args__ = (
+        UniqueConstraint("account_id", "idempotency_key", name="uq_manual_snapshot_idempotency"),
+        CheckConstraint("source = 'user_reported'", name="ck_manual_snapshot_source"),
+        CheckConstraint("status IN ('pending', 'reconciled', 'different')", name="ck_manual_snapshot_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    as_of: Mapped[str] = mapped_column(String(40), nullable=False)
+    cash: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    total_asset: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="user_reported")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualPositionSnapshot(Base):
+    """Positions copied from a user-reported account snapshot."""
+    __tablename__ = "manual_position_snapshot"
+    __table_args__ = (
+        CheckConstraint("total_quantity >= 0 AND available_quantity >= 0", name="ck_manual_snapshot_quantity"),
+        CheckConstraint("avg_cost >= 0 AND market_value >= 0", name="ck_manual_snapshot_values"),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    total_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    available_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    avg_cost: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    market_value: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
+
+
+class ManualReconciliation(Base):
+    """Durable comparison between the ledger and one user-reported snapshot."""
+    __tablename__ = "manual_reconciliation"
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'matched', 'different', 'resolved')", name="ck_manual_reconciliation_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    plan_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    snapshot_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    planned_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
+    filled_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
+    unfilled_quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
+    quantity_differences: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    position_differences: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    cash_difference: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    reference_slippage: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    actual_fees: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False, default=Decimal("0"))
+    ledger_checkpoint_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    calculated_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    resolved_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)

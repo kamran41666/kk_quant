@@ -17,6 +17,22 @@
 
 ## 记录
 
+### 2026-09-09 22:36 CST — M2人工账户与可重放影子账本
+
+- Git：`phase4-factor-develop`；基于远端最新 `5c225a4` 开发。本条记录与M1、M2代码尚未提交或推送；接手前已有的 `.playwright-cli/`、`output/`、`tmp_*` 未跟踪目录保持原样。
+- 修改：新增 `manual_account`、`manual_execution_event`、`manual_cash_event`、`manual_ledger_event`、`manual_position_lot`、账户/持仓快照、对账模型；新增 `server/services/manual_ledger.py`。人工成交和现金只接受 `user_reported`，按账户顺序追加哈希链，使用 Decimal/Numeric，成交后重放现金和批次，A股买入要求注入已验证交易日历并执行T+1，卖出按可用批次支持零股清仓；幂等键、券商成交引用、费用分项、追加式更正/冲正和对账状态已实现。人工链不调用 `paper_trading`，不写入 `Paper*` 表。
+- 验证：M2定向测试 `5 passed`；M2模型编译和 Ruff 通过。新增 SQLite 旧库迁移测试覆盖 `init_db()` 的新表创建和既有字段追加；尚未运行M2后的后端全量回归。
+- 边界：M2尚未实现公司行动、HTTP/UI、策略发布/晋级、holdout、日决策/计划、worker、备份和30日观察；仍无券商认证、下单或真实资金路径。Windows/macOS代码设计继续不依赖平台专属路径、shell或系统API，尚未在两套系统分别运行。
+- 入口：[`M2实施记录`](docs/manual-daily-trading-implementation-plan.md#19-m2实施记录)、[`人工账本服务`](server/services/manual_ledger.py)、[`人工执行领域语言`](CONTEXT.md)。
+
+### 2026-09-09 22:16 CST — M1规则注册与纯计划模块
+
+- Git：已从远端最新 `origin/phase4-factor-develop` 切换并保持同步；当前 `HEAD=5c225a4`，工作树含本轮未提交修改及接手前已有的未跟踪目录，未提交、未推送。
+- 修改：新增 `quant_engine/trading/manual_protocol.py`、`quant_engine/factor/manual_daily_label.py`、`quant_engine/trading/effective_rules.py` 和 `server/services/manual_planning.py`；实现 `manual-daily-label-v1` 的交易日步进与 `T+1 open → T+2 close` 标签、两批45%人工策略协议对象、稳定哈希、按市场/板块/生效日期解析规则、A股买入整手/卖出零股清仓、卖出优先、只使用已确认现金的纯计划、刷新/版本修订和状态优先级/前置检查。`paper_market_rules.py` 改为调用独立的历史纸面费用适配器，保留旧纸面卖出印花税0.001口径，不改写既有纸面结果。
+- 验证：M1专项 `17 passed`；既有纸面交易与跨市场回归 `23 passed`；后端全量 `717 passed, 83 warnings`；Python compileall、Ruff和`git diff --check`通过。警告为既有 matcher 用户警告及研究图表中文字体缺字提示。
+- 边界：本轮没有建数据库表、实现影子账本、HTTP、前端、worker、晋级/holdout或人工成交回填，也没有新增真实券商能力；M2及后续阶段尚未开始。计划对象不代表已成交，`auto_submit`仍被拒绝。Windows/macOS兼容性通过不使用平台专属路径、shell或系统调用保持，尚未在两套系统分别运行。
+- 入口：[`M1实施记录`](docs/manual-daily-trading-implementation-plan.md#18-m1实施记录)、[`人工执行领域语言`](CONTEXT.md)、[`文档地图`](docs/README.md)。
+
 ### 2026-09-09 19:00 CST — 冻结A股日频人工执行工程方案
 
 - Git：`phase4-factor-develop`；工程方案提交 `7beb7d9` 已创建，本条Progress记录随后的文档提交一并推送到 `origin/phase4-factor-develop`。
