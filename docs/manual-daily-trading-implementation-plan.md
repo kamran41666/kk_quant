@@ -681,3 +681,12 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - 可保存用户回报的现金、总资产和持仓快照，比较账本现金/数量并落库`matched`或`different`；差异将账户置为`reconcile`，不自动修正账本。
 - 实际验证：`tests/test_manual_ledger.py`与`tests/test_manual_migrations.py`共5项通过；后续提交前须补跑后端全量回归和跨平台静态检查。
 - 下一步：M3实现策略发布包、组合批次和持仓归属，仍需保持人工成交链与研究/纸面链隔离。
+
+## 20. M3实施记录
+
+### 2026-09-09 22:44 CST
+
+- 新增独立`ManualDailyFactorBundleV2`，没有修改`FrozenFactorStrategyBundle`字段或v1身份；bundle显式记录收盘信号、T+1开盘进入、T+2收盘退出、双cohort、每批45%、入场过期、退出重试、费用场景和`auto_submit=false`，通过完整证据哈希生成bundle hash。
+- 新增原价输入组合回测`run_manual_daily_portfolio`：从注入的归档日历和bars读取，不访问网络/数据库；同日只在收盘捕获signal，后续交易日开盘使用信号，退出使用收盘；共享现金、A股整手买入、全部持仓零股清仓、停牌/缺bar审计、baseline/stress费用和结果hash均为可重放结果。输出明确为研究结果，不产生paper或manual成交。
+- 因子实验新增完整`label_spec`身份并保留旧默认open/open标签；SQLite旧库由`init_db()`追加`factor_experiment.label_spec`，旧研究结果不被重解释。
+- 实际验证：M3专项与因子/研究回归共71项通过；结果hash重复运行一致。下一阶段需实现M4发布晋级、真实holdout访问证据和人工授权状态门。

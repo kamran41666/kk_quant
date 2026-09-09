@@ -106,6 +106,9 @@ class FactorExperiment(Base):
     forward_horizon: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     stage: Mapped[str] = mapped_column(String(20), nullable=False, default="training")
     evaluation_policy: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    # Full forward-label identity; legacy rows default to the prior open/open
+    # convention and are not silently reinterpreted as manual-daily labels.
+    label_spec: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="queued", index=True)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     lease_owner: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)

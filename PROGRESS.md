@@ -17,6 +17,14 @@
 
 ## 记录
 
+### 2026-09-09 22:44 CST — M3日频标签、策略包与双批组合回测
+
+- Git：`phase4-factor-develop`；M2本地提交为`6f8c4db`，两次push均因外网连接失败未同步远端；本条M3尚未提交。已有`.playwright-cli/`、`output/`、`tmp_*`未跟踪目录继续保留。
+- 修改：新增独立`ManualDailyFactorBundleV2`和原价输入的`run_manual_daily_portfolio`及CLI；固定收盘信号、T+1开盘进入、T+2收盘退出、最多双cohort、每批45%、卖出全部持仓、baseline/stress费用和确定性结果哈希，数据/日历不完整时阻断。因子实验身份新增完整`label_spec`并加入SQLite旧库加列迁移，未改写v1 bundle或旧研究结果。
+- 验证：M3专项5项及因子/研究回归71项通过；M2后的后端全量尚未再次运行。代码仍无券商调用，组合结果标记`research_only=true`、`paper_authorized=false`、`auto_submit=false`。
+- 边界：M3未实现发布晋级/holdout/授权、日决策计划、HTTP/UI、worker/备份/复盘、30日观察和首次人工成交；M2 push待网络恢复后补推。Windows/macOS继续只使用Python、Path、Parquet/SQLite等跨平台接口，尚未在两套系统分别运行。
+- 入口：[`M3实施记录`](docs/manual-daily-trading-implementation-plan.md#20-m3实施记录)、[`日频bundle`](quant_engine/factor/manual_daily_bundle.py)、[`组合回测`](quant_engine/backtest/manual_daily_portfolio.py)。
+
 ### 2026-09-09 22:36 CST — M2人工账户与可重放影子账本
 
 - Git：`phase4-factor-develop`；基于远端最新 `5c225a4` 开发。本条记录与M1、M2代码尚未提交或推送；接手前已有的 `.playwright-cli/`、`output/`、`tmp_*` 未跟踪目录保持原样。

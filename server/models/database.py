@@ -44,6 +44,7 @@ def init_db():
         "factor_experiment": {
             "stage": "VARCHAR(20) NOT NULL DEFAULT 'training'",
             "evaluation_policy": "TEXT NOT NULL DEFAULT '{}'",
+            "label_spec": "TEXT NOT NULL DEFAULT '{}'",
         },
         "paper_account_position": {
             "market": "VARCHAR(20) NOT NULL DEFAULT 'a-share'",

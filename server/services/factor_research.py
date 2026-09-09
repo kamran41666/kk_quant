@@ -74,6 +74,7 @@ def serialize_experiment(row: FactorExperiment) -> dict[str, Any]:
         "end_date": row.end_date,
         "forward_horizon": row.forward_horizon,
         "stage": row.stage,
+        "label_spec": json.loads(row.label_spec or "{}"),
         "evaluation_policy": FactorGatePolicy.from_dict(
             json.loads(row.evaluation_policy or "{}")
         ).as_dict(),
@@ -190,6 +191,7 @@ def queue_experiment(
     forward_horizon: int = 5,
     stage: str = "training",
     evaluation_policy: Mapping[str, Any] | None = None,
+    label_spec: Mapping[str, Any] | None = None,
     data_root: Path | None = None,
 ) -> tuple[FactorExperiment, bool]:
     if start > end:
@@ -203,6 +205,12 @@ def queue_experiment(
         raise KeyError(f"factor candidate not found: {candidate_id}")
     policy = FactorGatePolicy.from_dict(evaluation_policy)
     policy_json = json.dumps(policy.as_dict(), sort_keys=True, allow_nan=False)
+    resolved_label_spec = dict(label_spec or {
+        "protocol_version": "legacy-open-label-v1",
+        "signal_phase": "close", "entry_offset": 1, "entry_phase": "open",
+        "exit_offset": forward_horizon + 1, "exit_phase": "open",
+    })
+    label_json = json.dumps(resolved_label_spec, sort_keys=True, allow_nan=False)
     manifests = _manifest_index(data_root or Path(settings.data_dir))
     if dataset_id not in manifests:
         raise KeyError(f"registered frozen research dataset not found: {dataset_id}")
@@ -258,6 +266,8 @@ def queue_experiment(
         )
         if existing_policy != policy:
             raise ValueError("factor experiment identity already exists with a different gate policy")
+        if json.loads(existing.label_spec or "{}") != resolved_label_spec:
+            raise ValueError("factor experiment identity already exists with a different label spec")
         return existing, False
     row = FactorExperiment(
         candidate_id=candidate_id,
@@ -268,6 +278,7 @@ def queue_experiment(
         forward_horizon=forward_horizon,
         stage=stage,
         evaluation_policy=policy_json,
+        label_spec=label_json,
         status="queued",
     )
     db.add(row)
@@ -460,7 +471,9 @@ def _research_panel(
         if field in {"open", "high", "low", "close"}:
             values = values * ratio
         daily[field] = values.where(eligible)
-    panel = daily.set_index(["code", "date"])[sorted(fields)].sort_index()
+    # Keep adjusted open/close in the panel so a queued experiment can carry
+    # its complete label definition instead of relying on a hidden convention.
+    panel = daily.set_index(["code", "date"])[sorted(fields | {"open", "close"})].sort_index()
     open_wide = daily.set_index(["date", "code"])["open"].unstack("code").sort_index()
     return panel, open_wide
 
@@ -575,11 +588,19 @@ def execute_experiment(
         factor = _period(spec.compute(panel[list(spec.required_fields)]), start, end)
         factor_frame = factor.to_frame("factor")
         factor_wide = to_wide(factor)
-        # Match the existing label convention: T signal, T+1 open entry,
-        # T+1+h open exit, without exposing labels to the expression.
-        labels = open_wide.shift(-(row.forward_horizon + 1)).div(
-            open_wide.shift(-1)
-        ) - 1.0
+        label_spec = json.loads(row.label_spec or "{}")
+        entry_offset = int(label_spec.get("entry_offset", 1))
+        exit_offset = int(label_spec.get("exit_offset", row.forward_horizon + 1))
+        entry_field = str(label_spec.get("entry_field", "open"))
+        exit_field = str(label_spec.get("exit_field", "open"))
+        if entry_field not in {"open", "close"} or exit_field not in {"open", "close"}:
+            raise ValueError("factor experiment label fields are unsupported")
+        if entry_field == "open":
+            entry_wide = open_wide
+        else:
+            entry_wide = panel[entry_field].unstack("code").sort_index()
+        exit_wide = entry_wide if exit_field == entry_field else panel[exit_field].unstack("code").sort_index()
+        labels = exit_wide.shift(-exit_offset).div(entry_wide.shift(-entry_offset)) - 1.0
         labels = labels.reindex(index=factor_wide.index, columns=factor_wide.columns)
         ic_series = calc_ic(factor_wide, labels, method="rank")
         ic_summary = {
@@ -632,6 +653,7 @@ def execute_experiment(
             "start_date": row.start_date,
             "end_date": row.end_date,
             "forward_horizon": row.forward_horizon,
+            "label_spec": label_spec,
             "stage": row.stage,
             "forward_return_definition": "signal_t_close; entry_t_plus_1_open; exit_t_plus_1_plus_h_open",
             "row_count": len(factor),

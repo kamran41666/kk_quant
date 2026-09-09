@@ -18,6 +18,7 @@ from quant_engine.factor.expression import (
 from quant_engine.factor.gates import FactorGateError, FactorGatePolicy
 from quant_engine.factor.generation import FactorCandidateGenerator, GENERATORS
 from quant_engine.factor.frozen import FrozenFactorStrategyBundle
+from quant_engine.factor.manual_daily_bundle import ManualDailyFactorBundleV2
 from quant_engine.factor.strategy import build_expression_rank_strategy
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "FactorCandidateGenerator",
     "GENERATORS",
     "FrozenFactorStrategyBundle",
+    "ManualDailyFactorBundleV2",
     "build_expression_rank_strategy",
     "compute_factor",
     "get_factor_definition",
