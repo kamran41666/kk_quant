@@ -1147,3 +1147,57 @@ class ManualCorporateActionFact(Base):
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualProspectivePilot(Base):
+    """Thirty-trading-day prospective observation envelope."""
+    __tablename__ = "manual_prospective_pilot"
+    __table_args__ = (
+        UniqueConstraint("pilot_key", name="uq_manual_pilot_key"),
+        CheckConstraint("data_mode IN ('real_forward', 'synthetic_engineering')", name="ck_manual_pilot_data_mode"),
+        CheckConstraint("status IN ('planned', 'observing', 'passed', 'failed', 'blocked')", name="ck_manual_pilot_status"),
+        CheckConstraint("target_days > 0", name="ck_manual_pilot_target_days"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    pilot_key: Mapped[str] = mapped_column(String(180), nullable=False)
+    release_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    strategy_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    target_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    data_mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="planned")
+    observation_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    valid_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    required_evidence: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    report_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    report_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True)
+    blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    completed_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+
+
+class ManualPilotObservation(Base):
+    """One immutable day in a prospective paper observation."""
+    __tablename__ = "manual_pilot_observation"
+    __table_args__ = (
+        UniqueConstraint("pilot_id", "observation_date", name="uq_manual_pilot_observation_date"),
+        UniqueConstraint("idempotency_key", name="uq_manual_pilot_observation_key"),
+        CheckConstraint("source IN ('real_forward', 'synthetic_engineering')", name="ck_manual_pilot_observation_source"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    pilot_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    observation_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    data_as_of: Mapped[str] = mapped_column(String(10), nullable=False)
+    received_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    signal_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_action: Mapped[str] = mapped_column(String(30), nullable=False)
+    actual_return: Mapped[Decimal] = mapped_column(Numeric(18, 10), nullable=False, default=Decimal("0"))
+    reconciled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source: Mapped[str] = mapped_column(String(30), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+

@@ -34,6 +34,13 @@ from server.services.manual_review import (
     record_corporate_action_fact,
     record_manual_valuation,
 )
+from server.models.schema import ManualProspectivePilot
+from server.services.manual_pilot import (
+    ManualPilotError,
+    create_pilot,
+    finalize_pilot,
+    record_pilot_observation,
+)
 from server.services.operator_auth import require_operator
 
 
@@ -139,6 +146,31 @@ class CorporateActionRequest(StrictModel):
     note: Optional[str] = Field(default=None, max_length=500)
 
 
+class PilotCreateRequest(StrictModel):
+    release_id: str
+    strategy_fingerprint: str = Field(min_length=64, max_length=64)
+    start_date: date | str
+    data_mode: str = Field(pattern=r"^(real_forward|synthetic_engineering)$")
+    pilot_key: Optional[str] = Field(default=None, min_length=8, max_length=180)
+
+
+class PilotObservationRequest(StrictModel):
+    observation_date: date | str
+    data_as_of: date | str
+    received_at: datetime | str
+    input_hash: str = Field(min_length=64, max_length=64)
+    signal_hash: str = Field(min_length=64, max_length=64)
+    observed_action: str = Field(min_length=1, max_length=30)
+    actual_return: Decimal = Decimal("0")
+    reconciled: bool = False
+    idempotency_key: str = Field(min_length=8, max_length=160)
+    notes: Optional[str] = Field(default=None, max_length=1000)
+
+
+class PilotFinalizeRequest(StrictModel):
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
 def _envelope(data: Any, *, as_of: str | None = None, evidence_status: str = "user_reported") -> dict[str, Any]:
     return {
         "data": data, "manual_execution": True, "broker_connected": False,
@@ -161,7 +193,7 @@ def _account(account: ManualAccount) -> dict[str, Any]:
 
 
 def _calendar_for(value: Any) -> TradingCalendar:
-    moment = value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
+    moment = value.date() if isinstance(value, datetime) else value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
     calendar = TradingCalendar(start_year=moment.year, end_year=moment.year + 1)
     report = calendar.ensure_coverage(moment, moment + timedelta(days=10))
     if not report.get("complete"):
@@ -346,6 +378,64 @@ def list_jobs(account_id: str, db: Session = Depends(get_db)):
         "status": row.status, "attempt_count": row.attempt_count, "blocked_reason": row.blocked_reason,
         "result_hash": row.result_hash,
     } for row in rows])
+
+
+def _pilot(row: ManualProspectivePilot) -> dict[str, Any]:
+    return {
+        "id": row.id, "pilot_key": row.pilot_key, "release_id": row.release_id,
+        "strategy_fingerprint": row.strategy_fingerprint, "start_date": row.start_date,
+        "target_days": row.target_days, "data_mode": row.data_mode, "status": row.status,
+        "observation_days": row.observation_days, "valid_days": row.valid_days,
+        "report_hash": row.report_hash, "blocked_reason": row.blocked_reason,
+        "required_evidence": row.required_evidence,
+    }
+
+
+def _pilot_calendar(value: Any) -> TradingCalendar:
+    moment = value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
+    calendar = TradingCalendar(start_year=moment.year, end_year=moment.year + 1)
+    report = calendar.ensure_coverage(moment, moment + timedelta(days=90))
+    if not report.get("complete"):
+        raise ManualPilotError("TRADING_CALENDAR_UNAVAILABLE")
+    return calendar
+
+
+@router.post("/pilots", status_code=201)
+def add_pilot(req: PilotCreateRequest, db: Session = Depends(get_db)):
+    try:
+        row = create_pilot(db, **req.model_dump())
+        return _envelope(_pilot(row), evidence_status=row.status)
+    except (ManualPilotError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/pilots")
+def list_pilots(db: Session = Depends(get_db)):
+    rows = db.scalars(select(ManualProspectivePilot).order_by(ManualProspectivePilot.created_at.desc())).all()
+    return _envelope([_pilot(row) for row in rows])
+
+
+@router.post("/pilots/{pilot_id}/observations", status_code=201)
+def add_pilot_observation(pilot_id: str, req: PilotObservationRequest, db: Session = Depends(get_db)):
+    try:
+        row = record_pilot_observation(db, pilot_id, calendar=_pilot_calendar(req.observation_date), **req.model_dump())
+        return _envelope({
+            "id": row.id, "pilot_id": row.pilot_id, "observation_date": row.observation_date,
+            "data_as_of": row.data_as_of, "received_at": row.received_at,
+            "input_hash": row.input_hash, "signal_hash": row.signal_hash,
+            "source": row.source, "reconciled": row.reconciled,
+        }, as_of=row.data_as_of, evidence_status="observed")
+    except (ManualPilotError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/pilots/{pilot_id}/finalize", status_code=201)
+def finalize_pilot_report(pilot_id: str, req: PilotFinalizeRequest, db: Session = Depends(get_db)):
+    try:
+        row = finalize_pilot(db, pilot_id, evidence=req.evidence)
+        return _envelope(_pilot(row), evidence_status=row.status)
+    except (ManualPilotError, ValueError) as exc:
+        raise _error(exc) from exc
 
 
 __all__ = ["router"]

@@ -17,6 +17,14 @@
 
 ## 记录
 
+### 2026-09-09 23:46 CST — M8三十日真实前瞻纸面观察框架
+
+- Git：`phase4-factor-develop`；M7本地提交`981a7d9`已生成但push因GitHub连接重置失败；M8修改尚未提交。M6仍为本地提交`1d98974`，远端同步待网络恢复后重试；既有未跟踪目录继续保留。
+- 修改：新增`ManualProspectivePilot`和`ManualPilotObservation`，以及`manual_pilot.py`和人工API的pilot创建、逐日观察、终结报告接口。观察目标天数强制为30个交易日，真实前瞻数据的`received_at`必须晚于pilot启动日，输入/信号hash、每日对账、研究/组合/holdout/replay/risk/data-health证据和P0/P1、回撤、日亏损门缺一不可；合成/回放明确只能工程验收，不能生成通过状态。pilot报告不可变且带报告hash，备份范围同步覆盖pilot证据。
+- 验证：M8 pilot专项`2 passed`；连同M7/M6人工域专项`9 passed`；Ruff、compileall通过。测试中的30日生成只用于验证状态机，不代表现实市场已完成30日观察。
+- 边界：当前日期没有被伪造为30日真实前瞻观察完成；策略release不会因pilot自动晋级，必须由真实开始日之后到达的数据和独立证据满足原方案门禁。M9授权/计划确认/首笔成交代码仍未提交，后续单独完成并推送。
+- 入口：[`M8实施记录`](docs/manual-daily-trading-implementation-plan.md#25-m8实施记录)、[`前瞻pilot`](server/services/manual_pilot.py)、[`pilot API`](server/api/manual_trading.py)。
+
 ### 2026-09-09 23:31 CST — M7持久worker、备份与日终复盘
 
 - Git：`phase4-factor-develop`；M6本地提交`1d98974`已生成但两次push均因GitHub `443`连接失败未确认远端同步；M7修改尚未提交。既有未跟踪目录继续保留。

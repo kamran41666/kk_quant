@@ -728,3 +728,12 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - 新增`ManualValuation`、`ManualDailyReview`、`ResearchRevision`、`ManualCorporateActionFact`。估值要求现金+持仓市值=总资产，首日不计算虚假收益，后续收益按真实用户报告现金流中和；对账不同或账户处于`reconcile`时复盘为`blocked`。公司行动只保存`user_reported`事实，不自动改写持仓；研究修订只进研究队列，不改变已发布授权。
 - 人工HTTP和操作台新增估值、复盘、任务只读、研究修订和公司行动事实入口；新增数据仍不进入Paper链，也没有券商认证或订单提交能力。
 - 实际验证：M7专项调度/备份/复盘`6 passed`；连同人工HTTP回归`7 passed`；前端`15 passed`，`npm run build`、Ruff、`compileall`通过。M7不宣称已完成M8/M9的真实前瞻和用户首笔交易门。
+
+## 25. M8实施记录
+
+### 2026-09-09 23:46 CST
+
+- 新增`ManualProspectivePilot`与`ManualPilotObservation`，pilot只接受30个交易日目标；观察日必须是注入日历中的交易日，真实前瞻模式要求`received_at`发生在pilot启动日之后，且`data_as_of`不得晚于观察日。每日日志保留输入hash、信号hash、来源、回填对账状态和到达时间。
+- `manual_pilot.py`提供创建、逐日追加和不可变终结报告。终结报告同时检查研究、组合、holdout、重放、风险、数据健康、30日/每日对账、P0/P1、最大回撤和日亏损次数；`synthetic_engineering`永远追加`synthetic_engineering_not_eligible_for_pass`，不能被当作真实前瞻通过。
+- 人工API新增pilot生命周期路由；backup服务涵盖pilot及观察记录。没有自动修改`StrategyRelease`状态，观察结果不会绕过原有发布/授权门。
+- 实际验证：M8专项`2 passed`；连同M7/M6人工域回归`9 passed`，Ruff和`compileall`通过。30日循环只验证工程状态机，不构成现实市场30日观察证据。

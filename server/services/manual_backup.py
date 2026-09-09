@@ -30,6 +30,8 @@ from server.models.schema import (
     ManualLedgerEvent,
     ManualPositionLot,
     ManualPositionSnapshot,
+    ManualPilotObservation,
+    ManualProspectivePilot,
     ManualReconciliation,
     ManualValuation,
     ResearchHoldoutAccess,
@@ -49,7 +51,8 @@ MANUAL_MODELS = (
     ManualExecutionPlan, ManualExecutionItem, ManualExecutionEvent, ManualCashEvent,
     ManualLedgerEvent, ManualPositionLot, ManualAccountSnapshot, ManualPositionSnapshot,
     ManualReconciliation, ManualDailyJob, ManualValuation, ManualDailyReview,
-    ResearchRevision, ManualCorporateActionFact,
+    ResearchRevision, ManualCorporateActionFact, ManualProspectivePilot,
+    ManualPilotObservation,
 )
 SCHEMA_VERSION = "manual-backup-v1"
 
