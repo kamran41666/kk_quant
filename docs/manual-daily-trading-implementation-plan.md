@@ -737,3 +737,12 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - `manual_pilot.py`提供创建、逐日追加和不可变终结报告。终结报告同时检查研究、组合、holdout、重放、风险、数据健康、30日/每日对账、P0/P1、最大回撤和日亏损次数；`synthetic_engineering`永远追加`synthetic_engineering_not_eligible_for_pass`，不能被当作真实前瞻通过。
 - 人工API新增pilot生命周期路由；backup服务涵盖pilot及观察记录。没有自动修改`StrategyRelease`状态，观察结果不会绕过原有发布/授权门。
 - 实际验证：M8专项`2 passed`；连同M7/M6人工域回归`9 passed`，Ruff和`compileall`通过。30日循环只验证工程状态机，不构成现实市场30日观察证据。
+
+## 26. M9实施记录
+
+### 2026-09-09 23:48 CST
+
+- 新增`ManualExecutionConfirmation`和`server/services/manual_execution_cycle.py`。计划项必须先处于已查看状态并由用户记录确认hash；确认成交必须绑定计划/项目/账户，检查账户状态、授权状态、单笔限额、计划数量和用户报告事实，再调用M2人工账本；任何券商提交动作均不存在。
+- 首笔成交在人工成交事实成功落库后把`approved`授权激活为`active`并记录首笔事件；部分成交更新`ManualExecutionItem.confirmed_quantity/status`，全部项目进入终态后计划才完成；未成交原因写入项目并不伪造fill。重放相同`client_event_id`不会重复入账。
+- `/manual-trading`新增授权创建/批准、授权查询、计划项逐项确认、确认成交和未成交接口。授权仍只保存限额与审计字段，不保存券商凭证；买入日历不可用或T+1不满足时失败关闭。
+- 实际验证：M9工程专项`1 passed`，Ruff和`compileall`通过；该结果只说明代码状态机符合边界，不是用户真实首笔交易验收。M8/M9的真实市场/人工操作门禁仍需后续由用户提供事实证据。

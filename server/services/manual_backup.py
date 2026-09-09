@@ -24,6 +24,7 @@ from server.models.schema import (
     ManualDailyJob,
     ManualDailyReview,
     ManualExecutionAuthorization,
+    ManualExecutionConfirmation,
     ManualExecutionEvent,
     ManualExecutionItem,
     ManualExecutionPlan,
@@ -48,7 +49,7 @@ class ManualBackupError(ValueError):
 MANUAL_MODELS = (
     ManualAccount, StrategyRelease, ManualExecutionAuthorization,
     ResearchHoldoutWindow, ResearchHoldoutAccess, DailyDecision, ManualCohort,
-    ManualExecutionPlan, ManualExecutionItem, ManualExecutionEvent, ManualCashEvent,
+    ManualExecutionPlan, ManualExecutionItem, ManualExecutionEvent, ManualExecutionConfirmation, ManualCashEvent,
     ManualLedgerEvent, ManualPositionLot, ManualAccountSnapshot, ManualPositionSnapshot,
     ManualReconciliation, ManualDailyJob, ManualValuation, ManualDailyReview,
     ResearchRevision, ManualCorporateActionFact, ManualProspectivePilot,

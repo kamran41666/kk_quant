@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from quant_engine.data.calendar import TradingCalendar
 from server.models.database import get_db
-from server.models.schema import ManualAccount, ManualDailyJob, ManualDailyReview, ManualExecutionItem, ManualExecutionPlan, ManualValuation
+from server.models.schema import ManualAccount, ManualDailyJob, ManualDailyReview, ManualExecutionAuthorization, ManualExecutionItem, ManualExecutionPlan, ManualValuation
 from server.services.manual_ledger import (
     ManualLedgerError,
     create_manual_account,
@@ -40,6 +40,16 @@ from server.services.manual_pilot import (
     create_pilot,
     finalize_pilot,
     record_pilot_observation,
+)
+from server.services.manual_authorization import (
+    AuthorizationError,
+    approve_authorization,
+    create_authorization,
+)
+from server.services.manual_execution_cycle import (
+    ManualExecutionCycleError,
+    confirm_plan_item,
+    record_confirmed_fill,
 )
 from server.services.operator_auth import require_operator
 
@@ -169,6 +179,45 @@ class PilotObservationRequest(StrictModel):
 
 class PilotFinalizeRequest(StrictModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuthorizationRequest(StrictModel):
+    release_id: str
+    account_id: str
+    capital_limit: Decimal = Field(gt=0)
+    max_order_notional: Decimal = Field(gt=0)
+    max_gross_exposure: Decimal = Field(gt=0, le=1)
+    max_single_weight: Decimal = Field(gt=0, le=1)
+    max_daily_items: int = Field(gt=0)
+    max_daily_loss: Decimal = Field(gt=0)
+    max_drawdown: Decimal = Field(gt=0, le=1)
+    revocation_policy: dict[str, Any] = Field(default_factory=dict)
+    valid_from: str
+    valid_until: str
+
+
+class ApproveAuthorizationRequest(StrictModel):
+    approved_by: str = Field(min_length=1, max_length=80)
+
+
+class ConfirmItemRequest(StrictModel):
+    actor: str = Field(min_length=1, max_length=80)
+
+
+class ConfirmedFillRequest(StrictModel):
+    client_event_id: str = Field(min_length=8, max_length=160)
+    quantity: Decimal = Field(gt=0)
+    price: Decimal = Field(gt=0)
+    traded_at: datetime | date | str
+    commission: Decimal = Field(default=Decimal("0"), ge=0)
+    stamp_duty: Decimal = Field(default=Decimal("0"), ge=0)
+    other_fee: Decimal = Field(default=Decimal("0"), ge=0)
+    total_fee: Optional[Decimal] = Field(default=None, ge=0)
+    user_trade_ref: Optional[str] = None
+
+
+class UnfilledItemRequest(StrictModel):
+    reason: str = Field(min_length=1, max_length=500)
 
 
 def _envelope(data: Any, *, as_of: str | None = None, evidence_status: str = "user_reported") -> dict[str, Any]:
@@ -435,6 +484,86 @@ def finalize_pilot_report(pilot_id: str, req: PilotFinalizeRequest, db: Session 
         row = finalize_pilot(db, pilot_id, evidence=req.evidence)
         return _envelope(_pilot(row), evidence_status=row.status)
     except (ManualPilotError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+def _authorization(row: Any) -> dict[str, Any]:
+    return {
+        "id": row.id, "release_id": row.release_id, "account_id": row.account_id,
+        "status": row.status, "capital_limit": str(row.capital_limit),
+        "max_order_notional": str(row.max_order_notional), "max_gross_exposure": str(row.max_gross_exposure),
+        "max_single_weight": str(row.max_single_weight), "max_daily_items": row.max_daily_items,
+        "max_daily_loss": str(row.max_daily_loss), "max_drawdown": str(row.max_drawdown),
+        "valid_from": row.valid_from, "valid_until": row.valid_until,
+        "first_fill_event_id": row.first_fill_event_id, "approved_by": row.approved_by,
+    }
+
+
+@router.post("/authorizations", status_code=201)
+def add_authorization(req: AuthorizationRequest, db: Session = Depends(get_db)):
+    try:
+        row = create_authorization(db, **req.model_dump())
+        return _envelope(_authorization(row), evidence_status=row.status)
+    except (AuthorizationError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/accounts/{account_id}/authorizations")
+def list_authorizations(account_id: str, db: Session = Depends(get_db)):
+    rows = db.scalars(select(ManualExecutionAuthorization).where(
+        ManualExecutionAuthorization.account_id == account_id,
+    ).order_by(ManualExecutionAuthorization.created_at.desc())).all()
+    return _envelope([_authorization(row) for row in rows])
+
+
+@router.post("/authorizations/{authorization_id}/approve")
+def approve_authorization_route(authorization_id: str, req: ApproveAuthorizationRequest, db: Session = Depends(get_db)):
+    try:
+        row = approve_authorization(db, authorization_id, approved_by=req.approved_by)
+        return _envelope(_authorization(row), evidence_status=row.status)
+    except (AuthorizationError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/accounts/{account_id}/plans/{plan_id}/items/{item_id}/confirm")
+def confirm_item_route(account_id: str, plan_id: str, item_id: str, req: ConfirmItemRequest, db: Session = Depends(get_db)):
+    try:
+        plan = db.get(ManualExecutionPlan, plan_id)
+        item = db.get(ManualExecutionItem, item_id)
+        if plan is None or item is None or item.plan_id != plan_id or plan.account_id != account_id:
+            raise ManualExecutionCycleError("manual_plan_item_not_found")
+        row = confirm_plan_item(db, plan_id=plan_id, item_id=item_id, actor=req.actor)
+        return _envelope({"id": row.id, "plan_id": row.plan_id, "item_id": row.item_id, "actor": row.actor, "confirmed_at": row.confirmed_at, "confirmation_hash": row.confirmation_hash}, evidence_status="user_confirmed")
+    except (ManualExecutionCycleError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/accounts/{account_id}/plans/{plan_id}/items/{item_id}/fill", status_code=201)
+def confirmed_fill_route(account_id: str, plan_id: str, item_id: str, req: ConfirmedFillRequest, db: Session = Depends(get_db)):
+    try:
+        item = db.get(ManualExecutionItem, item_id)
+        if item is None or db.get(ManualExecutionPlan, plan_id) is None or item.plan_id != plan_id:
+            raise ManualExecutionCycleError("manual_plan_item_not_found")
+        plan = db.get(ManualExecutionPlan, plan_id)
+        if plan.account_id != account_id:
+            raise ManualExecutionCycleError("manual_account_not_found")
+        calendar = _calendar_for(req.traded_at) if item.side == "buy" else None
+        row = record_confirmed_fill(db, plan_id=plan_id, item_id=item_id, calendar=calendar, **req.model_dump())
+        return _envelope({"id": row.id, "client_event_id": row.client_event_id, "item_id": row.item_id, "source": row.source, "event_type": row.event_type}, as_of=row.traded_at)
+    except (ManualExecutionCycleError, ManualLedgerError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/accounts/{account_id}/plans/{plan_id}/items/{item_id}/unfilled")
+def unfilled_item_route(account_id: str, plan_id: str, item_id: str, req: UnfilledItemRequest, db: Session = Depends(get_db)):
+    try:
+        plan = db.get(ManualExecutionPlan, plan_id)
+        if plan is None or plan.account_id != account_id:
+            raise ManualExecutionCycleError("manual_plan_item_not_found")
+        from server.services.manual_execution_cycle import mark_item_unfilled
+        row = mark_item_unfilled(db, plan_id=plan_id, item_id=item_id, reason=req.reason)
+        return _envelope({"id": row.id, "plan_id": row.plan_id, "status": row.status, "reason_codes": row.reason_codes}, evidence_status="user_reported")
+    except (ManualExecutionCycleError, ValueError) as exc:
         raise _error(exc) from exc
 
 

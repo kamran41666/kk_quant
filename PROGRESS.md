@@ -17,6 +17,14 @@
 
 ## 记录
 
+### 2026-09-09 23:48 CST — M9首次人工执行与持续循环门禁
+
+- Git：`phase4-factor-develop`；M8本地提交`2f95342`已生成但push因GitHub `443`连接失败；M9修改尚未提交。M6/M7 push同样待网络恢复，既有未跟踪目录未触碰。
+- 修改：新增`ManualExecutionConfirmation`和`manual_execution_cycle.py`；人工计划项现在必须先由用户确认，随后才能通过计划绑定的回填接口记录成交；首笔成交后仅将已批准授权激活，成交数量不得超过计划数量或授权单笔限额，部分成交/未成交会更新计划状态，A股T+1和账本哈希重放继续由M2服务负责。新增授权创建/批准、计划项确认、确认成交、未成交和授权查询API；无订单提交路径。
+- 验证：M9首笔闭环专项`1 passed`；Ruff、compileall通过。测试确认未确认的计划项不能成交，首笔`user_reported`成交会激活授权、完成计划并写入A股影子持仓。
+- 边界：测试只验证工程闭环，不代表用户已在券商侧真实买入；系统没有券商认证、订单发送、真实资金转移能力，M9真实验收必须由用户自行创建授权、在券商端逐项执行并回填，且对账/日终复盘无异常。
+- 入口：[`M9实施记录`](docs/manual-daily-trading-implementation-plan.md#26-m9实施记录)、[`执行循环服务`](server/services/manual_execution_cycle.py)、[`授权与确认API`](server/api/manual_trading.py)。
+
 ### 2026-09-09 23:46 CST — M8三十日真实前瞻纸面观察框架
 
 - Git：`phase4-factor-develop`；M7本地提交`981a7d9`已生成但push因GitHub连接重置失败；M8修改尚未提交。M6仍为本地提交`1d98974`，远端同步待网络恢复后重试；既有未跟踪目录继续保留。

@@ -1201,3 +1201,19 @@ class ManualPilotObservation(Base):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
 
+
+class ManualExecutionConfirmation(Base):
+    """Append-only user confirmation for one planned execution item."""
+    __tablename__ = "manual_execution_confirmation"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "item_id", name="uq_manual_execution_confirmation_item"),
+        UniqueConstraint("confirmation_hash", name="uq_manual_execution_confirmation_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    plan_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    item_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    actor: Mapped[str] = mapped_column(String(80), nullable=False)
+    confirmed_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    confirmation_hash: Mapped[str] = mapped_column(String(64), nullable=False)
