@@ -774,3 +774,10 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - `ManualDailyFactorBundleV2`新增排除cost scenario的`strategy_core_hash`，baseline/stress共享core但保持不同bundle hash；公开JSON往返同时校验core hash。
 - `StrategyPromotionEvaluation`增加上一条通过评价引用及自身hash，为portfolio、holdout和paper阶段形成可验证的追加式晋级链；SQLite旧库使用加列迁移，旧空hash记录不能作为新resolver证据。
 - 当前旧v2结果仍为工程模拟，不能登记成可晋级组合artifact。下一步按合同提取cohort-aware原子成交、共享容量和公司行动子账。
+
+## 31. H2b cohort原子成交检查点
+
+- 新增纯计算`ManualResearchLedger`和`ResearchExecutionIntent`，使用Decimal现金、指定cohort lot、T+1、整手/零股清仓、有效日期费用和价格限制；不访问数据库、网络、paper或券商接口。
+- 同证券同交易日的所有intent共享由前一完整交易日volume计算的容量消耗；买卖均受同一容量池限制。每个原始intent、执行attempt、拒绝原因和fill独立保存，金额加权成交率不会删除失败计划。
+- 卖出严格按`cohort_id`消费，不会影响同代码其他批次；持仓快照逐cohort保存并验证加总账户权益。历史资格只阻断新进入，不会令已有退出消失。
+- 本检查点只完成正式v3引擎的原子成交底座，尚未接入公司行动、基准、完整组合循环、12项证据输出或独立重放，因此不能登记`manual_portfolio_*` verified artifact。

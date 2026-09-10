@@ -133,7 +133,7 @@ fill_rate   = numerator / denominator
 ## 10. 当前施工顺序
 
 1. 已完成：前一交易日容量、1%/0.5%成本口径、`strategy_core_hash`和追加式晋级评价哈希链。
-2. 提取cohort-aware原子成交和共享容量池。
+2. 已完成底层模块：提取cohort-aware原子成交和共享容量池；尚未接入正式v3组合循环。
 3. 接入历史资格和公司行动子账。
 4. 保存全部intent/attempt/position/benchmark证据。
 5. 实现独立重放和pair manifest。
