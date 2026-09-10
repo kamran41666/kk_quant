@@ -80,11 +80,13 @@ def _table_rows(db: Session, model: type[Any]) -> list[dict[str, Any]]:
 
 
 def build_manual_backup(db: Session, *, account_id: str | None = None) -> dict[str, Any]:
+    if account_id is not None:
+        raise ManualBackupError("account_scoped_backup_not_implemented")
     tables = {model.__tablename__: _table_rows(db, model) for model in MANUAL_MODELS}
     row_counts = {name: len(rows) for name, rows in tables.items()}
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "scope": {"account_id": account_id},
+        "scope": {"type": "all_manual_domain"},
         "tables": tables,
         "row_counts": row_counts,
     }

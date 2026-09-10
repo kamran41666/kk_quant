@@ -68,6 +68,21 @@ def test_manual_api_is_operator_protected_and_idempotent():
             assert state.status_code == 200
             assert state.json()["data"]["cash"] == "100000.00000000"
 
+            bypass = client.post(
+                f"/api/v1/manual-trading/accounts/{account_id}/execution-events",
+                headers=headers,
+                json={
+                    "client_event_id": "unplanned-fill-001", "event_type": "fill",
+                    "code": "600000.SH", "side": "buy", "quantity": "100", "price": "10",
+                    "traded_at": "2024-01-03T09:30:00+08:00",
+                },
+            )
+            assert bypass.status_code == 409
+            assert bypass.json()["detail"]["code"] == "economic_execution_requires_confirmed_plan_item"
+            unchanged = client.get(f"/api/v1/manual-trading/accounts/{account_id}/state", headers=headers).json()["data"]
+            assert unchanged["cash"] == "100000.00000000"
+            assert unchanged["positions"] == {}
+
             routes = set(app.openapi()["paths"])
             assert "/api/v1/manual-trading/accounts/{account_id}/execution-events" in routes
             assert not any("submit" in route for route in routes if "manual-trading" in route)

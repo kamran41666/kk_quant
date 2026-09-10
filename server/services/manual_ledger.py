@@ -14,6 +14,7 @@ import json
 import threading
 import uuid
 from typing import Any, Mapping, Protocol, Sequence
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -37,6 +38,7 @@ MONEY_QUANT = Decimal("0.00000001")
 QUANTITY_QUANT = Decimal("0.00000001")
 _ACCOUNT_LOCKS: dict[str, threading.RLock] = {}
 _ACCOUNT_LOCKS_GUARD = threading.Lock()
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 class ManualLedgerError(ValueError):
@@ -75,17 +77,25 @@ def _money(value: Any, field: str, *, default: Decimal | None = None) -> Decimal
 
 
 def _quantity(value: Any, field: str) -> Decimal:
-    return _decimal(value, field).quantize(QUANTITY_QUANT)
+    result = _decimal(value, field)
+    if result != result.to_integral_value():
+        raise ManualLedgerError(f"{field}_must_be_integer_shares")
+    return result.quantize(QUANTITY_QUANT)
 
 
 def _iso_date(value: date | str, field: str) -> date:
     if isinstance(value, datetime):
-        result = value.date()
+        result = value.astimezone(SHANGHAI_TZ).date() if value.tzinfo else value.date()
     elif isinstance(value, date):
         result = value
     else:
         try:
-            result = date.fromisoformat(str(value)[:10])
+            text = str(value)
+            if "T" in text:
+                moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                result = moment.astimezone(SHANGHAI_TZ).date() if moment.tzinfo else moment.date()
+            else:
+                result = date.fromisoformat(text[:10])
         except ValueError as exc:
             raise ManualLedgerError(f"{field}_must_be_iso_date") from exc
     return result
@@ -220,30 +230,47 @@ def _append_ledger(
     return row
 
 
-def _available_lots(db: Session, account_id: str, code: str, trade_date: date) -> list[ManualPositionLot]:
+def _available_lots(
+    db: Session,
+    account_id: str,
+    code: str,
+    trade_date: date,
+    *,
+    cohort_id: str | None = None,
+) -> list[ManualPositionLot]:
+    query = select(ManualPositionLot).where(
+        ManualPositionLot.account_id == account_id,
+        ManualPositionLot.code == code,
+        ManualPositionLot.remaining_quantity > ZERO,
+        ManualPositionLot.unlock_date <= trade_date.isoformat(),
+    )
+    if cohort_id is not None:
+        query = query.where(ManualPositionLot.cohort_id == cohort_id)
     return list(db.scalars(
-        select(ManualPositionLot)
-        .where(
-            ManualPositionLot.account_id == account_id,
-            ManualPositionLot.code == code,
-            ManualPositionLot.remaining_quantity > ZERO,
-            ManualPositionLot.unlock_date <= trade_date.isoformat(),
-        )
+        query
         .order_by(ManualPositionLot.buy_at.asc(), ManualPositionLot.id.asc())
     ).all())
 
 
-def _sell_allocations(db: Session, account_id: str, code: str, quantity: Decimal, trade_date: date) -> list[dict[str, Any]]:
+def _sell_allocations(
+    db: Session,
+    account_id: str,
+    code: str,
+    quantity: Decimal,
+    trade_date: date,
+    *,
+    cohort_id: str | None = None,
+) -> list[dict[str, Any]]:
     remaining = quantity
     allocations: list[dict[str, Any]] = []
-    for lot in _available_lots(db, account_id, code, trade_date):
+    for lot in _available_lots(db, account_id, code, trade_date, cohort_id=cohort_id):
         if remaining <= ZERO:
             break
         consumed = min(remaining, _quantity(lot.remaining_quantity, "remaining_quantity"))
         allocations.append({
             "buy_at": lot.buy_at,
             "unlock_date": lot.unlock_date,
-            "avg_cost": _quantity(lot.avg_cost, "avg_cost"),
+            "avg_cost": _money(lot.avg_cost, "avg_cost"),
             "quantity": consumed,
         })
         remaining -= consumed
@@ -276,7 +303,7 @@ def _rebuild_lots(db: Session, account_id: str) -> None:
                     id=_new_id(), account_id=account_id, code=event.code,
                     cohort_id=event.cohort_id, quantity=restored,
                     remaining_quantity=restored,
-                    avg_cost=_quantity(allocation["avg_cost"], "avg_cost"),
+                    avg_cost=_money(allocation["avg_cost"], "avg_cost"),
                     buy_at=str(allocation["buy_at"]),
                     unlock_date=str(allocation["unlock_date"]),
                     status="open",
@@ -289,7 +316,7 @@ def _rebuild_lots(db: Session, account_id: str) -> None:
                 id=_new_id(), account_id=account_id, code=event.code,
                 cohort_id=event.cohort_id, quantity=quantity,
                 remaining_quantity=quantity,
-                avg_cost=_quantity(payload.get("price", ZERO), "price"),
+                avg_cost=_money(payload.get("price", ZERO), "price"),
                 buy_at=str(payload.get("buy_at", event.trade_date)),
                 unlock_date=unlock_date,
                 planned_exit_date=payload.get("planned_exit_date"),
@@ -299,15 +326,16 @@ def _rebuild_lots(db: Session, account_id: str) -> None:
             continue
         sell_quantity = -quantity
         allow_locked = effect == "reverse_buy"
-        candidates = list(db.scalars(
-            select(ManualPositionLot)
-            .where(
+        candidate_query = select(ManualPositionLot).where(
                 ManualPositionLot.account_id == account_id,
                 ManualPositionLot.code == event.code,
                 ManualPositionLot.remaining_quantity > ZERO,
                 (ManualPositionLot.unlock_date <= event.trade_date if not allow_locked else True),
             )
-            .order_by(ManualPositionLot.buy_at.asc(), ManualPositionLot.id.asc())
+        if event.cohort_id is not None:
+            candidate_query = candidate_query.where(ManualPositionLot.cohort_id == event.cohort_id)
+        candidates = list(db.scalars(
+            candidate_query.order_by(ManualPositionLot.buy_at.asc(), ManualPositionLot.id.asc())
         ).all())
         for lot in candidates:
             if sell_quantity <= ZERO:
@@ -540,7 +568,9 @@ def _post_fill_ledger(
         quantity_delta = quantity
     else:
         if effect == "normal":
-            allocations = _sell_allocations(db, account.id, code, quantity, trade_date)
+            allocations = _sell_allocations(
+                db, account.id, code, quantity, trade_date, cohort_id=row.cohort_id,
+            )
         cash_delta = gross - fees
         quantity_delta = -quantity
     if effect == "reverse_buy":
@@ -592,6 +622,7 @@ def record_execution_event(
     user_trade_ref: str | None = None,
     source: str = "user_reported",
     calendar: TradingCalendarLike | None = None,
+    commit: bool = True,
 ) -> ManualExecutionEvent:
     if source != "user_reported":
         raise ManualLedgerError("manual_execution_source_must_be_user_reported")
@@ -649,8 +680,11 @@ def record_execution_event(
                     payload={"total_fee": fee_values[3], "execution_event_id": row.id},
                 )
             _rebuild_account(db, account)
-            db.commit()
-            db.refresh(row)
+            if commit:
+                db.commit()
+                db.refresh(row)
+            else:
+                db.flush()
             return row
         except IntegrityError as exc:
             db.rollback()
@@ -679,15 +713,11 @@ def record_fill_correction(
     cohort_id: str | None = None,
     user_trade_ref: str | None = None,
     calendar: TradingCalendarLike | None = None,
+    commit: bool = True,
 ) -> ManualExecutionEvent:
     """Correct a fill by appending reversal and replacement facts."""
     account = _get_account(db, account_id)
     with _lock_for(account_id):
-        existing = db.scalars(select(ManualExecutionEvent).where(
-            ManualExecutionEvent.client_event_id == replacement_client_event_id,
-        )).first()
-        if existing:
-            return existing
         original = db.get(ManualExecutionEvent, original_event_id)
         if original is None or original.account_id != account_id:
             raise ManualLedgerError("original_execution_event_not_found")
@@ -695,6 +725,44 @@ def record_fill_correction(
             raise ManualLedgerError("only_fill_events_can_be_corrected")
         if original.quantity is None or original.price is None or original.side is None:
             raise ManualLedgerError("original_fill_is_not_economic")
+        normalized_side = str(side).strip().lower()
+        normalized_code = code or original.code
+        normalized_item = item_id or original.item_id
+        normalized_cohort = cohort_id or original.cohort_id
+        normalized_quantity = _quantity(quantity, "quantity")
+        normalized_price = _money(price, "price")
+        normalized_fees = _fees(commission, stamp_duty, other_fee, total_fee)
+        normalized_time = _timestamp(traded_at)
+        if normalized_side != original.side or normalized_code != original.code:
+            raise ManualLedgerError("fill_correction_cannot_change_code_or_side")
+        if normalized_item != original.item_id or normalized_cohort != original.cohort_id:
+            raise ManualLedgerError("fill_correction_plan_binding_mismatch")
+        existing = db.scalars(select(ManualExecutionEvent).where(
+            ManualExecutionEvent.client_event_id == replacement_client_event_id,
+        )).first()
+        if existing:
+            same = (
+                existing.account_id == account_id
+                and existing.supersedes_event_id == original.id
+                and existing.event_type == "fill_correction"
+                and existing.side == normalized_side
+                and existing.code == normalized_code
+                and existing.item_id == normalized_item
+                and existing.cohort_id == normalized_cohort
+                and _quantity(existing.quantity, "quantity") == normalized_quantity
+                and _money(existing.price, "price") == normalized_price
+                and _money(existing.total_fee, "total_fee") == normalized_fees[3]
+                and existing.traded_at == normalized_time
+            )
+            if not same:
+                raise ManualLedgerError("execution_idempotency_conflict")
+            return existing
+        prior_correction = db.scalars(select(ManualExecutionEvent).where(
+            ManualExecutionEvent.supersedes_event_id == original.id,
+            ManualExecutionEvent.event_type == "fill_correction",
+        )).first()
+        if prior_correction is not None:
+            raise ManualLedgerError("original_fill_already_corrected")
         original_allocations: list[dict[str, Any]] = []
         original_ledger = db.scalars(select(ManualLedgerEvent).where(
             ManualLedgerEvent.reference_id == original.id,
@@ -728,22 +796,23 @@ def record_fill_correction(
             )
             replacement = _insert_execution_row(
                 db, client_event_id=replacement_client_event_id, account_id=account_id,
-                item_id=item_id or original.item_id, code=code or original.code,
-                cohort_id=cohort_id or original.cohort_id,
+                item_id=normalized_item, code=normalized_code,
+                cohort_id=normalized_cohort,
                 user_trade_ref=user_trade_ref, event_type="fill_correction",
-                side=str(side).strip().lower(), quantity=_quantity(quantity, "quantity"),
-                price=_money(price, "price"),
-                commission=_fees(commission, stamp_duty, other_fee, total_fee)[0],
-                stamp_duty=_fees(commission, stamp_duty, other_fee, total_fee)[1],
-                other_fee=_fees(commission, stamp_duty, other_fee, total_fee)[2],
-                total_fee=_fees(commission, stamp_duty, other_fee, total_fee)[3],
-                traded_at=_timestamp(traded_at), supersedes_event_id=original.id,
+                side=normalized_side, quantity=normalized_quantity,
+                price=normalized_price,
+                commission=normalized_fees[0], stamp_duty=normalized_fees[1],
+                other_fee=normalized_fees[2], total_fee=normalized_fees[3],
+                traded_at=normalized_time, supersedes_event_id=original.id,
             )
             # A correction is a new user-reported fill after the reversal.
             _post_fill_ledger(db, account, replacement, calendar=calendar)
             _rebuild_account(db, account)
-            db.commit()
-            db.refresh(replacement)
+            if commit:
+                db.commit()
+                db.refresh(replacement)
+            else:
+                db.flush()
             return replacement
         except Exception:
             db.rollback()
@@ -816,12 +885,56 @@ def reconcile_account(
     reported_asset = _money(total_asset, "total_asset")
     if reported_cash < ZERO or reported_asset < ZERO:
         raise ManualLedgerError("snapshot_values_must_be_nonnegative")
+    prepared_positions: list[dict[str, Any]] = []
+    reported: dict[str, Decimal] = {}
+    reported_market_value = ZERO
+    for item in positions:
+        code = _normalize_a_share_code(str(item.get("code", "")))
+        total_quantity = _quantity(item.get("total_quantity", ZERO), "total_quantity")
+        available_quantity = _quantity(item.get("available_quantity", ZERO), "available_quantity")
+        avg_cost = _money(item.get("avg_cost", ZERO), "avg_cost")
+        market_value = _money(item.get("market_value", ZERO), "market_value")
+        if total_quantity < ZERO or available_quantity < ZERO or available_quantity > total_quantity:
+            raise ManualLedgerError("snapshot_position_quantity_invalid")
+        if code in reported:
+            raise ManualLedgerError("snapshot_position_code_duplicated")
+        prepared_positions.append({
+            "code": code, "total_quantity": total_quantity,
+            "available_quantity": available_quantity, "avg_cost": avg_cost,
+            "market_value": market_value,
+        })
+        reported[code] = total_quantity
+        reported_market_value += market_value
+    if reported_cash + reported_market_value != reported_asset:
+        raise ManualLedgerError("snapshot_components_must_sum_to_total_asset")
+    latest = _latest_ledger(db, account_id)
+    if latest is not None and _iso_date(snapshot_time, "as_of") < _iso_date(latest.trade_date, "latest_trade_date"):
+        raise ManualLedgerError("snapshot_as_of_precedes_latest_ledger_event")
     with _lock_for(account_id):
         existing = db.scalars(select(ManualAccountSnapshot).where(
             ManualAccountSnapshot.account_id == account_id,
             ManualAccountSnapshot.idempotency_key == idempotency_key,
         )).first()
         if existing:
+            stored_positions = db.scalars(select(ManualPositionSnapshot).where(
+                ManualPositionSnapshot.snapshot_id == existing.id,
+            ).order_by(ManualPositionSnapshot.code.asc())).all()
+            same_positions = [
+                {
+                    "code": row.code, "total_quantity": _quantity(row.total_quantity, "total_quantity"),
+                    "available_quantity": _quantity(row.available_quantity, "available_quantity"),
+                    "avg_cost": _money(row.avg_cost, "avg_cost"),
+                    "market_value": _money(row.market_value, "market_value"),
+                }
+                for row in stored_positions
+            ] == sorted(prepared_positions, key=lambda item: item["code"])
+            if (
+                existing.as_of != snapshot_time
+                or _money(existing.cash, "cash") != reported_cash
+                or _money(existing.total_asset, "total_asset") != reported_asset
+                or not same_positions
+            ):
+                raise ManualLedgerError("snapshot_idempotency_conflict")
             recon = db.scalars(select(ManualReconciliation).where(
                 ManualReconciliation.snapshot_id == existing.id,
             )).first()
@@ -836,21 +949,10 @@ def reconcile_account(
             )
             db.add(snapshot)
             db.flush()
-            reported: dict[str, Decimal] = {}
-            for item in positions:
-                code = _normalize_a_share_code(str(item.get("code", "")))
-                total_quantity = _quantity(item.get("total_quantity", ZERO), "total_quantity")
-                available_quantity = _quantity(item.get("available_quantity", ZERO), "available_quantity")
-                avg_cost = _money(item.get("avg_cost", ZERO), "avg_cost")
-                market_value = _money(item.get("market_value", ZERO), "market_value")
-                if total_quantity < ZERO or available_quantity < ZERO or available_quantity > total_quantity:
-                    raise ManualLedgerError("snapshot_position_quantity_invalid")
+            for item in prepared_positions:
                 db.add(ManualPositionSnapshot(
-                    snapshot_id=snapshot.id, code=code, total_quantity=total_quantity,
-                    available_quantity=available_quantity, avg_cost=avg_cost,
-                    market_value=market_value,
+                    snapshot_id=snapshot.id, **item,
                 ))
-                reported[code] = total_quantity
             state = get_manual_state(db, account_id)
             ledger_positions = {code: values["quantity"] for code, values in state["positions"].items()}
             all_codes = sorted(set(reported) | set(ledger_positions))

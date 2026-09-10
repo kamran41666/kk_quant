@@ -61,13 +61,13 @@
         </article>
 
         <article class="card" aria-labelledby="fill-event-title">
-          <div class="section-header compact"><div><h2 id="fill-event-title">回填用户成交</h2><p>先在券商侧完成操作，再把成交回报逐笔录入。</p></div></div>
+          <div class="section-header compact"><div><h2 id="fill-event-title">回填计划内成交</h2><p>只允许选择已查看并逐项确认的执行计划；计划外成交必须先进入对账。</p></div></div>
           <form class="stack-form" @submit.prevent="recordFill">
-            <div class="form-grid"><label>股票代码<input v-model="fillForm.code" required pattern="\d{6}\.(SH|SZ|BJ)" placeholder="000001.SZ" /></label><label>方向<select v-model="fillForm.side"><option value="buy">买入</option><option value="sell">卖出</option></select></label></div>
-            <div class="form-grid"><label>成交数量<input v-model="fillForm.quantity" type="number" min="0.00000001" step="0.00000001" required /></label><label>成交价格<input v-model="fillForm.price" type="number" min="0.00000001" step="0.00000001" required /></label></div>
+            <label>已确认计划项<select v-model="fillForm.selection" required><option value="" disabled>请先在下方计划中确认执行项</option><option v-for="entry in confirmedPlanItems" :key="entry.key" :value="entry.key">{{ entry.plan.execution_date }} · {{ entry.item.code }} · {{ entry.item.side === 'buy' ? '买入' : '卖出' }} · 计划 {{ decimalText(entry.item.planned_quantity) }} 股</option></select></label>
+            <div class="form-grid"><label>成交数量<input v-model="fillForm.quantity" type="number" min="1" step="1" required /></label><label>成交价格<input v-model="fillForm.price" type="number" min="0.00000001" step="0.00000001" required /></label></div>
             <div class="form-grid"><label>佣金<input v-model="fillForm.commission" type="number" min="0" step="0.01" /></label><label>印花税<input v-model="fillForm.stamp_duty" type="number" min="0" step="0.01" /></label></div>
             <label>成交时间<input v-model="fillForm.traded_at" type="datetime-local" required /></label>
-            <button class="btn-accent" type="submit" :disabled="saving || selectedAccount.status !== 'active'">保存用户报告的成交</button>
+            <button class="btn-accent" type="submit" :disabled="saving || selectedAccount.status !== 'active' || !selectedFillEntry">保存计划绑定的用户成交</button>
             <small v-if="selectedAccount.status !== 'active'" class="hint warning">账户必须有非负现金且处于 active 状态；当前状态：{{ accountStatus(selectedAccount.status) }}。</small>
             <small class="hint">买入会校验 A 股交易日和 T+1 约束；日历不可用时系统会阻断，不会按休市处理。</small>
           </form>
@@ -116,7 +116,7 @@
 
       <section class="card plan-section" aria-labelledby="plan-title">
         <div class="section-header compact"><div><h2 id="plan-title">人工执行计划</h2><p>计划是可读执行清单，不是订单；必须由人工逐项完成并回填。</p></div><span class="manual-badge">无提交按钮</span></div>
-        <div v-if="plans.length" class="plan-list"><article v-for="plan in plans" :key="plan.id" class="plan-row"><div class="plan-head"><div><strong>{{ plan.execution_date }} · {{ plan.execution_session === 'open' ? '开盘' : '收盘' }} · {{ plan.plan_type }}</strong><span>版本 {{ plan.id.slice(-8) }} · {{ planStatus(plan.status) }}</span></div><button v-if="['draft', 'ready'].includes(plan.status)" class="link-button" type="button" @click="viewPlan(plan.id)">标记已查看</button></div><p v-if="plan.blocked_reason" class="hint warning">阻断原因：{{ plan.blocked_reason }}</p><div v-if="plan.items.length" class="data-table-wrap"><table class="data-table compact-table"><thead><tr><th>阶段</th><th>代码</th><th>方向</th><th>数量</th><th>参考价</th><th>状态</th></tr></thead><tbody><tr v-for="item in plan.items" :key="item.id"><td>{{ item.side === 'sell' ? '先卖' : '后买' }}</td><td class="mono">{{ item.code }}</td><td>{{ item.side === 'buy' ? '买入' : '卖出' }}</td><td>{{ decimalText(item.planned_quantity) }}</td><td>¥{{ decimalText(item.reference_price) }}</td><td>{{ planStatus(item.status) }}</td></tr></tbody></table></div><p v-else class="empty-note">该计划没有可执行条目。</p></article></div>
+        <div v-if="plans.length" class="plan-list"><article v-for="plan in plans" :key="plan.id" class="plan-row"><div class="plan-head"><div><strong>{{ plan.execution_date }} · {{ plan.execution_session === 'open' ? '开盘' : '收盘' }} · {{ plan.plan_type }}</strong><span>版本 {{ plan.id.slice(-8) }} · {{ planStatus(plan.status) }}</span></div><button v-if="plan.status === 'ready'" class="link-button" type="button" @click="viewPlan(plan.id)">标记已查看</button></div><p v-if="plan.blocked_reason" class="hint warning">阻断原因：{{ plan.blocked_reason }}</p><div v-if="plan.items.length" class="data-table-wrap"><table class="data-table compact-table"><thead><tr><th>阶段</th><th>代码</th><th>方向</th><th>数量</th><th>参考价</th><th>状态</th><th>人工确认</th></tr></thead><tbody><tr v-for="item in plan.items" :key="item.id"><td>{{ item.side === 'sell' ? '先卖' : '后买' }}</td><td class="mono">{{ item.code }}</td><td>{{ item.side === 'buy' ? '买入' : '卖出' }}</td><td>{{ decimalText(item.planned_quantity) }}</td><td>¥{{ decimalText(item.reference_price) }}</td><td>{{ planStatus(item.status) }}</td><td><span v-if="item.confirmed">已确认</span><button v-else-if="['viewed', 'partially_filled'].includes(plan.status) && ['planned', 'submitted', 'partially_filled'].includes(item.status)" class="link-button" type="button" @click="confirmItem(plan.id, item.id)">确认此项</button><span v-else>—</span></td></tr></tbody></table></div><p v-else class="empty-note">该计划没有可执行条目。</p></article></div>
         <p v-else class="empty-note">暂无已持久化的人工执行计划。计划需要先经过策略发布、授权、决策和数据就绪检查。</p>
       </section>
     </template>
@@ -127,7 +127,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useApi } from '@/composables/useApi'
-import type { ManualAccount, ManualPlan, ManualReview, ManualState, ManualValuation } from '@/types/manual'
+import type { ManualAccount, ManualPlan, ManualPlanItem, ManualReview, ManualState, ManualValuation } from '@/types/manual'
 import { decimalText, manualError, newIdempotencyKey, unwrapManual } from '@/utils/manual'
 
 const { api } = useApi()
@@ -143,12 +143,19 @@ const plans = ref<ManualPlan[]>([])
 const valuations = ref<ManualValuation[]>([])
 const reviews = ref<ManualReview[]>([])
 const selectedAccount = computed(() => accounts.value.find(account => account.id === selectedAccountId.value) ?? null)
+const confirmedPlanItems = computed(() => plans.value.flatMap(plan => plan.items.filter(item => item.confirmed && ['planned', 'submitted', 'partially_filled'].includes(item.status)).map(item => ({ key: `${plan.id}|${item.id}`, plan, item }))))
+const selectedFillEntry = computed<{ plan: ManualPlan, item: ManualPlanItem } | null>(() => {
+  const entry = confirmedPlanItems.value.find(value => value.key === fillForm.selection)
+  return entry ? { plan: entry.plan, item: entry.item } : null
+})
+function localDate(value = new Date()) { return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}` }
+function localDateTime(value = new Date()) { return `${localDate(value)}T${String(value.getHours()).padStart(2, '0')}:${String(value.getMinutes()).padStart(2, '0')}` }
 const accountForm = reactive({ name: '', broker_label: '' })
-const cashForm = reactive({ event_type: 'opening_balance', amount: '', occurred_at: new Date().toISOString().slice(0, 16), note: '' })
-const fillForm = reactive({ code: '', side: 'buy', quantity: '100', price: '', commission: '0', stamp_duty: '0', traded_at: new Date().toISOString().slice(0, 16) })
+const cashForm = reactive({ event_type: 'opening_balance', amount: '', occurred_at: localDateTime(), note: '' })
+const fillForm = reactive({ selection: '', quantity: '100', price: '', commission: '0', stamp_duty: '0', traded_at: localDateTime() })
 const reconcileForm = reactive({ cash: '', total_asset: '', positions_json: '' })
-const valuationForm = reactive({ valuation_date: new Date().toISOString().slice(0, 10), cash: '', market_value: '0', total_asset: '', price_as_of: '' })
-const reviewForm = reactive({ review_date: new Date().toISOString().slice(0, 10), notes: '' })
+const valuationForm = reactive({ valuation_date: localDate(), cash: '', market_value: '0', total_asset: '', price_as_of: '' })
+const reviewForm = reactive({ review_date: localDate(), notes: '' })
 
 function clearMessage() { notice.value = ''; errorMessage.value = '' }
 function accountStatus(value: string) { return ({ draft: '待开户余额', active: '可记录', reconcile: '对账异常', suspended: '已暂停', closed: '已关闭' } as Record<string, string>)[value] ?? value }
@@ -204,12 +211,24 @@ async function recordCash() {
 }
 
 async function recordFill() {
+  if (!selectedAccountId.value || !selectedFillEntry.value) return
+  saving.value = true; clearMessage()
+  try {
+    const { plan, item } = selectedFillEntry.value
+    await api.post(`/manual-trading/accounts/${selectedAccountId.value}/plans/${plan.id}/items/${item.id}/fill`, { client_event_id: newIdempotencyKey('manual-fill'), quantity: fillForm.quantity, price: fillForm.price, commission: fillForm.commission, stamp_duty: fillForm.stamp_duty, traded_at: new Date(fillForm.traded_at).toISOString() })
+    notice.value = '用户报告的成交已保存；系统未向券商发送任何委托。'
+    fillForm.selection = ''
+    await refreshAll()
+  } catch (error: any) { errorMessage.value = manualError(error) } finally { saving.value = false }
+}
+
+async function confirmItem(planId: string, itemId: string) {
   if (!selectedAccountId.value) return
   saving.value = true; clearMessage()
   try {
-    await api.post(`/manual-trading/accounts/${selectedAccountId.value}/execution-events`, { client_event_id: newIdempotencyKey('manual-fill'), event_type: 'fill', ...fillForm, quantity: fillForm.quantity, price: fillForm.price, commission: fillForm.commission, stamp_duty: fillForm.stamp_duty, traded_at: new Date(fillForm.traded_at).toISOString() })
-    notice.value = '用户报告的成交已保存；系统未向券商发送任何委托。'
-    await refreshAll()
+    await api.post(`/manual-trading/accounts/${selectedAccountId.value}/plans/${planId}/items/${itemId}/confirm`, { actor: 'local-user' })
+    notice.value = '计划项已确认；请仅在券商侧完成后回填实际成交。'
+    await loadAccountData()
   } catch (error: any) { errorMessage.value = manualError(error) } finally { saving.value = false }
 }
 

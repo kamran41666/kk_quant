@@ -20,8 +20,8 @@ CENT = Decimal("0.01")
 SHARE = Decimal("1")
 LOT = Decimal("100")
 COSTS = {
-    "baseline": {"commission_rate": Decimal("0.00025"), "min_commission": Decimal("5"), "transfer_rate": Decimal("0.00002"), "slippage_rate": Decimal("0.001")},
-    "stress": {"commission_rate": Decimal("0.0005"), "min_commission": Decimal("5"), "transfer_rate": Decimal("0.00002"), "slippage_rate": Decimal("0.003")},
+    "baseline": {"commission_rate": Decimal("0.00025"), "min_commission": Decimal("5"), "transfer_rate": Decimal("0.00002"), "slippage_rate": Decimal("0.001"), "participation_rate": Decimal("0.10")},
+    "stress": {"commission_rate": Decimal("0.0005"), "min_commission": Decimal("5"), "transfer_rate": Decimal("0.00002"), "slippage_rate": Decimal("0.003"), "participation_rate": Decimal("0.05")},
 }
 
 
@@ -99,7 +99,7 @@ class ManualDailyPortfolioResult:
 
 
 def _bars(daily: pd.DataFrame) -> dict[tuple[date, str], dict[str, Any]]:
-    required = {"date", "code", "open", "close"}
+    required = {"date", "code", "open", "close", "volume", "is_suspended", "is_st"}
     missing = required - set(daily.columns)
     if missing:
         raise ValueError(f"manual daily portfolio missing fields: {sorted(missing)}")
@@ -156,7 +156,7 @@ def run_manual_daily_portfolio(
             bar = bars.get((day, holding.code))
             if not bar or pd.isna(bar.get("close")) or _d(bar["close"]) <= ZERO:
                 add_issue(day, holding.code, "held_close_missing")
-                continue
+                raise ValueError(f"held_close_missing:{day.isoformat()}:{holding.code}")
             total += holding.quantity * _d(bar["close"])
         return _money(total)
 
@@ -201,8 +201,34 @@ def run_manual_daily_portfolio(
         for cohort in cohorts:
             if cohort["status"] != "planned" or cohort["entry_date"] != day.isoformat():
                 continue
-            selected = sorted(scores.get(_as_date(cohort["signal_date"]), {}).items(), key=lambda item: (-item[1], item[0]))[:bundle.top_n]
-            eligible = [item for item in selected if (day, item[0]) in bars and not bool(bars[(day, item[0])].get("is_suspended", False))]
+            candidates = []
+            for code, score in scores.get(_as_date(cohort["signal_date"]), {}).items():
+                if not score.is_finite():
+                    add_issue(day, code, "signal_score_not_finite", cohort_id=cohort["id"])
+                    continue
+                candidates.append((code, score))
+            selected = sorted(candidates, key=lambda item: (-item[1], item[0]))[:bundle.top_n]
+            eligible = []
+            for item in selected:
+                code = item[0]
+                bar = bars.get((day, code))
+                if bar is None:
+                    add_issue(day, code, "entry_bar_missing", cohort_id=cohort["id"])
+                    continue
+                if bool(bar.get("is_suspended", True)):
+                    add_issue(day, code, "entry_suspended", cohort_id=cohort["id"])
+                    continue
+                if bool(bar.get("is_st", True)):
+                    add_issue(day, code, "entry_st", cohort_id=cohort["id"])
+                    continue
+                volume = bar.get("volume")
+                if volume is None or pd.isna(volume) or _d(volume) <= ZERO:
+                    add_issue(day, code, "entry_volume_unavailable", cohort_id=cohort["id"])
+                    continue
+                if bool(bar.get("limit_up", False)):
+                    add_issue(day, code, "entry_limit_up", cohort_id=cohort["id"])
+                    continue
+                eligible.append(item)
             budget_each = _money(last_equity * bundle.cohort_gross_exposure / max(1, len(eligible)))
             for code, _score in eligible:
                 raw_open = bars[(day, code)].get("open")
@@ -211,6 +237,8 @@ def run_manual_daily_portfolio(
                     continue
                 price = _money(_d(raw_open) * (Decimal("1") + costs["slippage_rate"]))
                 quantity = (budget_each / price).to_integral_value(rounding=ROUND_DOWN) // LOT * LOT
+                capacity = (_d(bars[(day, code)]["volume"]) * costs["participation_rate"]).to_integral_value(rounding=ROUND_DOWN) // LOT * LOT
+                quantity = min(quantity, capacity)
                 while quantity >= LOT and cash < _money(quantity * price) + fees(_money(quantity * price), "buy", day)[3]:
                     quantity -= LOT
                 if quantity >= LOT:
@@ -220,15 +248,18 @@ def run_manual_daily_portfolio(
         # Close exits are allowed to sell the full remaining position,
         # including an odd final quantity.
         for cohort in cohorts:
-            if cohort["status"] != "open" or cohort["exit_date"] != day.isoformat():
+            if cohort["status"] != "open" or _as_date(cohort["exit_date"]) > day:
                 continue
             for key, holding in list(holdings.items()):
                 if holding.cohort_id != cohort["id"]:
                     continue
                 bar = bars.get((day, holding.code))
-                if not bar or bool(bar.get("is_suspended", False)) or bar.get("close") is None or pd.isna(bar.get("close")):
+                if not bar or bool(bar.get("is_suspended", False)) or bool((bar or {}).get("limit_down", False)) or bar.get("close") is None or pd.isna(bar.get("close")):
                     add_issue(day, holding.code, "exit_close_unavailable", cohort_id=cohort["id"])
-                    cohort["exit_date"] = days[min(index + 1, len(days) - 1)]
+                    if index + 1 < len(days):
+                        cohort["exit_date"] = days[index + 1].isoformat()
+                    else:
+                        cohort["status"] = "blocked"
                     continue
                 price = _money(_d(bar["close"]) * (Decimal("1") - costs["slippage_rate"]))
                 trade(day, cohort["id"], holding.code, "sell", holding.quantity, price, "cohort_exit")

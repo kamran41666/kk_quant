@@ -210,6 +210,13 @@ def queue_experiment(
         "signal_phase": "close", "entry_offset": 1, "entry_phase": "open",
         "exit_offset": forward_horizon + 1, "exit_phase": "open",
     })
+    if resolved_label_spec.get("label_id") == "manual-daily-label-v1":
+        expected = {
+            "signal_phase": "close", "entry_offset": 1, "entry_phase": "open",
+            "exit_offset": 2, "exit_phase": "close",
+        }
+        if forward_horizon != 1 or any(resolved_label_spec.get(key) != value for key, value in expected.items()):
+            raise ValueError("manual daily factor experiment label spec must be T-close/T+1-open/T+2-close with horizon 1")
     label_json = json.dumps(resolved_label_spec, sort_keys=True, allow_nan=False)
     manifests = _manifest_index(data_root or Path(settings.data_dir))
     if dataset_id not in manifests:
@@ -241,6 +248,8 @@ def queue_experiment(
                 json.loads(item.evaluation_policy or "{}")
             )
             if prior_policy != policy:
+                continue
+            if json.loads(item.label_spec or "{}") != resolved_label_spec:
                 continue
             if json.loads(item.result_json).get("decision") == required_decision:
                 matched.append(item)
@@ -591,8 +600,11 @@ def execute_experiment(
         label_spec = json.loads(row.label_spec or "{}")
         entry_offset = int(label_spec.get("entry_offset", 1))
         exit_offset = int(label_spec.get("exit_offset", row.forward_horizon + 1))
-        entry_field = str(label_spec.get("entry_field", "open"))
-        exit_field = str(label_spec.get("exit_field", "open"))
+        # ManualDailyLabelSpec exposes execution phases.  Older experiments
+        # used the ``*_field`` spelling, so accept both but never silently
+        # turn an explicit close phase into an open price.
+        entry_field = str(label_spec.get("entry_field", label_spec.get("entry_phase", "open")))
+        exit_field = str(label_spec.get("exit_field", label_spec.get("exit_phase", "open")))
         if entry_field not in {"open", "close"} or exit_field not in {"open", "close"}:
             raise ValueError("factor experiment label fields are unsupported")
         if entry_field == "open":
@@ -655,7 +667,11 @@ def execute_experiment(
             "forward_horizon": row.forward_horizon,
             "label_spec": label_spec,
             "stage": row.stage,
-            "forward_return_definition": "signal_t_close; entry_t_plus_1_open; exit_t_plus_1_plus_h_open",
+            "forward_return_definition": (
+                f"signal_t_{label_spec.get('signal_phase', 'close')}; "
+                f"entry_t_plus_{entry_offset}_{entry_field}; "
+                f"exit_t_plus_{exit_offset}_{exit_field}"
+            ),
             "row_count": len(factor),
             "finite_count": finite,
             "coverage": coverage,

@@ -186,8 +186,6 @@ def draft(
         authorization = ManualAuthorizationLimits(**dict(authorization))
 
     reasons: set[str] = set()
-    if decision.action in _BLOCKING_ACTIONS:
-        reasons.add(decision.blocked_reason or f"decision_{decision.action}")
     if authorization is not None and account.confirmed_cash > authorization.capital_limit:
         reasons.add("confirmed_cash_exceeds_capital_limit")
 
@@ -200,59 +198,43 @@ def draft(
     target_weights = dict(decision.target_weights)
     target_codes = set(target_weights)
     for code, code_positions in by_code.items():
-        total_quantity = sum(item.quantity for item in code_positions)
-        desired_quantity: int | None = None
-        if decision.action == DecisionAction.FLAT.value:
-            desired_quantity = 0
-        elif decision.action in {DecisionAction.REBALANCE.value, DecisionAction.REDUCE.value}:
-            desired_quantity = 0 if code not in target_codes else None
-        elif decision.action in _BLOCKING_ACTIONS:
-            desired_quantity = None
-        elif code in target_codes:
-            desired_quantity = None
-
-        if desired_quantity is None and code in target_codes and decision.action not in _BLOCKING_ACTIONS:
-            quote = quotes.get(code)
-            if quote is None:
-                reasons.add(f"quote_missing:{code}")
-                continue
-            desired_quantity = registry.normalize_buy_quantity(
-                policy.market, account.equity * target_weights[code], quote.price, trade_date,
-            )
-        due = any(_due_position(item, cohort_map, trade_date) for item in code_positions)
-        if due:
-            desired_quantity = 0
-
-        if desired_quantity is None:
-            continue
-        excess = max(0, total_quantity - desired_quantity)
-        if excess <= 0:
-            continue
         for position in code_positions:
-            quantity = min(excess, position.available_quantity)
-            if quantity <= 0:
+            due = _due_position(position, cohort_map, trade_date)
+            # Scheduled lifecycle exits belong to the close session.  Risk or
+            # flat exits may be explicitly requested for another session.
+            lifecycle_exit = due and execution_session != "open"
+            target_exit = (
+                decision.action == DecisionAction.FLAT.value
+                or (decision.action in {DecisionAction.REBALANCE.value, DecisionAction.REDUCE.value} and code not in target_codes)
+            )
+            if not lifecycle_exit and not target_exit:
                 continue
-            sell_specs.append({
-                "code": code,
-                "quantity": quantity,
-                "available_quantity": position.available_quantity,
-                "cohort_id": position.cohort_id,
-                "target_weight": target_weights.get(code, Decimal("0")),
-            })
-            excess -= quantity
-            if excess <= 0:
-                break
-        if excess > 0:
-            reasons.add(f"sell_quantity_unavailable:{code}")
+            quantity = min(position.quantity, position.available_quantity)
+            if quantity > 0:
+                sell_specs.append({
+                    "code": code,
+                    "quantity": quantity,
+                    "available_quantity": position.available_quantity,
+                    "cohort_id": position.cohort_id,
+                    "target_weight": target_weights.get(code, Decimal("0")),
+                })
+            if quantity < position.quantity:
+                reasons.add(f"sell_quantity_unavailable:{code}:{position.cohort_id or '-'}")
 
     buy_specs: list[dict[str, Any]] = []
-    if decision.action not in _NON_BUY_ACTIONS:
+    entry_cohorts = tuple(item for item in cohort_values if item.planned_entry_date == trade_date)
+    if decision.action not in _NON_BUY_ACTIONS and execution_session != "close":
+        if target_codes and not entry_cohorts:
+            reasons.add("entry_cohort_missing")
         for code in sorted(target_codes):
             quote = quotes.get(code)
             if quote is None:
                 reasons.add(f"quote_missing:{code}")
                 continue
-            current = sum(item.quantity for item in by_code.get(code, ()))
+            current = sum(
+                item.quantity for item in by_code.get(code, ())
+                if item.cohort_id in {cohort.id for cohort in entry_cohorts}
+            )
             desired = registry.normalize_buy_quantity(
                 policy.market, account.equity * target_weights[code], quote.price, trade_date,
             )
@@ -264,7 +246,7 @@ def draft(
                 "code": code,
                 "quantity": quantity,
                 "available_quantity": 0,
-                "cohort_id": next((item.id for item in cohort_values if item.planned_entry_date == trade_date), None),
+                "cohort_id": entry_cohorts[0].id if entry_cohorts else None,
                 "target_weight": target_weights[code],
             })
 
@@ -332,6 +314,10 @@ def draft(
     if session not in {"open", "close"}:
         raise ValueError("execution_session must be open or close")
     plan_type = _plan_type(decision, has_sells, has_buys)
+    if not items and decision.action in _BLOCKING_ACTIONS:
+        reasons.add(decision.blocked_reason or f"decision_{decision.action}")
+    if has_sells and has_buys and execution_session is None:
+        raise ValueError("mixed_open_close_requires_explicit_session")
     status = PlanStatus.BLOCKED.value if reasons else (PlanStatus.COMPLETED.value if not items else PlanStatus.DRAFT.value)
     blocked_reason = ";".join(sorted(reasons)) if reasons else None
     input_hash = stable_hash({
@@ -519,6 +505,8 @@ def preflight(
         reasons.add(f"plan_{plan.status}")
     if plan.cash_before != account.confirmed_cash:
         reasons.add("account_snapshot_changed")
+    if plan.quote_snapshot_hash != _quote_hash(quotes):
+        reasons.add("quote_snapshot_changed_requires_revision")
     if plan.execution_session not in {"open", "close"}:
         reasons.add("invalid_execution_session")
     active_items = [item for item in plan.items if item.status not in {PlanItemStatus.BLOCKED.value, PlanItemStatus.SKIPPED.value}]
@@ -529,17 +517,21 @@ def preflight(
             for item in active_items:
                 if item.expected_notional > authorization.max_order_notional + Decimal("1e-12"):
                     item_reasons.setdefault(item.code, []).append("max_order_notional_exceeded")
-        if authorization.max_single_weight is not None and account.equity > 0:
-            for item in active_items:
-                if item.side == "buy" and item.expected_notional / account.equity > authorization.max_single_weight + Decimal("1e-12"):
-                    item_reasons.setdefault(item.code, []).append("max_single_weight_exceeded")
+        if account.equity > authorization.capital_limit + Decimal("1e-12"):
+            reasons.add("account_equity_exceeds_capital_limit")
     buy_total = Decimal("0")
-    projected_gross = sum((item.market_value for item in account.positions), Decimal("0"))
+    projected_by_code: dict[str, Decimal] = {}
+    for position in account.positions:
+        projected_by_code[position.code] = projected_by_code.get(position.code, Decimal("0")) + position.market_value
     for item in active_items:
         quote = quotes.get(item.code)
         if quote is None:
             item_reasons.setdefault(item.code, []).append("quote_missing")
             continue
+        if not quote.as_of:
+            item_reasons.setdefault(item.code, []).append("quote_timestamp_missing")
+        if quote.freshness != "fresh":
+            item_reasons.setdefault(item.code, []).append("quote_not_fresh")
         if quote.suspended:
             item_reasons.setdefault(item.code, []).append("suspended")
         if not quote.is_trading_day:
@@ -550,18 +542,26 @@ def preflight(
             if item.planned_quantity % policy.buy_lot_size:
                 item_reasons.setdefault(item.code, []).append("buy_lot_invalid")
             buy_total += item.cash_required
-            projected_gross += item.expected_notional
+            projected_by_code[item.code] = projected_by_code.get(item.code, Decimal("0")) + quote.price * item.planned_quantity
         else:
             if quote.limit_down:
                 item_reasons.setdefault(item.code, []).append("limit_down_sell")
             available = sum(position.available_quantity for position in account.positions if position.code == item.code)
             if item.planned_quantity > available:
                 item_reasons.setdefault(item.code, []).append("sell_quantity_unavailable")
-            projected_gross -= min(projected_gross, item.expected_notional)
+            projected_by_code[item.code] = max(
+                Decimal("0"), projected_by_code.get(item.code, Decimal("0")) - quote.price * item.planned_quantity,
+            )
     if buy_total > account.confirmed_cash + Decimal("1e-12"):
         reasons.add("confirmed_cash_insufficient")
     if account.equity <= 0 and active_items:
         reasons.add("non_positive_equity")
+    if authorization is not None and authorization.max_single_weight is not None and account.equity > 0:
+        for code, value in projected_by_code.items():
+            if value / account.equity > authorization.max_single_weight + Decimal("1e-12"):
+                item_reasons.setdefault(code, []).append("max_single_weight_exceeded")
+                reasons.add(f"{code}:max_single_weight_exceeded")
+    projected_gross = sum(projected_by_code.values(), Decimal("0"))
     if authorization is not None and authorization.max_gross_exposure is not None and account.equity > 0:
         if projected_gross / account.equity > authorization.max_gross_exposure + Decimal("1e-12"):
             reasons.add("max_gross_exposure_exceeded")

@@ -33,18 +33,28 @@ def create_decision_cohorts(db: Session, decision_id: str, *, calendar: object) 
         exit_date = calendar.next_trading_day(entry)
     except Exception as exc:
         raise CohortError("TRADING_CALENDAR_UNAVAILABLE") from exc
+    latest = db.scalars(select(ManualCohort).where(
+        ManualCohort.authorization_id == decision.authorization_id,
+    ).order_by(ManualCohort.signal_date.desc(), ManualCohort.sleeve_index.desc())).first()
+    sleeve_index = 0 if latest is None else (int(latest.sleeve_index) + 1) % 2
+    occupied = db.scalars(select(ManualCohort).where(
+        ManualCohort.authorization_id == decision.authorization_id,
+        ManualCohort.sleeve_index == sleeve_index,
+        ManualCohort.status.in_({"planned", "entering", "open", "exiting", "blocked"}),
+    )).first()
+    if occupied is not None:
+        raise CohortError("manual_cohort_sleeve_still_occupied")
     budget = Decimal(str(authorization.capital_limit)) * Decimal("0.45")
-    cohorts = [ManualCohort(
-        id=f"{decision.id}-sleeve-{index}", authorization_id=decision.authorization_id,
+    cohort = ManualCohort(
+        id=f"{decision.id}-sleeve-{sleeve_index}", authorization_id=decision.authorization_id,
         decision_id=decision.id, signal_date=signal_date.isoformat(),
         planned_entry_date=entry.isoformat(), planned_exit_date=exit_date.isoformat(),
-        sleeve_index=index, budget=budget, status="planned",
-    ) for index in (0, 1)]
-    db.add_all(cohorts)
+        sleeve_index=sleeve_index, budget=budget, status="planned",
+    )
+    db.add(cohort)
     db.commit()
-    for cohort in cohorts:
-        db.refresh(cohort)
-    return cohorts
+    db.refresh(cohort)
+    return [cohort]
 
 
 __all__ = ["CohortError", "create_decision_cohorts"]

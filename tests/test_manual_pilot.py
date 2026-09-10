@@ -81,6 +81,7 @@ def test_real_forward_data_arrival_and_exact_30_days_gate(db_session):
         record_pilot_observation(
             db_session, pilot.id, observation_date=day, data_as_of=day,
             received_at=datetime(day.year, day.month, day.day, 8, tzinfo=timezone.utc),
+            now=datetime(day.year, day.month, day.day, 9, tzinfo=timezone.utc),
             input_hash=_hash(format(index % 10, "x")), signal_hash=_hash(format((index + 1) % 10, "x")),
             observed_action="hold", reconciled=True, idempotency_key=f"pilot-real-{index}", calendar=WeekdayCalendar(),
         )
@@ -97,7 +98,7 @@ def test_real_forward_data_arrival_and_exact_30_days_gate(db_session):
 def test_real_forward_finalize_rejects_non_consecutive_observation_window(db_session):
     release = _release(db_session)
     pilot = create_pilot(
-        db_session, release_id=release.id, strategy_fingerprint="c" * 64,
+        db_session, release_id=release.id, strategy_fingerprint="b" * 64,
         start_date="2024-01-01", data_mode="real_forward", pilot_key="pilot-real-gap",
     )
     days = []
@@ -110,6 +111,7 @@ def test_real_forward_finalize_rejects_non_consecutive_observation_window(db_ses
         record_pilot_observation(
             db_session, pilot.id, observation_date=day, data_as_of=day,
             received_at=datetime(day.year, day.month, day.day, 8, tzinfo=timezone.utc),
+            now=datetime(day.year, day.month, day.day, 9, tzinfo=timezone.utc),
             input_hash=_hash(f"gap-input-{index}"), signal_hash=_hash(f"gap-signal-{index}"),
             observed_action="hold", reconciled=True, idempotency_key=f"pilot-gap-{index}", calendar=WeekdayCalendar(),
         )
@@ -125,8 +127,35 @@ def test_real_forward_finalize_rejects_non_consecutive_observation_window(db_ses
 def test_finalize_rejects_malformed_numeric_evidence(db_session):
     release = _release(db_session)
     pilot = create_pilot(
-        db_session, release_id=release.id, strategy_fingerprint="d" * 64,
+        db_session, release_id=release.id, strategy_fingerprint="b" * 64,
         start_date="2024-01-01", data_mode="synthetic_engineering", pilot_key="pilot-bad-evidence",
     )
     with pytest.raises(ManualPilotError, match="p0_count_must_be_integer"):
         finalize_pilot(db_session, pilot.id, evidence={"p0_count": "not-an-int"}, calendar=WeekdayCalendar())
+
+
+def test_real_forward_rejects_wrong_fingerprint_future_and_late_backfill(db_session):
+    release = _release(db_session)
+    with pytest.raises(ManualPilotError, match="fingerprint_mismatch"):
+        create_pilot(
+            db_session, release_id=release.id, strategy_fingerprint="c" * 64,
+            start_date="2026-09-10", data_mode="real_forward", pilot_key="wrong-fingerprint",
+        )
+    pilot = create_pilot(
+        db_session, release_id=release.id, strategy_fingerprint="b" * 64,
+        start_date="2026-09-10", data_mode="real_forward", pilot_key="future-guard",
+    )
+    with pytest.raises(ManualPilotError, match="cannot_be_in_future"):
+        record_pilot_observation(
+            db_session, pilot.id, observation_date="2026-09-11", data_as_of="2026-09-11",
+            received_at="2026-09-11T08:00:00+00:00", now="2026-09-10T12:00:00+00:00",
+            input_hash=_hash("future"), signal_hash=_hash("future-signal"), observed_action="hold",
+            reconciled=True, idempotency_key="future-observation", calendar=WeekdayCalendar(),
+        )
+    with pytest.raises(ManualPilotError, match="same_trading_day"):
+        record_pilot_observation(
+            db_session, pilot.id, observation_date="2026-09-11", data_as_of="2026-09-11",
+            received_at="2026-09-14T08:00:00+00:00", now="2026-09-14T09:00:00+00:00",
+            input_hash=_hash("late"), signal_hash=_hash("late-signal"), observed_action="hold",
+            reconciled=True, idempotency_key="late-observation", calendar=WeekdayCalendar(),
+        )

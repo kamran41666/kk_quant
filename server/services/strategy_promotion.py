@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 import hashlib
 import json
@@ -22,6 +22,34 @@ def _canonical(value: Any) -> str:
 
 def _hash(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def _metric(value: Any, field: str, *, minimum: Decimal | None = None, maximum: Decimal | None = None) -> Decimal:
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise PromotionError(f"{field}_must_be_numeric") from exc
+    if not result.is_finite():
+        raise PromotionError(f"{field}_must_be_finite")
+    if minimum is not None and result < minimum:
+        raise PromotionError(f"{field}_below_minimum")
+    if maximum is not None and result > maximum:
+        raise PromotionError(f"{field}_above_maximum")
+    return result
+
+
+def _count(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise PromotionError(f"{field}_must_be_integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise PromotionError(f"{field}_must_be_integer") from exc
+    if str(value).strip() != str(result) and not isinstance(value, int):
+        raise PromotionError(f"{field}_must_be_integer")
+    if result < 0:
+        raise PromotionError(f"{field}_must_be_nonnegative")
+    return result
 
 
 @dataclass(frozen=True)
@@ -57,22 +85,43 @@ def evaluate_promotion(evidence: Mapping[str, Any], policy: ManualDailyPromotion
     portfolio = evidence.get("portfolio", {})
     holdout = evidence.get("holdout", {})
     paper = evidence.get("paper", {})
+    open_p0 = _count(research.get("open_p0", 1), "open_p0")
+    open_p1 = _count(research.get("open_p1", 1), "open_p1")
+    baseline_net = _metric(portfolio.get("baseline_net_return", "-1"), "baseline_net_return")
+    stress_net = _metric(portfolio.get("stress_net_return", "-1"), "stress_net_return")
+    baseline_excess = _metric(portfolio.get("baseline_excess_return", "-1"), "baseline_excess_return")
+    stress_excess = _metric(portfolio.get("stress_excess_return", "-1"), "stress_excess_return")
+    stress_sharpe = _metric(portfolio.get("stress_sharpe", "-1"), "stress_sharpe")
+    # The promotion protocol stores drawdown as a non-negative magnitude.
+    # Reject negative returns-style values instead of letting -95% satisfy a
+    # <=20% magnitude gate.
+    stress_drawdown = _metric(
+        portfolio.get("stress_max_drawdown", "1"),
+        "stress_max_drawdown", minimum=Decimal("0"), maximum=Decimal("1"),
+    )
+    annual_turnover = _metric(portfolio.get("annual_turnover", "999999"), "annual_turnover", minimum=Decimal("0"))
+    capacity_fill_rate = _metric(
+        portfolio.get("capacity_fill_rate", "0"),
+        "capacity_fill_rate", minimum=Decimal("0"), maximum=Decimal("1"),
+    )
+    access_count = _count(holdout.get("access_count", 0), "holdout_access_count")
+    paper_days = _count(paper.get("days", 0), "paper_days")
     checks = {
         "research_hashes_complete": bool(research.get("hashes_complete")),
         "training_passed": research.get("training_decision") == "training_passed",
         "validation_passed": research.get("validation_decision") == "validation_passed",
-        "no_unresolved_p0_p1": int(research.get("open_p0", 1)) == 0 and int(research.get("open_p1", 1)) == 0,
-        "baseline_net_return_positive": Decimal(str(portfolio.get("baseline_net_return", "-1"))) > 0,
-        "stress_net_return_positive": Decimal(str(portfolio.get("stress_net_return", "-1"))) > 0,
-        "baseline_excess_positive": Decimal(str(portfolio.get("baseline_excess_return", "-1"))) > 0,
-        "stress_excess_positive": Decimal(str(portfolio.get("stress_excess_return", "-1"))) > 0,
-        "stress_sharpe_gate": Decimal(str(portfolio.get("stress_sharpe", "-1"))) >= policy.minimum_stress_sharpe,
-        "stress_drawdown_gate": Decimal(str(portfolio.get("stress_max_drawdown", "1"))) <= policy.maximum_stress_drawdown,
-        "turnover_registered": Decimal(str(portfolio.get("annual_turnover", "999999"))) <= policy.maximum_annual_turnover,
-        "capacity_gate": Decimal(str(portfolio.get("capacity_fill_rate", "0"))) >= policy.minimum_capacity_fill_rate,
+        "no_unresolved_p0_p1": open_p0 == 0 and open_p1 == 0,
+        "baseline_net_return_positive": baseline_net > 0,
+        "stress_net_return_positive": stress_net > 0,
+        "baseline_excess_positive": baseline_excess > 0,
+        "stress_excess_positive": stress_excess > 0,
+        "stress_sharpe_gate": stress_sharpe >= policy.minimum_stress_sharpe,
+        "stress_drawdown_gate": stress_drawdown <= policy.maximum_stress_drawdown,
+        "turnover_registered": annual_turnover <= policy.maximum_annual_turnover,
+        "capacity_gate": capacity_fill_rate >= policy.minimum_capacity_fill_rate,
         "replay_exact": bool(portfolio.get("replay_exact")),
-        "holdout_open_access": holdout.get("status") in {"opened", "completed"} and int(holdout.get("access_count", 0)) >= policy.minimum_holdout_accesses,
-        "paper_observation_gate": int(paper.get("days", 0)) >= policy.minimum_paper_days and bool(paper.get("all_reconciled")) and bool(paper.get("no_p0_p1")),
+        "holdout_open_access": holdout.get("status") == "completed" and access_count >= policy.minimum_holdout_accesses,
+        "paper_observation_gate": paper_days >= policy.minimum_paper_days and bool(paper.get("all_reconciled")) and bool(paper.get("no_p0_p1")),
     }
     failed = [name for name, passed in checks.items() if not passed]
     return {"policy_hash": policy.policy_hash, "checks": checks, "passed": not failed, "failed": failed}
@@ -129,6 +178,11 @@ def promote_release(
     if target_status not in order and target_status not in {"suspended", "retired"}:
         raise PromotionError("unsupported_release_status")
     if target_status == "manual_ready":
+        if row.status != "paper_passed":
+            raise PromotionError("manual_ready_requires_paper_passed_release")
+        frozen_evidence = json.loads(row.research_evidence or "{}")
+        if _hash(frozen_evidence) != _hash(dict(evidence)):
+            raise PromotionError("promotion_evidence_does_not_match_frozen_release")
         policy = ManualDailyPromotionPolicyV1(**json.loads(row.promotion_policy or "{}"))
         result = evaluate_promotion(evidence, policy)
         if not result["passed"]:
@@ -138,8 +192,19 @@ def promote_release(
             raise PromotionError(f"manual_ready_gates_failed:{','.join(result['failed'])}")
         if not approved_by:
             raise PromotionError("manual_ready_approval_actor_required")
-    elif target_status in order and target_status < order.get(row.status, 0):
-        raise PromotionError("release_status_cannot_move_backwards")
+    elif target_status in order:
+        allowed = {
+            "draft": {"research_blocked", "research_passed"},
+            "research_blocked": set(),
+            "research_passed": {"portfolio_passed"},
+            "portfolio_passed": {"holdout_passed"},
+            "holdout_passed": {"paper_observing"},
+            "paper_observing": {"paper_passed"},
+            "paper_passed": {"manual_ready"},
+            "manual_ready": set(),
+        }
+        if target_status != row.status and target_status not in allowed.get(row.status, set()):
+            raise PromotionError("release_status_transition_not_allowed")
     row.status = target_status
     if target_status == "manual_ready":
         row.approved_by = approved_by

@@ -12,6 +12,13 @@ class HoldoutError(ValueError):
     pass
 
 
+PREVIOUSLY_OPENED_INTERVALS = (
+    (date(2015, 1, 1), date(2015, 12, 31)),
+    (date(2019, 1, 1), date(2022, 12, 31)),
+    (date(2023, 1, 1), date(2026, 8, 31)),
+)
+
+
 def _date(value: date | str) -> date:
     return value if isinstance(value, date) else date.fromisoformat(str(value))
 
@@ -30,6 +37,12 @@ def create_holdout_window(
         raise HoldoutError("holdout_start_must_not_exceed_end")
     if len(data_content_hash) != 64 or len(policy_hash) != 64:
         raise HoldoutError("holdout_hashes_must_be_sha256")
+    if any(start <= opened_end and end >= opened_start for opened_start, opened_end in PREVIOUSLY_OPENED_INTERVALS):
+        raise HoldoutError("holdout_range_was_already_exposed")
+    for existing in db.scalars(select(ResearchHoldoutWindow)).all():
+        existing_start, existing_end = _date(existing.start_date), _date(existing.end_date)
+        if start <= existing_end and end >= existing_start:
+            raise HoldoutError("holdout_range_already_registered")
     row = ResearchHoldoutWindow(
         id=uuid4_str(), dataset_id=dataset_id, data_content_hash=data_content_hash,
         start_date=start.isoformat(), end_date=end.isoformat(), policy_hash=policy_hash,

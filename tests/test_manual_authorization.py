@@ -10,15 +10,16 @@ from server.services.manual_authorization import (
 )
 from server.services.manual_ledger import create_manual_account
 from server.services.strategy_promotion import create_strategy_release, promote_release
-from tests.test_strategy_promotion import _evidence
+from tests.test_strategy_promotion import _advance_to_paper_passed, _evidence
 
 
 def _ready_release(db):
     release = create_strategy_release(
         db, strategy_key="auth-test", version="v1", bundle_hash="1" * 64,
-        strategy_fingerprint="2" * 64, research_evidence={"source": "fresh"},
+        strategy_fingerprint="2" * 64, research_evidence=_evidence(),
         execution_policy={"auto_submit": False}, risk_policy={"max_drawdown": "0.2"},
     )
+    _advance_to_paper_passed(db, release)
     return promote_release(db, release.id, target_status="manual_ready", evidence=_evidence(), approved_by="operator")
 
 
@@ -28,7 +29,7 @@ def _limits(db, release_id, account_id):
         max_order_notional="50000", max_gross_exposure="0.9", max_single_weight="0.45",
         max_daily_items=20, max_daily_loss="2000", max_drawdown="0.2",
         revocation_policy={"on_revoke": "hold_and_reconcile"},
-        valid_from="2024-01-01T00:00:00+08:00", valid_until="2025-01-01T00:00:00+08:00",
+        valid_from="2024-01-01T00:00:00+08:00", valid_until="2030-01-01T00:00:00+08:00",
     )
 
 
@@ -60,3 +61,13 @@ def test_missing_limit_or_second_active_authorization_is_rejected(db_session):
     approve_authorization(db_session, first.id, approved_by="user")
     with pytest.raises(AuthorizationError, match="already"):
         _limits(db_session, release.id, account.id)
+
+
+def test_two_pending_authorizations_cannot_both_be_approved(db_session):
+    release = _ready_release(db_session)
+    account = create_manual_account(db_session, "双授权账户")
+    first = _limits(db_session, release.id, account.id)
+    second = _limits(db_session, release.id, account.id)
+    approve_authorization(db_session, first.id, approved_by="user")
+    with pytest.raises(AuthorizationError, match="already"):
+        approve_authorization(db_session, second.id, approved_by="user")

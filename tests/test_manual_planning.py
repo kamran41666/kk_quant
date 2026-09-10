@@ -65,10 +65,8 @@ def test_draft_sells_before_buys_and_uses_confirmed_cash_only():
     plan = draft(decision, [_cohort()], account, _quotes(), execution_date=date(2024, 1, 8))
     assert plan.status == PlanStatus.BLOCKED.value
     assert plan.blocked_reason == "confirmed_cash_insufficient"
-    assert [item.side for item in plan.items] == ["sell"]
-    assert plan.items[0].planned_quantity == 50
-    assert plan.items[0].expected_proceeds > 0
-    assert plan.expected_cash_after == account.confirmed_cash + plan.items[0].expected_proceeds
+    assert plan.items == ()
+    assert plan.expected_cash_after == account.confirmed_cash
 
 
 def test_draft_buy_rounding_and_fee_estimates_are_separate_from_actual_fees():
@@ -114,7 +112,8 @@ def test_blocked_and_reconcile_do_not_create_new_buys_but_keep_due_exit():
         plan = draft(
             _decision(action=action), [_cohort()], account, _quotes(), execution_date=date(2024, 1, 9),
         )
-        assert plan.status == PlanStatus.BLOCKED.value
+        # The decision blocks new entries, while a due exit remains executable.
+        assert plan.status == PlanStatus.DRAFT.value
         assert plan.buy_items == ()
         assert plan.sell_items[0].planned_quantity == 100
 
@@ -210,3 +209,53 @@ def test_preflight_sell_at_limit_down_is_blocked_without_deleting_exit():
     assert result.allowed is False
     assert "000001.SZ:limit_down_sell" in result.reason_codes
     assert plan.sell_items[0].planned_quantity == 100
+
+
+def test_same_code_due_exit_only_sells_the_due_cohort_and_new_sleeve_can_enter():
+    old = _cohort()
+    new = ManualCohort(
+        id="cohort-b", signal_date=date(2024, 1, 8),
+        planned_entry_date=date(2024, 1, 9), planned_exit_date=date(2024, 1, 10),
+        sleeve_index=1, budget=Decimal("0.45"),
+    )
+    account = AccountSnapshot(
+        confirmed_cash=10_000, equity=10_000,
+        positions=(
+            ManualPosition("000001.SZ", 100, 100, market_value=1000, cohort_id="cohort-a"),
+            ManualPosition("000001.SZ", 100, 100, market_value=1000, cohort_id="cohort-b"),
+        ),
+    )
+    quote = {"000001.SZ": QuoteSnapshot("000001.SZ", 10, source="verified", as_of="2024-01-09T15:00:00+08:00")}
+    close_plan = draft(
+        _decision(action="hold", target_weights={"000001.SZ": Decimal("0.45")}),
+        [old, new], account, quote, execution_date=date(2024, 1, 9), execution_session="close",
+    )
+    assert [(item.cohort_id, item.planned_quantity) for item in close_plan.sell_items] == [("cohort-a", 100)]
+    assert close_plan.buy_items == ()
+    open_plan = draft(
+        _decision(action="hold", target_weights={"000001.SZ": Decimal("0.45")}),
+        [old, new], account, quote, execution_date=date(2024, 1, 9), execution_session="open",
+    )
+    assert open_plan.sell_items == ()
+    assert open_plan.buy_items[0].cohort_id == "cohort-b"
+    assert open_plan.buy_items[0].planned_quantity == 300
+
+
+def test_preflight_requires_same_fresh_quote_and_checks_resulting_single_weight():
+    account = AccountSnapshot(
+        confirmed_cash=10_000, equity=10_000,
+        positions=(ManualPosition("000001.SZ", 200, 200, market_value=2000),),
+    )
+    quote = {"000001.SZ": QuoteSnapshot("000001.SZ", 10, source="verified", as_of="2024-01-08T09:30:00+08:00")}
+    plan = draft(
+        _decision(target_weights={"000001.SZ": Decimal("0.20")}), [_cohort()],
+        AccountSnapshot(confirmed_cash=10_000, equity=10_000), quote,
+        execution_date=date(2024, 1, 8),
+    )
+    limits = ManualAuthorizationLimits(
+        capital_limit=10_000, max_single_weight=Decimal("0.30"), max_gross_exposure=Decimal("0.90"),
+    )
+    changed = {"000001.SZ": QuoteSnapshot("000001.SZ", 20, source="verified", as_of="2024-01-08T09:31:00+08:00")}
+    assert "quote_snapshot_changed_requires_revision" in preflight(plan, limits, account, changed).reason_codes
+    result = preflight(plan, limits, account, quote)
+    assert "000001.SZ:max_single_weight_exceeded" in result.reason_codes

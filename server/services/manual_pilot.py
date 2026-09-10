@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 from typing import Any, Mapping, Protocol
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -16,6 +17,9 @@ from server.models.schema import ManualPilotObservation, ManualProspectivePilot,
 
 class ManualPilotError(ValueError):
     pass
+
+
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 class CalendarLike(Protocol):
@@ -146,6 +150,8 @@ def create_pilot(
         raise ManualPilotError("release_not_ready_for_paper_observation")
     if len(str(strategy_fingerprint)) != 64:
         raise ManualPilotError("strategy_fingerprint_must_be_sha256")
+    if str(strategy_fingerprint) != release.strategy_fingerprint:
+        raise ManualPilotError("pilot_strategy_fingerprint_mismatch")
     if data_mode not in {"real_forward", "synthetic_engineering"}:
         raise ManualPilotError("unsupported_manual_pilot_data_mode")
     day = _date(start_date, "start_date")
@@ -183,6 +189,7 @@ def record_pilot_observation(
     idempotency_key: str,
     notes: str | None = None,
     calendar: CalendarLike,
+    now: str | datetime | None = None,
 ) -> ManualPilotObservation:
     pilot = db.get(ManualProspectivePilot, pilot_id)
     if pilot is None:
@@ -197,8 +204,17 @@ def record_pilot_observation(
     if as_of > day:
         raise ManualPilotError("data_as_of_after_observation_date")
     received = _received(received_at)
+    current = _received(now) if now is not None else datetime.now(timezone.utc)
+    if received > current + timedelta(minutes=5):
+        raise ManualPilotError("received_at_cannot_be_in_future")
+    if day > current.astimezone(SHANGHAI_TZ).date():
+        raise ManualPilotError("observation_date_cannot_be_in_future")
     if received.date() <= _date(pilot.start_date, "pilot_start_date") and pilot.data_mode == "real_forward":
         raise ManualPilotError("real_forward_data_must_arrive_after_pilot_start")
+    if pilot.data_mode == "real_forward" and received.astimezone(SHANGHAI_TZ).date() != day:
+        raise ManualPilotError("real_forward_observation_must_be_recorded_same_trading_day")
+    if pilot.data_mode == "real_forward" and current.astimezone(SHANGHAI_TZ).date() != day:
+        raise ManualPilotError("real_forward_observation_cannot_be_backfilled")
     expected_source = pilot.data_mode
     if (source or expected_source) != expected_source:
         raise ManualPilotError("pilot_observation_source_mismatch")

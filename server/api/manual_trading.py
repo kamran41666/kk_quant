@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from quant_engine.data.calendar import TradingCalendar
 from server.models.database import get_db
-from server.models.schema import ManualAccount, ManualDailyJob, ManualDailyReview, ManualExecutionAuthorization, ManualExecutionItem, ManualExecutionPlan, ManualValuation
+from server.models.schema import ManualAccount, ManualDailyJob, ManualDailyReview, ManualExecutionAuthorization, ManualExecutionConfirmation, ManualExecutionEvent, ManualExecutionItem, ManualExecutionPlan, ManualValuation
 from server.services.manual_ledger import (
     ManualLedgerError,
     create_manual_account,
@@ -24,7 +24,6 @@ from server.services.manual_ledger import (
     reconcile_account,
     record_cash_event,
     record_execution_event,
-    record_fill_correction,
 )
 from server.services.manual_plan_persistence import mark_plan_viewed
 from server.services.manual_review import (
@@ -49,6 +48,7 @@ from server.services.manual_authorization import (
 from server.services.manual_execution_cycle import (
     ManualExecutionCycleError,
     confirm_plan_item,
+    correct_confirmed_fill,
     record_confirmed_fill,
 )
 from server.services.operator_auth import require_operator
@@ -294,22 +294,28 @@ def add_cash_event(account_id: str, req: CashEventRequest, idempotency_key: str 
 @router.post("/accounts/{account_id}/execution-events", status_code=201)
 def add_execution_event(account_id: str, req: ExecutionEventRequest, db: Session = Depends(get_db)):
     try:
+        if req.event_type in {"fill", "partial_fill"}:
+            raise ManualExecutionCycleError("economic_execution_requires_confirmed_plan_item")
         payload = req.model_dump()
-        calendar = _calendar_for(req.traded_at) if req.event_type in {"fill", "partial_fill"} and req.side == "buy" else None
-        row = record_execution_event(db, account_id, calendar=calendar, **payload)
+        row = record_execution_event(db, account_id, calendar=None, **payload)
         return _envelope({"id": row.id, "client_event_id": row.client_event_id, "event_type": row.event_type, "source": row.source, "code": row.code, "quantity": str(row.quantity) if row.quantity is not None else None}, as_of=row.traded_at)
-    except (ManualLedgerError, ValueError) as exc:
+    except (ManualExecutionCycleError, ManualLedgerError, ValueError) as exc:
         raise _error(exc) from exc
 
 
 @router.post("/accounts/{account_id}/execution-events/{event_id}/correction", status_code=201)
 def correct_execution_event(account_id: str, event_id: str, req: CorrectionRequest, db: Session = Depends(get_db)):
     try:
-        payload = req.model_dump()
-        calendar = _calendar_for(req.traded_at) if req.side == "buy" else None
-        row = record_fill_correction(db, account_id, original_event_id=event_id, calendar=calendar, **payload)
+        original = db.get(ManualExecutionEvent, event_id)
+        if original is None or original.account_id != account_id or not original.item_id:
+            raise ManualExecutionCycleError("planned_execution_event_not_found")
+        calendar = _calendar_for(req.traded_at) if original.side == "buy" else None
+        row = correct_confirmed_fill(
+            db, original_event_id=event_id, calendar=calendar,
+            **req.model_dump(exclude={"side", "code", "item_id", "cohort_id"}),
+        )
         return _envelope({"id": row.id, "client_event_id": row.client_event_id, "event_type": row.event_type, "source": row.source}, as_of=row.traded_at)
-    except (ManualLedgerError, ValueError) as exc:
+    except (ManualExecutionCycleError, ManualLedgerError, ValueError) as exc:
         raise _error(exc) from exc
 
 
@@ -328,7 +334,10 @@ def list_plans(account_id: str, db: Session = Depends(get_db)):
     result = []
     for row in rows:
         items = db.scalars(select(ManualExecutionItem).where(ManualExecutionItem.plan_id == row.id).order_by(ManualExecutionItem.order_sequence.asc())).all()
-        result.append({"id": row.id, "execution_date": row.execution_date, "execution_session": row.execution_session, "plan_type": row.plan_type, "status": row.status, "cash_before": str(row.cash_before), "expected_cash_after": str(row.expected_cash_after), "expected_fees": str(row.expected_fees), "blocked_reason": row.blocked_reason, "items": [{"id": item.id, "code": item.code, "side": item.side, "planned_quantity": str(item.planned_quantity), "reference_price": str(item.reference_price), "price_source": item.price_source, "status": item.status, "reason_codes": item.reason_codes} for item in items]})
+        confirmations = set(db.scalars(select(ManualExecutionConfirmation.item_id).where(
+            ManualExecutionConfirmation.plan_id == row.id,
+        )).all())
+        result.append({"id": row.id, "execution_date": row.execution_date, "execution_session": row.execution_session, "plan_type": row.plan_type, "status": row.status, "cash_before": str(row.cash_before), "expected_cash_after": str(row.expected_cash_after), "expected_fees": str(row.expected_fees), "blocked_reason": row.blocked_reason, "items": [{"id": item.id, "code": item.code, "side": item.side, "planned_quantity": str(item.planned_quantity), "reference_price": str(item.reference_price), "price_source": item.price_source, "status": item.status, "reason_codes": item.reason_codes, "confirmed": item.id in confirmations} for item in items]})
     return _envelope(result)
 
 

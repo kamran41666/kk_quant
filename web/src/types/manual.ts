@@ -41,6 +41,7 @@ export interface ManualPlanItem {
   price_source: string
   status: string
   reason_codes: string
+  confirmed: boolean
 }
 
 export interface ManualPlan {

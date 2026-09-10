@@ -7,12 +7,14 @@ import hashlib
 import json
 import re
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from server.models.schema import (
     ManualAccount,
+    ManualAccountSnapshot,
     ManualCashEvent,
     ManualCorporateActionFact,
     ManualDailyReview,
@@ -33,15 +35,20 @@ ZERO = Decimal("0")
 MONEY_QUANT = Decimal("0.00000001")
 RATE_QUANT = Decimal("0.0000000001")
 CODE_RE = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _date(value: date | datetime | str, field: str) -> date:
     if isinstance(value, datetime):
-        return value.date()
+        return value.astimezone(SHANGHAI_TZ).date() if value.tzinfo else value.date()
     if isinstance(value, date):
         return value
     try:
-        return date.fromisoformat(str(value)[:10])
+        text = str(value)
+        if "T" in text:
+            moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return moment.astimezone(SHANGHAI_TZ).date() if moment.tzinfo else moment.date()
+        return date.fromisoformat(text[:10])
     except ValueError as exc:
         raise ManualReviewError(f"{field}_must_be_iso_date") from exc
 
@@ -126,11 +133,13 @@ def record_manual_valuation(
     previous_asset = _money(previous.total_asset, "previous_total_asset") if previous else ZERO
     flow = ZERO
     if previous:
-        events = db.scalars(select(ManualCashEvent).where(
-            ManualCashEvent.account_id == account_id,
-            ManualCashEvent.occurred_at > f"{previous.valuation_date}T23:59:59+00:00",
-            ManualCashEvent.occurred_at <= f"{day.isoformat()}T23:59:59+00:00",
-        )).all()
+        events = [
+            event for event in db.scalars(select(ManualCashEvent).where(
+                ManualCashEvent.account_id == account_id,
+            )).all()
+            if _date(previous.valuation_date, "previous_valuation_date")
+            < _date(event.occurred_at, "cash_event_date") <= day
+        ]
         flow = sum((_money(event.amount, "cash_event_amount") for event in events), ZERO)
     pnl = asset_value - previous_asset - flow if previous else ZERO
     daily_return = (pnl / previous_asset).quantize(RATE_QUANT) if previous and previous_asset > ZERO else ZERO
@@ -150,19 +159,20 @@ def record_manual_valuation(
 def _execution_stats(db: Session, account_id: str, day: date) -> dict[str, Any]:
     plans = db.scalars(select(ManualExecutionPlan).where(
         ManualExecutionPlan.account_id == account_id, ManualExecutionPlan.execution_date == day.isoformat(),
+        ManualExecutionPlan.status.notin_({"draft", "blocked", "cancelled", "expired", "superseded"}),
     )).all()
     items: list[ManualExecutionItem] = []
     for plan in plans:
         items.extend(db.scalars(select(ManualExecutionItem).where(ManualExecutionItem.plan_id == plan.id)).all())
-    events = db.scalars(select(ManualExecutionEvent).where(
+    events = [event for event in db.scalars(select(ManualExecutionEvent).where(
         ManualExecutionEvent.account_id == account_id,
-        ManualExecutionEvent.event_type.in_(["fill", "partial_fill", "fill_correction"]),
-        ManualExecutionEvent.traded_at >= f"{day.isoformat()}T00:00:00+00:00",
-        ManualExecutionEvent.traded_at <= f"{day.isoformat()}T23:59:59+00:00",
-    )).all()
+        ManualExecutionEvent.event_type.in_(["fill", "partial_fill", "fill_correction", "fill_reversal"]),
+    )).all() if event.traded_at and _date(event.traded_at, "execution_event_date") == day]
     planned_notional = sum((_money(item.expected_notional, "expected_notional") for item in items), ZERO)
     actual_notional = sum((
-        _money(event.quantity or ZERO, "fill_quantity") * _money(event.price or ZERO, "fill_price")
+        (-1 if event.event_type == "fill_reversal" else 1)
+        * _money(event.quantity or ZERO, "fill_quantity")
+        * _money(event.price or ZERO, "fill_price")
         for event in events
     ), ZERO)
     return {
@@ -199,8 +209,18 @@ def create_daily_review(
         ManualReconciliation.account_id == account_id,
     ).order_by(ManualReconciliation.calculated_at.desc()).limit(1)).first()
     reconciliation_status = reconciliation.status if reconciliation else "not_run"
+    snapshot = db.get(ManualAccountSnapshot, reconciliation.snapshot_id) if reconciliation else None
+    evidence_matches = bool(
+        reconciliation
+        and reconciliation_status in {"matched", "resolved"}
+        and snapshot is not None
+        and snapshot.as_of[:10] == day.isoformat()
+        and reconciliation.ledger_checkpoint_hash == valuation.ledger_checkpoint_hash
+        and valuation.ledger_checkpoint_hash == account.ledger_checkpoint_hash
+        and _money(valuation.cash, "valuation_cash") == _money(account.confirmed_cash, "account_cash")
+    )
     stats = _execution_stats(db, account_id, day)
-    status = "blocked" if account.status == "reconcile" or reconciliation_status == "different" else "ready"
+    status = "ready" if account.status == "active" and evidence_matches else "blocked"
     payload = {
         "account_id": account_id, "review_date": day, "valuation_id": valuation.id,
         "status": status, "reconciliation_status": reconciliation_status, **stats,

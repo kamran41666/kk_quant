@@ -2,8 +2,10 @@
 from datetime import date
 from decimal import Decimal
 
-from server.services.manual_backup import restore_manual_backup, verify_manual_backup, write_manual_backup
-from server.services.manual_ledger import create_manual_account, record_cash_event, verify_ledger_hash_chain
+import pytest
+
+from server.services.manual_backup import ManualBackupError, build_manual_backup, restore_manual_backup, verify_manual_backup, write_manual_backup
+from server.services.manual_ledger import create_manual_account, reconcile_account, record_cash_event, verify_ledger_hash_chain
 from server.services.manual_review import (
     create_daily_review,
     queue_research_revision,
@@ -30,9 +32,26 @@ def test_valuation_neutralizes_external_cash_flow_and_review_is_idempotent(db_se
     assert first.daily_return == Decimal("0E-10")
     assert second.external_cash_flow == Decimal("10000.00000000")
     assert second.pnl == Decimal("0E-8")
+    reconcile_account(
+        db_session, account.id, idempotency_key="m7-reconcile-1",
+        as_of="2024-01-03T16:00:00+08:00", cash="110000", total_asset="110000", positions=[],
+    )
     review = create_daily_review(db_session, account_id=account.id, review_date="2024-01-03", valuation_id=second.id)
     assert review.status == "ready"
     assert create_daily_review(db_session, account_id=account.id, review_date="2024-01-03", valuation_id=second.id).id == review.id
+
+
+def test_review_without_matching_reconciliation_is_blocked(db_session):
+    account = _account(db_session)
+    valuation = record_manual_valuation(
+        db_session, account_id=account.id, valuation_date="2024-01-02",
+        cash="1", market_value="0", total_asset="1", idempotency_key="m7-unmatched-val",
+    )
+    review = create_daily_review(
+        db_session, account_id=account.id, review_date="2024-01-02", valuation_id=valuation.id,
+    )
+    assert review.status == "blocked"
+    assert review.reconciliation_status == "not_run"
 
 
 def test_revision_and_corporate_action_are_idempotent_and_research_only(db_session):
@@ -74,3 +93,10 @@ def test_manual_backup_round_trip_preserves_ledger(tmp_path, db_session):
     finally:
         restored_db.close()
         Base.metadata.drop_all(engine)
+
+
+def test_backup_rejects_unimplemented_account_scope_instead_of_leaking_other_accounts(db_session):
+    account = _account(db_session)
+    create_manual_account(db_session, "另一个账户", idempotency_key="m7-account-2")
+    with pytest.raises(ManualBackupError, match="not_implemented"):
+        build_manual_backup(db_session, account_id=account.id)

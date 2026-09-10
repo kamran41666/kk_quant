@@ -41,7 +41,7 @@ def main() -> int:
     bundle_payload = json.loads(args.bundle.read_text(encoding="utf-8"))
     # bundle JSON is the public identity; construction intentionally requires
     # the minimal explicit evidence fields instead of trusting bundle_hash.
-    bundle = ManualDailyFactorBundleV2(**bundle_payload)
+    bundle = ManualDailyFactorBundleV2.from_dict(bundle_payload)
     calendar_payload = json.loads(args.calendar.read_text(encoding="utf-8"))
     calendar = FileCalendar([date.fromisoformat(value) for value in calendar_payload["trading_days"]], calendar_payload["content_hash"])
     signals = json.loads(args.signals.read_text(encoding="utf-8"))

@@ -23,6 +23,19 @@ def test_holdout_opening_is_recorded_and_cannot_be_resealed(db_session):
     complete_holdout(db_session, window.id)
     with pytest.raises(HoldoutError, match="completed"):
         access_holdout(db_session, window.id, accessed_by="worker", purpose="late read")
+    with pytest.raises(HoldoutError, match="already_registered"):
+        create_holdout_window(
+            db_session, dataset_id="dataset-v2-new-policy", data_content_hash="3" * 64,
+            start_date="2027-03-01", end_date="2027-09-30", policy_hash="4" * 64,
+        )
+
+
+def test_previously_opened_research_period_cannot_be_resealed(db_session):
+    with pytest.raises(HoldoutError, match="already_exposed"):
+        create_holdout_window(
+            db_session, dataset_id="renamed-old-data", data_content_hash="5" * 64,
+            start_date="2024-01-01", end_date="2026-01-01", policy_hash="6" * 64,
+        )
 
 
 def test_invalidated_holdout_cannot_complete(db_session):

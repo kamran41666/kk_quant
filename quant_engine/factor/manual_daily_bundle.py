@@ -95,5 +95,23 @@ class ManualDailyFactorBundleV2:
     def as_dict(self) -> dict[str, Any]:
         return {**self.identity(), "bundle_hash": self.bundle_hash}
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ManualDailyFactorBundleV2":
+        raw = dict(payload)
+        expected_hash = raw.pop("bundle_hash", None)
+        protocol_version = raw.pop("protocol_version", "manual-daily-factor-bundle-v2")
+        if protocol_version != "manual-daily-factor-bundle-v2":
+            raise ValueError("unsupported manual daily bundle protocol")
+        execution = dict(raw.pop("execution_policy", {}))
+        portfolio = dict(raw.pop("portfolio_policy", {}))
+        if execution.pop("auto_submit", False):
+            raise ValueError("manual daily bundle cannot auto submit")
+        raw.update(execution)
+        raw.update(portfolio)
+        bundle = cls(**raw)
+        if expected_hash is not None and expected_hash != bundle.bundle_hash:
+            raise ValueError("manual daily bundle hash mismatch")
+        return bundle
+
 
 __all__ = ["ManualDailyFactorBundleV2"]

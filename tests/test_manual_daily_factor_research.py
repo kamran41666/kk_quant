@@ -31,8 +31,8 @@ def _bundle(cost_scenario="baseline"):
 def _bars(days):
     rows = []
     for index, day in enumerate(days):
-        rows.append({"date": day, "code": "600000.SH", "open": 10 + index, "close": 10.2 + index})
-        rows.append({"date": day, "code": "000001.SZ", "open": 20 + index, "close": 20.1 + index})
+        rows.append({"date": day, "code": "600000.SH", "open": 10 + index, "close": 10.2 + index, "volume": 1_000_000, "is_suspended": False, "is_st": False})
+        rows.append({"date": day, "code": "000001.SZ", "open": 20 + index, "close": 20.1 + index, "volume": 1_000_000, "is_suspended": False, "is_st": False})
     return pd.DataFrame(rows)
 
 
@@ -47,6 +47,7 @@ def test_bundle_identity_is_independent_and_contains_manual_protocol():
         "exit_retry_policy": "next_trading_close", "auto_submit": False,
     }
     assert len(bundle.bundle_hash) == 64
+    assert ManualDailyFactorBundleV2.from_dict(identity).bundle_hash == bundle.bundle_hash
 
 
 def test_two_cohorts_use_close_signal_next_open_entry_and_close_exit():
@@ -75,9 +76,10 @@ def test_missing_exit_bar_is_recorded_and_does_not_create_fake_fill():
     days = [date(2024, 1, 2) + timedelta(days=index) for index in range(5)]
     days = [day for day in days if day.weekday() < 5]
     frame = _bars(days)
-    frame = frame[~((frame["date"] == days[2]) & (frame["code"] == "600000.SH"))]
+    frame.loc[(frame["date"] == days[2]) & (frame["code"] == "600000.SH"), "is_suspended"] = True
     result = run_manual_daily_portfolio(
         daily=frame, signals={days[0]: {"600000.SH": 1}}, calendar=Calendar(days), bundle=_bundle(),
         start=days[0], end=days[-1], initial_capital=100000,
     )
     assert any(item["reason"] == "exit_close_unavailable" for item in result.audit)
+    assert any(item["side"] == "sell" and item["date"] == days[3].isoformat() for item in result.trades)

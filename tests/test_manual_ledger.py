@@ -145,3 +145,38 @@ def test_cash_events_and_reconciliation_are_user_reported(db):
     )
     assert recon.status == "matched"
     assert db.get(type(recon), recon.id).ledger_checkpoint_hash
+
+
+def test_same_code_sell_is_scoped_to_cohort_and_fractional_shares_are_rejected(db):
+    account = _account(db)
+    for cohort_id in ("cohort-a", "cohort-b"):
+        record_execution_event(
+            db, account.id, client_event_id=f"buy-{cohort_id}", event_type="fill",
+            code="600000.SH", cohort_id=cohort_id, side="buy", quantity=100, price="10",
+            traded_at="2024-01-02", calendar=WeekdayCalendar(),
+        )
+    record_execution_event(
+        db, account.id, client_event_id="sell-cohort-a", event_type="fill",
+        code="600000.SH", cohort_id="cohort-a", side="sell", quantity=100, price="11",
+        traded_at="2024-01-03",
+    )
+    remaining = db.scalars(select(ManualPositionLot).where(ManualPositionLot.remaining_quantity > 0)).all()
+    assert [(lot.cohort_id, lot.remaining_quantity) for lot in remaining] == [("cohort-b", Decimal("100.00000000"))]
+    with pytest.raises(ManualLedgerError, match="integer_shares"):
+        record_execution_event(
+            db, account.id, client_event_id="fractional", event_type="fill",
+            code="600000.SH", cohort_id="cohort-b", side="sell", quantity="0.5", price="11",
+            traded_at="2024-01-03",
+        )
+
+
+def test_utc_timestamp_uses_shanghai_trade_date_for_t_plus_one(db):
+    account = _account(db)
+    record_execution_event(
+        db, account.id, client_event_id="utc-crossing-buy", event_type="fill",
+        code="000001.SZ", cohort_id="utc-cohort", side="buy", quantity=100, price="10",
+        traded_at="2024-01-01T16:30:00+00:00", calendar=WeekdayCalendar(),
+    )
+    lot = db.scalars(select(ManualPositionLot).where(ManualPositionLot.cohort_id == "utc-cohort")).one()
+    assert lot.buy_at == "2024-01-02"
+    assert lot.unlock_date == "2024-01-03"

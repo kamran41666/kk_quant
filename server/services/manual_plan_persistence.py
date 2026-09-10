@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from quant_engine.trading.manual_protocol import ExecutionPlan
+from server.services.manual_planning import PreflightResult
 from server.models.schema import ManualExecutionItem, ManualExecutionPlan, manual_now_str
 
 
@@ -27,6 +28,10 @@ def persist_execution_plan(
 ) -> ManualExecutionPlan:
     plan_id = plan.id or plan.plan_hash
     key = idempotency_key or plan_id
+    if len(plan.plan_hash) != 64 or len(plan.quote_snapshot_hash) != 64 or len(authorization_hash) != 64:
+        raise PlanPersistenceError("plan_evidence_hashes_required")
+    if not plan.trading_rule_version or plan.trading_rule_version == "unknown":
+        raise PlanPersistenceError("plan_trading_rule_version_required")
     existing = db.scalars(select(ManualExecutionPlan).where(ManualExecutionPlan.idempotency_key == key)).first()
     if existing:
         if existing.plan_hash != plan.plan_hash:
@@ -47,6 +52,12 @@ def persist_execution_plan(
         expected_fees=Decimal(str(plan.expected_fees)), blocked_reason=plan.blocked_reason,
         supersedes_plan_id=plan.supersedes_plan_id,
     )
+    if plan.supersedes_plan_id:
+        prior = db.get(ManualExecutionPlan, plan.supersedes_plan_id)
+        if prior is None or prior.account_id != account_id or prior.status not in {"ready", "viewed"}:
+            raise PlanPersistenceError("superseded_plan_not_found_or_not_frozen")
+        prior.status = "superseded"
+        prior.updated_at = manual_now_str()
     db.add(row)
     for item in plan.items:
         db.add(ManualExecutionItem(
@@ -74,11 +85,31 @@ def mark_plan_viewed(db: Session, plan_id: str) -> ManualExecutionPlan:
         raise PlanPersistenceError("manual_plan_not_found")
     if row.status in {"cancelled", "expired", "blocked", "superseded"}:
         raise PlanPersistenceError("manual_plan_not_viewable")
-    if row.status in {"draft", "ready"}:
+    if row.status == "draft":
+        raise PlanPersistenceError("manual_plan_must_be_ready_before_view")
+    if row.status == "ready":
         row.status, row.viewed_at, row.updated_at = "viewed", manual_now_str(), manual_now_str()
         db.commit()
         db.refresh(row)
     return row
 
 
-__all__ = ["PlanPersistenceError", "persist_execution_plan", "mark_plan_viewed"]
+def freeze_plan_ready(db: Session, plan_id: str, preflight: PreflightResult) -> ManualExecutionPlan:
+    row = db.get(ManualExecutionPlan, plan_id)
+    if row is None:
+        raise PlanPersistenceError("manual_plan_not_found")
+    if row.status != "draft":
+        raise PlanPersistenceError("only_draft_plan_can_be_frozen")
+    if not preflight.allowed:
+        row.status = "blocked"
+        row.blocked_reason = ";".join(preflight.reason_codes)
+    else:
+        row.status = "ready"
+        row.blocked_reason = None
+    row.updated_at = manual_now_str()
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+__all__ = ["PlanPersistenceError", "persist_execution_plan", "freeze_plan_ready", "mark_plan_viewed"]

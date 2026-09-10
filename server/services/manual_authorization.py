@@ -93,7 +93,13 @@ def create_authorization(
     return row
 
 
-def approve_authorization(db: Session, authorization_id: str, *, approved_by: str) -> ManualExecutionAuthorization:
+def approve_authorization(
+    db: Session,
+    authorization_id: str,
+    *,
+    approved_by: str,
+    now: str | None = None,
+) -> ManualExecutionAuthorization:
     row = db.get(ManualExecutionAuthorization, authorization_id)
     if row is None:
         raise AuthorizationError("authorization_not_found")
@@ -102,16 +108,32 @@ def approve_authorization(db: Session, authorization_id: str, *, approved_by: st
         raise AuthorizationError("release_is_not_manual_ready")
     if row.status != "pending":
         raise AuthorizationError("only_pending_authorization_can_be_approved")
-    now = manual_now_str()
+    approval_time = _timestamp(now or manual_now_str())
+    if not row.valid_from <= approval_time < row.valid_until:
+        raise AuthorizationError("authorization_not_currently_valid")
+    conflicting = db.scalars(select(ManualExecutionAuthorization).where(
+        ManualExecutionAuthorization.account_id == row.account_id,
+        ManualExecutionAuthorization.id != row.id,
+        ManualExecutionAuthorization.status.in_({"approved", "active", "reconcile"}),
+    )).first()
+    if conflicting is not None:
+        raise AuthorizationError("manual_account_already_has_active_authorization")
     row.status = "approved"
-    row.approved_by, row.approved_at, row.updated_at = str(approved_by), now, now
+    row.approved_by, row.approved_at, row.updated_at = str(approved_by), approval_time, approval_time
     db.add(AuditEvent(actor=str(approved_by), action="approve_manual_authorization", resource_type="manual_execution_authorization", resource_id=row.id, outcome="approved", details=json.dumps({"release_id": row.release_id, "account_id": row.account_id}, sort_keys=True)))
     db.commit()
     db.refresh(row)
     return row
 
 
-def activate_on_first_fill(db: Session, authorization_id: str, *, event_id: str, filled_at: str | None = None) -> ManualExecutionAuthorization:
+def activate_on_first_fill(
+    db: Session,
+    authorization_id: str,
+    *,
+    event_id: str,
+    filled_at: str | None = None,
+    commit: bool = True,
+) -> ManualExecutionAuthorization:
     row = db.get(ManualExecutionAuthorization, authorization_id)
     if row is None:
         raise AuthorizationError("authorization_not_found")
@@ -121,8 +143,11 @@ def activate_on_first_fill(db: Session, authorization_id: str, *, event_id: str,
     row.first_fill_event_id = event_id
     row.first_fill_at = filled_at or manual_now_str()
     row.updated_at = manual_now_str()
-    db.commit()
-    db.refresh(row)
+    if commit:
+        db.commit()
+        db.refresh(row)
+    else:
+        db.flush()
     return row
 
 
