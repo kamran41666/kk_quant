@@ -17,6 +17,16 @@
 
 ## 记录
 
+### 2026-09-10 15:27 CST — H2b受控源输入与真实normalized核验
+
+- Git：`phase4-factor-develop`；提交`39f6962`已创建，本条Progress随后提交并推送。
+- 修改：新增`VerifiedPortfolioSources`、`FrozenTradingCalendar`和严格源加载器。normalized manifest按原构建器identity重算dataset content hash，daily/actions/securities/calendar逐文件检查受控根、非符号链接、size和SHA；基准receipt与信号Parquet也分别核对实际SHA。
+- 资格：从daily/securities按上市满180日、未退市、非ST、非停牌policy生成逐日历史资格。输入manifest新增训练/验证artifact hash及daily/actions/securities/calendar/benchmark/signals六类相对source引用；运行后`verify_files()`可发现源文件变化。
+- 实机证据：当前macOS成功核验`normalized-v2` dataset/content和四文件hash，加载1,625,850条日线与资格、4,645条公司行动、244个信号日和沪深300基准；50条未解释参考调整准确进入阻断计数。本次只读该本机数据，没有改写冻结文件。
+- 验证：后端全量`782 passed, 2 warnings`；源/v3/账本专项`19 passed`；compileall、关键错误级Ruff、`git diff --check`和变更Markdown链接检查通过。
+- 边界：受控正文已可定位，但独立replay尚未逐笔对照原始开收盘价、前日volume、历史资格、action定义和benchmark；artifact注册及`portfolio_passed`继续关闭。当前50条未知调整也会使normalized-v2自然失败质量门。
+- 入口：[`受控源记录`](docs/manual-daily-trading-implementation-plan.md#36-h2b受控源输入检查点)、[`组合证据合同`](docs/research-runs/manual-daily-portfolio-evidence-v1.md)、[`源加载器`](quant_engine/backtest/manual_portfolio_sources.py)。
+
 ### 2026-09-10 15:16 CST — H2b精确Arrow与证据目录验证
 
 - Git：`phase4-factor-develop`；提交`d5d10e7`已创建，本条Progress随后提交并推送。
