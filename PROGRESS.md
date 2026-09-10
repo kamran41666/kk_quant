@@ -17,6 +17,15 @@
 
 ## 记录
 
+### 2026-09-10 14:05 CST — H2a研究证据锚定与晋级解析器
+
+- Git：`phase4-factor-develop`；H2a提交`03ddc4e`已创建，本条Progress随后单独提交。连同H1，本地分支尚未推送，领先`origin/phase4-factor-develop`。
+- 修改：新增`ResearchEvidenceArtifact`和`StrategyPromotionEvaluation`追加表及`manual_evidence.py`深模块。日频训练/验证worker完成后登记受控目录内三份Parquet与报告的路径、大小、逐文件SHA-256、身份hash和总证据hash；解析器重新核验数据库候选/实验、表达式、manual label、数据版本、policy、时间切分、报告语义及落盘字节，使用状态CAS原子追加晋级决定。备份协议升级为`manual-backup-v2`并覆盖新证据表。
+- 接口：新增证据绑定release创建、release列表/详情/证据和基于artifact ID的promotion接口。客户端不能提交复制的指标或`passed`布尔值；旧`promote_release(..., evidence=...)`状态提升入口已关闭。`draft → research_passed`已有严格resolver，其余阶段证据不足时追加blocked evaluation并保持release原状态。
+- 验证：当前macOS工作区后端全量`762 passed, 2 warnings`；H2a及相关专项`15 passed, 1 warning`；compileall、关键错误级Ruff、`git diff --check`和变更Markdown链接检查通过。warning仍为Starlette TestClient弃用提示和既有撮合截断提示。
+- 边界：H2尚未整体完成。现有manual portfolio缺公司行动、基准、完整容量分母、独立账务重放和可信manifest，因此resolver明确阻断`portfolio_passed`；holdout经济结果和pilot daily checkpoint也尚未接入。当前release最多只能由新resolver达到`research_passed`，没有人工执行资格。
+- 入口：[`H2a实施记录`](docs/manual-daily-trading-implementation-plan.md#29-h2a研究证据解析记录)、[`建设审查H2状态`](docs/research-runs/manual-daily-implementation-audit-2026-09-10.md#h2a-实施状态2026-09-10)、[`证据解析模块`](server/services/manual_evidence.py)。
+
 ### 2026-09-10 09:40 CST — 远端日频闭环大审查与H1加固
 
 - Git：`phase4-factor-develop`从`5c225a4`安全快进到远端`fb92672`，只审查其日频人工闭环建设；H1修复提交为`92ddb68`，本条Progress随后单独提交。当前本地提交尚未推送，分支领先`origin/phase4-factor-develop`。
