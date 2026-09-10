@@ -17,6 +17,16 @@
 
 ## 记录
 
+### 2026-09-10 14:41 CST — H2b cohort公司行动子账
+
+- Git：`phase4-factor-develop`；提交`6378438`已创建，本条Progress随后提交并推送。
+- 修改：`ManualResearchLedger`新增按cohort冻结的登记权益、现金应收、派息结算、红股经济股份和上市锁仓；每日权益为现金+应收+持仓市值。登记后卖空不删除应收或红股资格，派息只做应收到现金的等额转移。
+- 分配：红股和分币现金都先按账户总额取整，再用小数余数降序、cohort ID升序稳定分配；保留精确cost basis，避免平均成本二次取整漂移。action经济键、source hash和action hash支持同源去重及冲突拒绝。
+- 数据：新增normalized action严格适配器，映射record/ex/pay/stock、现金、送转及验证状态并生成稳定action ID。缺字段、未验证红股或异常日期使证据失效；派息日早于除权日时有效派息日固定为空，不能提前释放买入力。
+- 验证：当前macOS后端全量`773 passed, 2 warnings`；公司行动/cohort专项`10 passed`；compileall、关键错误级Ruff、`git diff --check`及变更Markdown链接检查通过。
+- 边界：公司行动子账尚未由正式v3组合循环消费；normalized manifest文件hash、50条未解释调整、benchmark、12项输出、独立replay和portfolio resolver仍待接入，当前不能晋级。
+- 入口：[`H2b公司行动记录`](docs/manual-daily-trading-implementation-plan.md#32-h2b-cohort公司行动子账检查点)、[`组合证据合同`](docs/research-runs/manual-daily-portfolio-evidence-v1.md)、[`公司行动账本`](quant_engine/backtest/manual_research_ledger.py)、[`输入适配器`](quant_engine/backtest/manual_research_inputs.py)。
+
 ### 2026-09-10 14:26 CST — H2b cohort原子成交与共享容量
 
 - Git：`phase4-factor-develop`；提交`0847559`已创建，本条Progress随后提交并推送。
