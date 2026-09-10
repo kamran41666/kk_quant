@@ -1,26 +1,25 @@
 """Independent metrics, replay and atomic evidence writer for portfolio v3."""
 from __future__ import annotations
 
-from collections import defaultdict
-from datetime import date
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import shutil
 import statistics
 import tempfile
+from collections import defaultdict
+from datetime import date
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pandas as pd
 
 from quant_engine.backtest.manual_research_ledger import RESEARCH_EXECUTION_COSTS
 from quant_engine.trading.effective_rules import EffectiveDatedTradingRuleRegistry
-
 
 ZERO = Decimal("0")
 CENT = Decimal("0.01")
@@ -54,6 +53,98 @@ def _file_hash(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _allocate_source_cash(
+    entitlements: Mapping[str, int],
+    cash_per_share: Decimal,
+    tax_rate: Decimal,
+) -> dict[str, Decimal]:
+    """Recompute cohort cash independently from the production ledger."""
+    exact = {
+        cohort_id: Decimal(quantity) * cash_per_share * (Decimal(1) - tax_rate)
+        for cohort_id, quantity in entitlements.items()
+    }
+    total = sum(exact.values(), ZERO).quantize(CENT, rounding=ROUND_HALF_UP)
+    allocated = {
+        cohort_id: value.quantize(CENT, rounding=ROUND_DOWN)
+        for cohort_id, value in exact.items()
+    }
+    cents = int(((total - sum(allocated.values(), ZERO)) / CENT).to_integral_value())
+    priority = sorted(
+        exact,
+        key=lambda cohort_id: (-(exact[cohort_id] - allocated[cohort_id]), cohort_id),
+    )
+    for cohort_id in priority[:cents]:
+        allocated[cohort_id] += CENT
+    return allocated
+
+
+def _allocate_source_bonus(
+    entitlements: Mapping[str, int],
+    bonus_ratio: Decimal,
+) -> dict[str, int]:
+    """Recompute account-level bonus shares with largest remainders."""
+    exact = {
+        cohort_id: Decimal(quantity) * bonus_ratio
+        for cohort_id, quantity in entitlements.items()
+    }
+    total = int(sum(exact.values(), ZERO).to_integral_value(rounding=ROUND_DOWN))
+    allocated = {
+        cohort_id: int(value.to_integral_value(rounding=ROUND_DOWN))
+        for cohort_id, value in exact.items()
+    }
+    remaining = total - sum(allocated.values())
+    priority = sorted(
+        exact,
+        key=lambda cohort_id: (-(exact[cohort_id] - allocated[cohort_id]), cohort_id),
+    )
+    for cohort_id in priority[:remaining]:
+        allocated[cohort_id] += 1
+    return allocated
+
+
+def _consume_unlocked(
+    acquisitions: list[dict[str, Any]],
+    quantity: int,
+    day: date,
+) -> bool:
+    """Consume only source-reconstructed shares that are sellable on ``day``."""
+    remaining = quantity
+    for item in acquisitions:
+        if item["unlock_date"] > day or item["quantity"] <= 0:
+            continue
+        consumed = min(remaining, item["quantity"])
+        item["quantity"] -= consumed
+        remaining -= consumed
+        if remaining == 0:
+            return True
+    return remaining == 0
+
+
+def _event_signature(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    stage = row.get("stage")
+    base = (
+        row.get("action_id"), stage, row.get("date"), row.get("code"),
+        row.get("source_hash"), row.get("action_hash"), row.get("economic_key"),
+    )
+    if stage == "record":
+        return (*base, row.get("cohort_id"), int(row.get("eligible_quantity", 0)))
+    if stage == "ex_cash":
+        return (
+            *base, row.get("cohort_id"), int(row.get("eligible_quantity", 0)),
+            _money(row.get("gross_cash", 0)), _money(row.get("receivable_cash", 0)),
+        )
+    if stage == "ex_bonus":
+        return (
+            *base, row.get("cohort_id"), int(row.get("eligible_quantity", 0)),
+            int(row.get("bonus_quantity", 0)), row.get("stock_listing_date"),
+        )
+    if stage == "pay":
+        return (*base, row.get("cohort_id"), _money(row.get("cash", 0)))
+    if stage == "stock_listing":
+        return base
+    raise ValueError(f"unsupported_corporate_action_stage:{stage}")
 
 
 def calculate_portfolio_metrics(result: Any) -> dict[str, str | int]:
@@ -247,8 +338,11 @@ def replay_portfolio_result(result: Any, sources: Any | None = None) -> dict[str
     source_checks = {
         "source_files": False, "calendar_source": False, "benchmark_source": False,
         "signal_source": False, "execution_price_source": False,
+        "valuation_price_source": False,
         "capacity_source": False, "eligibility_source": False,
-        "corporate_action_source": False, "t_plus_one_source": False,
+        "corporate_action_source": False, "corporate_action_economics_source": False,
+        "share_lock_source": False, "cohort_terminal_source": False,
+        "t_plus_one_source": False,
     }
     target_completion_verifiable = False
     if sources is not None:
@@ -344,17 +438,328 @@ def replay_portfolio_result(result: Any, sources: Any | None = None) -> dict[str
             source_checks["t_plus_one_source"] = t1_ok
 
             source_actions = {item.action_id: item for item in fresh["actions"]}
-            definitions = {row["action_id"]: row for row in result.corporate_actions if row["stage"] == "definition"}
-            action_ok = set(source_actions) == set(definitions)
+            definition_rows = [
+                row for row in result.corporate_actions if row["stage"] == "definition"
+            ]
+            definitions = {row["action_id"]: row for row in definition_rows}
+            action_ok = (
+                len(definition_rows) == len(definitions)
+                and set(source_actions) == set(definitions)
+            )
+            source_calendar = set(fresh["calendar"])
+            source_calendar_start = fresh["calendar"][0] if fresh["calendar"] else None
+            source_calendar_end = fresh["calendar"][-1] if fresh["calendar"] else None
             for action_id, action in source_actions.items():
                 row = definitions.get(action_id, {})
                 if (
                     row.get("action_hash") != action.action_hash
                     or row.get("economic_key") != action.economic_key
                     or row.get("source_hash") != action.source_hash
+                    or row.get("stage") != "definition"
+                    or row.get("code") != action.code
+                    or row.get("cohort_id") is not None
+                    or row.get("date")
+                    != (action.ex_date or action.record_date or result.start_date).isoformat()
+                    or row.get("record_date")
+                    != (action.record_date.isoformat() if action.record_date else None)
+                    or row.get("ex_date")
+                    != (action.ex_date.isoformat() if action.ex_date else None)
+                    or row.get("pay_date")
+                    != (action.pay_date.isoformat() if action.pay_date else None)
+                    or row.get("stock_listing_date")
+                    != (
+                        action.stock_listing_date.isoformat()
+                        if action.stock_listing_date else None
+                    )
+                    or _decimal(row.get("cash_per_share"), "definition_cash_per_share")
+                    != action.cash_per_share
+                    or _decimal(row.get("bonus_ratio"), "definition_bonus_ratio")
+                    != action.bonus_ratio
+                    or not isinstance(row.get("allocation_verified"), bool)
+                    or row.get("allocation_verified") != action.allocation_verified
                 ):
                     action_ok = False
+                for event_day in (action.record_date, action.ex_date):
+                    if (
+                        event_day is not None
+                        and source_calendar_start is not None
+                        and source_calendar_start <= event_day <= source_calendar_end
+                        and event_day not in source_calendar
+                    ):
+                        action_ok = False
             source_checks["corporate_action_source"] = action_ok
+
+            # Rebuild company-action economics and sellability from the
+            # verified action source and immutable trades.  The production
+            # ledger's allocation and lot methods are deliberately not used.
+            expected_action_events: list[dict[str, Any]] = []
+            entitlements_by_action: dict[str, dict[str, int]] = {}
+            pending_cash: list[dict[str, Any]] = []
+            applied_actions: set[str] = set()
+            listed_actions: set[str] = set()
+            acquisitions: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+            source_trades_by_day: dict[date, list[Mapping[str, Any]]] = defaultdict(list)
+            for trade in result.trades:
+                source_trades_by_day[date.fromisoformat(trade["date"])].append(trade)
+            for rows in source_trades_by_day.values():
+                rows.sort(key=lambda row: int(row["event_sequence"]))
+            record_actions_by_day: dict[date, list[Any]] = defaultdict(list)
+            ex_actions_by_day: dict[date, list[Any]] = defaultdict(list)
+            for action in source_actions.values():
+                if action.record_date is not None:
+                    record_actions_by_day[action.record_date].append(action)
+                if action.ex_date is not None:
+                    ex_actions_by_day[action.ex_date].append(action)
+            for rows in record_actions_by_day.values():
+                rows.sort(key=lambda action: action.action_id)
+            for rows in ex_actions_by_day.values():
+                rows.sort(key=lambda action: action.action_id)
+
+            lock_ok = True
+            valuation_price_ok = True
+            for day in expected_dates:
+                for action in ex_actions_by_day.get(day, []):
+                    entitlements = entitlements_by_action.get(action.action_id, {})
+                    applied_actions.add(action.action_id)
+                    identity = {
+                        "source_hash": action.source_hash,
+                        "action_hash": action.action_hash,
+                        "economic_key": action.economic_key,
+                    }
+                    if action.cash_per_share > ZERO:
+                        allocation = _allocate_source_cash(
+                            entitlements,
+                            action.cash_per_share,
+                            costs["dividend_tax_rate"],
+                        )
+                        effective_pay_date = (
+                            action.pay_date
+                            if action.pay_date is not None and action.pay_date >= day
+                            else None
+                        )
+                        for cohort_id, quantity in sorted(entitlements.items()):
+                            gross = _money(Decimal(quantity) * action.cash_per_share)
+                            net = allocation[cohort_id]
+                            expected_action_events.append({
+                                **identity,
+                                "action_id": action.action_id,
+                                "date": day.isoformat(),
+                                "stage": "ex_cash",
+                                "code": action.code,
+                                "cohort_id": cohort_id,
+                                "eligible_quantity": quantity,
+                                "gross_cash": gross,
+                                "receivable_cash": net,
+                            })
+                            pending_cash.append({
+                                "action": action,
+                                "cohort_id": cohort_id,
+                                "amount": net,
+                                "pay_date": effective_pay_date,
+                                "paid": False,
+                            })
+                    if action.bonus_ratio > ZERO and action.allocation_verified:
+                        allocation = _allocate_source_bonus(entitlements, action.bonus_ratio)
+                        unlock_date = (
+                            action.stock_listing_date
+                            if action.stock_listing_date is not None
+                            and action.stock_listing_date >= day
+                            else date.max
+                        )
+                        for cohort_id, bonus_quantity in sorted(allocation.items()):
+                            if bonus_quantity <= 0:
+                                continue
+                            acquisitions[(cohort_id, action.code)].append({
+                                "quantity": bonus_quantity,
+                                "unlock_date": unlock_date,
+                            })
+                            expected_action_events.append({
+                                **identity,
+                                "action_id": action.action_id,
+                                "date": day.isoformat(),
+                                "stage": "ex_bonus",
+                                "code": action.code,
+                                "cohort_id": cohort_id,
+                                "eligible_quantity": entitlements[cohort_id],
+                                "bonus_quantity": bonus_quantity,
+                                "stock_listing_date": unlock_date.isoformat(),
+                            })
+
+                for receivable_row in pending_cash:
+                    pay_date = receivable_row["pay_date"]
+                    if receivable_row["paid"] or pay_date is None or pay_date > day:
+                        continue
+                    receivable_row["paid"] = True
+                    action = receivable_row["action"]
+                    expected_action_events.append({
+                        "source_hash": action.source_hash,
+                        "action_hash": action.action_hash,
+                        "economic_key": action.economic_key,
+                        "action_id": action.action_id,
+                        "date": day.isoformat(),
+                        "stage": "pay",
+                        "code": action.code,
+                        "cohort_id": receivable_row["cohort_id"],
+                        "cash": receivable_row["amount"],
+                    })
+
+                for action in sorted(source_actions.values(), key=lambda item: item.action_id):
+                    listing_valid = (
+                        action.stock_listing_date is not None
+                        and action.ex_date is not None
+                        and action.stock_listing_date >= action.ex_date
+                    )
+                    if (
+                        listing_valid
+                        and action.stock_listing_date <= day
+                        and action.action_id in applied_actions
+                        and action.action_id not in listed_actions
+                    ):
+                        listed_actions.add(action.action_id)
+                        expected_action_events.append({
+                            "source_hash": action.source_hash,
+                            "action_hash": action.action_hash,
+                            "economic_key": action.economic_key,
+                            "action_id": action.action_id,
+                            "date": day.isoformat(),
+                            "stage": "stock_listing",
+                            "code": action.code,
+                        })
+
+                for trade in source_trades_by_day.get(day, []):
+                    key = (trade["cohort_id"], trade["code"])
+                    lots = acquisitions[key]
+                    quantity = int(trade["quantity"])
+                    if trade["side"] == "buy":
+                        calendar_index = day_index[day]
+                        unlock_date = (
+                            fresh["calendar"][calendar_index + 1]
+                            if calendar_index + 1 < len(fresh["calendar"])
+                            else date.max
+                        )
+                        lots.append({"quantity": quantity, "unlock_date": unlock_date})
+                    else:
+                        sellable_before = sum(
+                            int(item["quantity"])
+                            for item in lots
+                            if item["unlock_date"] <= day
+                        )
+                        if quantity > sellable_before or not _consume_unlocked(lots, quantity, day):
+                            lock_ok = False
+                            fail(
+                                "share_lock_source",
+                                date=day.isoformat(),
+                                trade_id=trade["trade_id"],
+                                expected_sellable=sellable_before,
+                                sold_quantity=quantity,
+                            )
+
+                expected_positions: dict[tuple[str, str], int] = {}
+                expected_sellable: dict[tuple[str, str], int] = {}
+                for key, lots in acquisitions.items():
+                    quantity = sum(int(item["quantity"]) for item in lots)
+                    if quantity <= 0:
+                        continue
+                    expected_positions[key] = quantity
+                    expected_sellable[key] = sum(
+                        int(item["quantity"])
+                        for item in lots
+                        if item["unlock_date"] <= day
+                    )
+                recorded_position_rows = positions_by_day[day.isoformat()]
+                recorded_positions = {
+                    (row["cohort_id"], row["code"]): row
+                    for row in recorded_position_rows
+                }
+                if len(recorded_positions) != len(recorded_position_rows):
+                    lock_ok = False
+                    fail("share_lock_source", date=day.isoformat(), reason="duplicate_position")
+                if {
+                    key: int(row["quantity"])
+                    for key, row in recorded_positions.items()
+                } != expected_positions:
+                    lock_ok = False
+                    fail("share_lock_source", date=day.isoformat(), reason="quantity_mismatch")
+                for key, row in recorded_positions.items():
+                    if int(row["sellable_quantity"]) != expected_sellable.get(key, 0):
+                        lock_ok = False
+                        fail(
+                            "share_lock_source",
+                            date=day.isoformat(),
+                            cohort_id=key[0],
+                            code=key[1],
+                            expected_sellable=expected_sellable.get(key, 0),
+                            actual_sellable=int(row["sellable_quantity"]),
+                        )
+                    bar = daily_source.get((day, key[1]))
+                    if (
+                        bar is None
+                        or _decimal(row["close"], "position_close")
+                        != _money(_decimal(bar["close"], "source_close"))
+                    ):
+                        valuation_price_ok = False
+                        fail(
+                            "valuation_price_source",
+                            date=day.isoformat(),
+                            cohort_id=key[0],
+                            code=key[1],
+                        )
+
+                for action in record_actions_by_day.get(day, []):
+                    entitlements = {
+                        cohort_id: quantity
+                        for (cohort_id, code), quantity in expected_positions.items()
+                        if code == action.code and quantity > 0
+                    }
+                    entitlements_by_action[action.action_id] = entitlements
+                    for cohort_id, quantity in sorted(entitlements.items()):
+                        expected_action_events.append({
+                            "source_hash": action.source_hash,
+                            "action_hash": action.action_hash,
+                            "economic_key": action.economic_key,
+                            "action_id": action.action_id,
+                            "date": day.isoformat(),
+                            "stage": "record",
+                            "code": action.code,
+                            "cohort_id": cohort_id,
+                            "eligible_quantity": quantity,
+                        })
+
+            actual_economic_rows = [
+                row for row in result.corporate_actions
+                if row["stage"] != "definition"
+            ]
+            expected_signatures = sorted(repr(_event_signature(row)) for row in expected_action_events)
+            actual_signatures = sorted(repr(_event_signature(row)) for row in actual_economic_rows)
+            action_economics_ok = expected_signatures == actual_signatures
+            if not action_economics_ok:
+                fail(
+                    "corporate_action_economics_source",
+                    expected_count=len(expected_signatures),
+                    actual_count=len(actual_signatures),
+                    expected_hash=_hash(expected_signatures),
+                    actual_hash=_hash(actual_signatures),
+                )
+            source_checks["valuation_price_source"] = valuation_price_ok
+            source_checks["corporate_action_economics_source"] = action_economics_ok
+            source_checks["share_lock_source"] = lock_ok
+
+            cohort_status = {cohort["id"]: cohort["status"] for cohort in result.cohorts}
+            terminal_ok = True
+            for (cohort_id, code), lots in acquisitions.items():
+                remaining = sum(int(item["quantity"]) for item in lots)
+                if remaining <= 0:
+                    continue
+                if cohort_status.get(cohort_id) in {None, "closed", "entry_failed"}:
+                    terminal_ok = False
+                    fail(
+                        "cohort_terminal_source",
+                        cohort_id=cohort_id,
+                        code=code,
+                        remaining_quantity=remaining,
+                        status=cohort_status.get(cohort_id),
+                    )
+            source_checks["cohort_terminal_source"] = terminal_ok
 
             logical_rows: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
             for row in result.intents:
@@ -397,8 +802,15 @@ def replay_portfolio_result(result: Any, sources: Any | None = None) -> dict[str
         "receivable_replay", "share_replay", "valuation_replay",
         "corporate_action_identity", "equity_replay",
     }
+    source_only_errors = {
+        "source_replay_exception",
+        "corporate_action_economics_source",
+        "share_lock_source",
+        "valuation_price_source",
+        "cohort_terminal_source",
+    }
     accounting_passed = all(checks[key] for key in accounting_keys) and not any(
-        item["check"] not in {"source_replay_exception"} for item in errors
+        item["check"] not in source_only_errors for item in errors
     )
     source_and_execution_passed = sources is not None and all(source_checks.values()) and not any(
         item["check"] == "source_replay_exception" for item in errors

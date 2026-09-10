@@ -1,15 +1,24 @@
 """Controlled source manifest loading for manual portfolio v3."""
-from datetime import date
-from dataclasses import replace
-from datetime import timedelta
 import hashlib
 import json
+from copy import deepcopy
+from dataclasses import replace
+from datetime import date, timedelta
+from decimal import Decimal
 
 import pandas as pd
 import pytest
 
-from quant_engine.backtest.manual_portfolio_sources import load_verified_portfolio_sources
-from quant_engine.backtest.manual_daily_portfolio_v3 import run_manual_daily_portfolio_v3
+from quant_engine.backtest.manual_daily_portfolio_v3 import (
+    run_manual_daily_portfolio_v3,
+)
+from quant_engine.backtest.manual_portfolio_evidence import (
+    _allocate_source_bonus,
+    _allocate_source_cash,
+)
+from quant_engine.backtest.manual_portfolio_sources import (
+    load_verified_portfolio_sources,
+)
 from tests.test_manual_daily_factor_research import _bundle
 
 
@@ -21,7 +30,7 @@ def _hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _sources(tmp_path, *, day_count=3, unexplained=True):
+def _sources(tmp_path, *, day_count=3, unexplained=True, with_action=False):
     dataset = tmp_path / "dataset"
     dataset.mkdir()
     days = []
@@ -36,10 +45,20 @@ def _sources(tmp_path, *, day_count=3, unexplained=True):
         "turnover_rate": 0.1, "is_suspended": False, "is_st": False,
         "adjusted_close": 10, "vendor_adjusted_close": 10, "source_return": 0,
     } for day in days])
-    actions = pd.DataFrame(columns=[
+    action_columns = [
         "code", "record_date", "ex_date", "pay_date", "stock_date",
         "cash_ps", "bonus_ratio", "bonus_allocation_verified",
-    ])
+    ]
+    if with_action:
+        if len(days) < 5:
+            raise ValueError("action_fixture_requires_five_days")
+        actions = pd.DataFrame([{
+            "code": "600000.SH", "record_date": days[1], "ex_date": days[3],
+            "pay_date": days[4], "stock_date": days[4], "cash_ps": 0.1,
+            "bonus_ratio": 0.1, "bonus_allocation_verified": True,
+        }], columns=action_columns)
+    else:
+        actions = pd.DataFrame(columns=action_columns)
     securities = pd.DataFrame([{"code": "600000.SH", "name": "test", "ipo_date": "2000-01-01", "out_date": None}])
     calendar = pd.DataFrame({"date": days})
     frames = {"daily": daily, "actions": actions, "securities": securities, "calendar": calendar}
@@ -141,3 +160,103 @@ def test_source_replay_rechecks_prices_capacity_eligibility_signals_and_benchmar
     replay = result.replay(sources)
     assert replay["source_and_execution_passed"] is False
     assert replay["passed"] is False
+
+
+def test_source_replay_rebuilds_action_economics_and_listing_locks(tmp_path):
+    manifest_path, receipt_path, signal_path = _sources(
+        tmp_path, day_count=6, unexplained=False, with_action=True,
+    )
+    sources = load_verified_portfolio_sources(
+        dataset_manifest_path=manifest_path,
+        benchmark_receipt_path=receipt_path,
+        signal_path=signal_path,
+        signal_sha256=_file_hash(signal_path),
+        training_artifact_id="training",
+        training_artifact_hash="1" * 64,
+        validation_artifact_id="validation",
+        validation_artifact_hash="2" * 64,
+        allowed_root=tmp_path,
+    )
+    bundle = replace(
+        _bundle(),
+        dataset_content_hash=sources.input_manifest.dataset_content_hash,
+        training_evidence_hash="1" * 64,
+        validation_evidence_hash="2" * 64,
+    )
+    result = run_manual_daily_portfolio_v3(
+        daily=sources.daily,
+        eligibility=sources.eligibility,
+        benchmark=sources.benchmark,
+        signals=sources.signals,
+        corporate_actions=sources.corporate_actions,
+        calendar=sources.calendar,
+        bundle=bundle,
+        input_manifest=sources.input_manifest,
+        start=sources.calendar.days[0],
+        end=sources.calendar.days[-1],
+        initial_capital=100_000,
+    )
+
+    replay = result.replay(sources)
+    assert replay["checks"]["corporate_action_economics_source"] is True
+    assert replay["checks"]["share_lock_source"] is True
+    assert replay["checks"]["cohort_terminal_source"] is True
+    assert replay["checks"]["valuation_price_source"] is True
+    assert replay["passed"] is True
+    assert result.cohorts[0]["status"] == "closed"
+    assert result.positions[-1]["date"] < result.cohorts[0]["closed_date"]
+    assert [row["date"] for row in result.trades if row["side"] == "sell"] == [
+        sources.calendar.days[2].isoformat(),
+        sources.calendar.days[4].isoformat(),
+    ]
+
+    ex_day = sources.calendar.days[3].isoformat()
+    locked_position = next(row for row in result.positions if row["date"] == ex_day)
+    assert locked_position["quantity"] > 0
+    assert locked_position["sellable_quantity"] == 0
+
+    tampered_cash = deepcopy(result)
+    cash_event = next(
+        row for row in tampered_cash.corporate_actions if row["stage"] == "ex_cash"
+    )
+    cash_event["receivable_cash"] = str(Decimal(cash_event["receivable_cash"]) + Decimal("0.01"))
+    assert tampered_cash.replay(sources)["checks"]["corporate_action_economics_source"] is False
+
+    tampered_bonus = deepcopy(result)
+    bonus_event = next(
+        row for row in tampered_bonus.corporate_actions if row["stage"] == "ex_bonus"
+    )
+    bonus_event["bonus_quantity"] += 1
+    assert tampered_bonus.replay(sources)["checks"]["corporate_action_economics_source"] is False
+
+    tampered_identity = deepcopy(result)
+    identity_event = next(
+        row for row in tampered_identity.corporate_actions if row["stage"] == "ex_bonus"
+    )
+    identity_event["action_hash"] = "0" * 64
+    assert tampered_identity.replay(sources)["checks"]["corporate_action_economics_source"] is False
+
+    tampered_definition = deepcopy(result)
+    definition = next(
+        row for row in tampered_definition.corporate_actions if row["stage"] == "definition"
+    )
+    definition["stock_listing_date"] = "2099-01-01"
+    assert tampered_definition.replay(sources)["checks"]["corporate_action_source"] is False
+
+    tampered_lock = deepcopy(result)
+    locked_position = next(row for row in tampered_lock.positions if row["date"] == ex_day)
+    locked_position["sellable_quantity"] = locked_position["quantity"]
+    lock_replay = tampered_lock.replay(sources)
+    assert lock_replay["accounting_passed"] is True
+    assert lock_replay["checks"]["share_lock_source"] is False
+    assert lock_replay["source_and_execution_passed"] is False
+
+
+def test_source_action_allocations_use_account_total_and_stable_tie_breaking():
+    entitlements = {"cohort-b": 5, "cohort-a": 5}
+    assert _allocate_source_cash(
+        entitlements, Decimal("0.001"), Decimal(0),
+    ) == {"cohort-b": Decimal("0.00"), "cohort-a": Decimal("0.01")}
+    assert _allocate_source_bonus(
+        entitlements, Decimal("0.1"),
+    ) == {"cohort-b": 0, "cohort-a": 1}

@@ -830,3 +830,12 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - v3强制bundle绑定输入manifest中的dataset及训练/验证artifact hash。源文件被篡改、可变内存与磁盘不一致、资格/价格/容量/信号/基准错误都会阻断总体replay。
 - 受控无缺陷合成案例已实现三门通过并生成`eligible_for_artifact_registration=true`；磁盘信号字节篡改后源门和总体门失败。真实normalized-v2因50条未知调整仍固定不具备注册资格。
 - 公司行动当前验证完整definition身份，登记权益、现金/红股最大余数分配和上市锁仓仍需直接从源action正文独立重算后，才能开放pair artifact resolver。
+
+## 38. H2b公司行动源经济重放检查点
+
+- 源重放不调用生产账本的公司行动分配或lot可卖函数，按交易日和成交事件序号独立重建逐cohort股份批次。买入股份下一交易日解锁，红股按来源上市日解锁；每笔卖出前重新计算可卖数，并与逐日`quantity/sellable_quantity`逐值核对。
+- 登记日权益由登记日收盘交易后的独立股份状态生成；除权日从受控action正文读取每股现金、送股比例和资格验证状态。现金先算账户税后总分币，再按小数余数及cohort ID稳定分配；红股先算账户整数总量，再用相同稳定次序分配，禁止逐cohort独立取整改变账户总量。
+- 派息仅在合法来源日期后的首个交易日把对应cohort应收转为现金；上市事件只解除红股锁，不增加第二次股份。record、ex_cash、ex_bonus、pay和stock_listing事件按多重集合与结果逐字段核对，缺失、重复、金额或cohort变化都关闭源门。
+- 修复“登记后先卖出、除权后红股回到已关闭cohort”的残留持仓：公司行动重新形成lot时，cohort恢复为`exiting`并从当日开始按锁定与容量规则重试，直至清仓后再次关闭。源重放额外拒绝`closed/entry_failed`终态仍持有股份的结果。
+- 持仓估值价格新增对受控daily收盘价的直接核验，避免同时改写position close、market value和daily equity制造伪收益。公司行动定义的登记日/除权日在数据日历覆盖内时必须是交易日。
+- 无缺陷合成案例覆盖“买入→登记→现金/送股除权→原始股退出→红股上市→派息→红股退出”并通过全部重放；分别篡改应收现金、红股数量和上市前可卖数量均被对应源检查拒绝。下一步实现baseline/stress pair登记及数据库`portfolio_passed` resolver。

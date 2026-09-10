@@ -136,5 +136,5 @@ fill_rate   = numerator / denominator
 2. 已完成底层模块：提取cohort-aware原子成交和共享容量池；尚未接入正式v3组合循环。
 3. 已完成：历史资格进入原子买入门；公司行动cohort子账覆盖登记、应收、派息、红股分配和上市锁定，并已接入正式v3循环。
 4. 已完成内部证据层：v3保存signals/cohorts/intents/attempts/trades/actions/positions/daily/benchmark，并以固定Arrow schema的12文件、物理/schema/逻辑三层hash和不可覆盖原子目录写出；cohort终态合并到signals证据。
-5. 已完成基础源重放：受控输入重新从磁盘核验并加载，独立检查日历、benchmark、signals、原始执行价格/滑点、昨量容量、历史资格、T+1和action定义；下一步深化登记权益、现金/红股分配与锁仓源重算。
-6. 接入artifact登记和`portfolio_passed` resolver。
+5. 已完成源重放：受控输入重新从磁盘核验并加载，独立检查日历、benchmark、signals、执行与估值原价、滑点、昨量容量、历史资格和T+1；公司行动从源正文重建登记权益、税后现金分币、账户级红股最大余数分配、派息到账、上市日及逐cohort可卖股份。
+6. 下一步接入baseline/stress pair artifact登记和`portfolio_passed` resolver；resolver仍须从落盘文件重新运行本节全部检查，不能直接采信writer的展示字段。

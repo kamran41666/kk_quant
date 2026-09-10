@@ -260,6 +260,14 @@ def run_manual_daily_portfolio_v3(
 
     for index, day in enumerate(days):
         ledger.process_corporate_actions_at_open(day)
+        for cohort in cohorts:
+            has_lot = any(key[0] == cohort["id"] for key in ledger.lots)
+            if has_lot and cohort["status"] in {"closed", "entry_failed"}:
+                # Record-date entitlements survive an earlier exit.  Bonus
+                # shares created afterwards restore the cohort's exit duty.
+                cohort["status"] = "exiting"
+                cohort["exit_date"] = day.isoformat()
+                cohort.pop("closed_date", None)
         previous_day = days[index - 1] if index > 0 else None
 
         for cohort in cohorts:

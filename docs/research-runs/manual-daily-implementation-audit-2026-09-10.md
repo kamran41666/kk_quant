@@ -60,4 +60,12 @@
 
 H2尚未整体完成。下一步H2b需要新增日频组合产物登记与重放证明，再将holdout结果和真实前瞻daily checkpoint接入相同resolver；当前任何release最多只能由新解析器到达`research_passed`。
 
+## H2b 实施状态（2026-09-10）
+
+原“研究组合回测还不能用于晋级”边界中的引擎与证据目录建设已推进：正式v3组合循环现在使用cohort原子账本、前一日容量、历史资格、原价成交、公司行动子账、benchmark和固定12文件证据目录；源加载器可从受控manifest定位并重验daily/actions/securities/calendar/benchmark/signals正文。独立重放已经覆盖账务、执行/估值价格、容量、T+1、目标进入和公司行动经济过程，包括登记权益、税后现金分币、账户级红股分配、派息、上市锁及逐日可卖股份。
+
+后续复核又实际复现“cohort在登记日后先卖出关闭、除权日红股重新形成lot但不再退出”的P0残留持仓；v3现在会把该cohort恢复为`exiting`并在红股上市后继续退出。公司行动重放同时核对每个经济事件的source/action/economic hash、definition完整字段和终态cohort持仓，篡改身份字段或把残留持仓标为closed均不能通过。
+
+H2b仍未完成数据库登记门。当前writer的`eligible_for_artifact_registration`只说明单个结果目录满足工程重放条件，尚无服务端baseline/stress配对登记，也没有从落盘文件重新解析并驱动`portfolio_passed`的resolver。真实`normalized-v2`仍有50条未解释参考调整，不能登记或晋级；完成pair resolver后还需生成新结果版本，不能复用旧v2组合结果。
+
 本审查不修改冻结研究结果，也不评价远端提交中与日频闭环无关的新增内容。
