@@ -766,3 +766,11 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - 日频训练/验证实验由worker完成时登记受控目录内的`factor_values.parquet`、`ic_series.parquet`、`quantile_returns.parquet`和`report.json`。晋级时重新核验文件hash、数据库结果、候选表达式、数据版本、label、policy和非重叠切分。
 - 新release和`draft → research_passed`接口只接收artifact ID；旧的调用方布尔/指标晋级入口已关闭。缺少组合、holdout经济结果或pilot底层事实解析能力时固定追加blocked evaluation，不改变release状态。
 - H2a只完成研究阶段证据锚定；H2b继续实现baseline/stress组合manifest、公司行动与账务重放证据，再接holdout和daily checkpoint。当前没有release可越过`research_passed`。
+
+## 30. H2b组合证据第一检查点
+
+- 冻结[`日频组合证据合同v1`](research-runs/manual-daily-portfolio-evidence-v1.md)，明确输入manifest、baseline/stress配对身份、前一日容量、公司行动/cohort子账、全量intent、基准、指标、独立重放、输出文件和resolver门。
+- 修复旧`manual-daily-portfolio-v2`开盘使用当日最终volume的前视，统一使用前一完整交易日volume；baseline/stress参与率恢复与`ResearchLedger`一致的1%/0.5%。新增反例保证当日巨量不能覆盖前一日零量并制造开盘成交。
+- `ManualDailyFactorBundleV2`新增排除cost scenario的`strategy_core_hash`，baseline/stress共享core但保持不同bundle hash；公开JSON往返同时校验core hash。
+- `StrategyPromotionEvaluation`增加上一条通过评价引用及自身hash，为portfolio、holdout和paper阶段形成可验证的追加式晋级链；SQLite旧库使用加列迁移，旧空hash记录不能作为新resolver证据。
+- 当前旧v2结果仍为工程模拟，不能登记成可晋级组合artifact。下一步按合同提取cohort-aware原子成交、共享容量和公司行动子账。

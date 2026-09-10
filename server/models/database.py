@@ -100,6 +100,11 @@ def init_db():
         "manual_account": {
             "create_idempotency_key": "VARCHAR(160)",
         },
+        "strategy_promotion_evaluation": {
+            "previous_evaluation_id": "VARCHAR(36)",
+            "previous_evaluation_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+            "evaluation_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+        },
     }
     inspector = inspect(engine)
     with engine.begin() as connection:

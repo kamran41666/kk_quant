@@ -100,6 +100,8 @@ def test_worker_artifacts_are_rehashed_and_research_promotion_is_append_only(db_
         idempotency_key="promotion-research-001",
     )
     assert evaluation.decision == "passed"
+    assert len(evaluation.evaluation_hash) == 64
+    assert evaluation.previous_evaluation_hash == ""
     assert db_session.get(type(release), release.id).status == "research_passed"
     assert db_session.query(StrategyPromotionEvaluation).count() == 1
     assert advance_release_from_evidence(

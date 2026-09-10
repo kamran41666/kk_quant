@@ -393,6 +393,21 @@ def advance_release_from_evidence(
             _hash({"release_id": release.id, "release_hash": release.release_hash, "reason": reason}),
         )
     policy_hash = _hash(json.loads(release.promotion_policy or "{}"))
+    previous = db.scalars(select(StrategyPromotionEvaluation).where(
+        StrategyPromotionEvaluation.release_id == release.id,
+        StrategyPromotionEvaluation.decision == "passed",
+    ).order_by(StrategyPromotionEvaluation.created_at.desc(), StrategyPromotionEvaluation.id.desc())).first()
+    evaluation_payload = {
+        "release_id": release.id, "release_hash": release.release_hash,
+        "from_status": release.status, "target_status": target_status,
+        "policy_hash": policy_hash, "evidence_refs": dict(evidence_refs),
+        "resolved_evidence_hash": resolved.resolved_evidence_hash,
+        "checks": dict(resolved.checks),
+        "decision": "passed" if resolved.passed else "blocked",
+        "resolver_version": RESOLVER_VERSION, "resolver_code_hash": _resolver_code_hash(),
+        "previous_evaluation_hash": previous.evaluation_hash if previous else "",
+        "actor": str(actor).strip(), "request_hash": request_hash,
+    }
     evaluation = StrategyPromotionEvaluation(
         id=uuid4_str(), release_id=release.id, release_hash=release.release_hash,
         from_status=release.status, target_status=target_status, policy_hash=policy_hash,
@@ -400,9 +415,12 @@ def advance_release_from_evidence(
         resolved_evidence_hash=resolved.resolved_evidence_hash,
         checks_json=_canonical(dict(resolved.checks)),
         decision="passed" if resolved.passed else "blocked",
-        resolver_version=RESOLVER_VERSION, resolver_code_hash=_resolver_code_hash(),
+        resolver_version=RESOLVER_VERSION, resolver_code_hash=evaluation_payload["resolver_code_hash"],
         actor=str(actor).strip(), idempotency_key=str(idempotency_key).strip(),
         request_hash=request_hash,
+        previous_evaluation_id=previous.id if previous else None,
+        previous_evaluation_hash=previous.evaluation_hash if previous else "",
+        evaluation_hash=_hash(evaluation_payload),
     )
     db.add(evaluation)
     if resolved.passed:

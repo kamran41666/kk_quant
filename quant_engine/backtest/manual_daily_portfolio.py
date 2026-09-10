@@ -20,8 +20,8 @@ CENT = Decimal("0.01")
 SHARE = Decimal("1")
 LOT = Decimal("100")
 COSTS = {
-    "baseline": {"commission_rate": Decimal("0.00025"), "min_commission": Decimal("5"), "transfer_rate": Decimal("0.00002"), "slippage_rate": Decimal("0.001"), "participation_rate": Decimal("0.10")},
-    "stress": {"commission_rate": Decimal("0.0005"), "min_commission": Decimal("5"), "transfer_rate": Decimal("0.00002"), "slippage_rate": Decimal("0.003"), "participation_rate": Decimal("0.05")},
+    "baseline": {"commission_rate": Decimal("0.00025"), "min_commission": Decimal("5"), "transfer_rate": Decimal("0.00002"), "slippage_rate": Decimal("0.001"), "participation_rate": Decimal("0.01")},
+    "stress": {"commission_rate": Decimal("0.0005"), "min_commission": Decimal("5"), "transfer_rate": Decimal("0.00002"), "slippage_rate": Decimal("0.003"), "participation_rate": Decimal("0.005")},
 }
 
 
@@ -221,9 +221,10 @@ def run_manual_daily_portfolio(
                 if bool(bar.get("is_st", True)):
                     add_issue(day, code, "entry_st", cohort_id=cohort["id"])
                     continue
-                volume = bar.get("volume")
-                if volume is None or pd.isna(volume) or _d(volume) <= ZERO:
-                    add_issue(day, code, "entry_volume_unavailable", cohort_id=cohort["id"])
+                previous_bar = bars.get((days[index - 1], code)) if index > 0 else None
+                previous_volume = (previous_bar or {}).get("volume")
+                if previous_volume is None or pd.isna(previous_volume) or _d(previous_volume) <= ZERO:
+                    add_issue(day, code, "previous_session_volume_unavailable", cohort_id=cohort["id"])
                     continue
                 if bool(bar.get("limit_up", False)):
                     add_issue(day, code, "entry_limit_up", cohort_id=cohort["id"])
@@ -237,7 +238,11 @@ def run_manual_daily_portfolio(
                     continue
                 price = _money(_d(raw_open) * (Decimal("1") + costs["slippage_rate"]))
                 quantity = (budget_each / price).to_integral_value(rounding=ROUND_DOWN) // LOT * LOT
-                capacity = (_d(bars[(day, code)]["volume"]) * costs["participation_rate"]).to_integral_value(rounding=ROUND_DOWN) // LOT * LOT
+                previous_bar = bars.get((days[index - 1], code)) if index > 0 else None
+                previous_volume = (previous_bar or {}).get("volume")
+                if previous_volume is None or pd.isna(previous_volume) or _d(previous_volume) <= ZERO:
+                    continue
+                capacity = (_d(previous_volume) * costs["participation_rate"]).to_integral_value(rounding=ROUND_DOWN) // LOT * LOT
                 quantity = min(quantity, capacity)
                 while quantity >= LOT and cash < _money(quantity * price) + fees(_money(quantity * price), "buy", day)[3]:
                     quantity -= LOT

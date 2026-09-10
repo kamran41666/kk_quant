@@ -47,6 +47,8 @@ def test_bundle_identity_is_independent_and_contains_manual_protocol():
         "exit_retry_policy": "next_trading_close", "auto_submit": False,
     }
     assert len(bundle.bundle_hash) == 64
+    assert bundle.strategy_core_hash == _bundle("stress").strategy_core_hash
+    assert bundle.bundle_hash != _bundle("stress").bundle_hash
     assert ManualDailyFactorBundleV2.from_dict(identity).bundle_hash == bundle.bundle_hash
 
 

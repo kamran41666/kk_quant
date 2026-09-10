@@ -685,6 +685,9 @@ class StrategyPromotionEvaluation(Base):
     actor: Mapped[str] = mapped_column(String(80), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    previous_evaluation_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    previous_evaluation_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    evaluation_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="", unique=True)
     created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
 
 

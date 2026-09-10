@@ -88,17 +88,31 @@ class ManualDailyFactorBundleV2:
             "code_hash": self.code_hash,
         }
 
+    def core_identity(self) -> dict[str, Any]:
+        identity = self.identity()
+        portfolio_policy = dict(identity["portfolio_policy"])
+        portfolio_policy.pop("cost_scenario", None)
+        return {**identity, "portfolio_policy": portfolio_policy}
+
+    @property
+    def strategy_core_hash(self) -> str:
+        return _sha(self.core_identity())
+
     @property
     def bundle_hash(self) -> str:
         return _sha(self.identity())
 
     def as_dict(self) -> dict[str, Any]:
-        return {**self.identity(), "bundle_hash": self.bundle_hash}
+        return {
+            **self.identity(), "strategy_core_hash": self.strategy_core_hash,
+            "bundle_hash": self.bundle_hash,
+        }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ManualDailyFactorBundleV2":
         raw = dict(payload)
         expected_hash = raw.pop("bundle_hash", None)
+        expected_core_hash = raw.pop("strategy_core_hash", None)
         protocol_version = raw.pop("protocol_version", "manual-daily-factor-bundle-v2")
         if protocol_version != "manual-daily-factor-bundle-v2":
             raise ValueError("unsupported manual daily bundle protocol")
@@ -111,6 +125,8 @@ class ManualDailyFactorBundleV2:
         bundle = cls(**raw)
         if expected_hash is not None and expected_hash != bundle.bundle_hash:
             raise ValueError("manual daily bundle hash mismatch")
+        if expected_core_hash is not None and expected_core_hash != bundle.strategy_core_hash:
+            raise ValueError("manual daily bundle strategy core hash mismatch")
         return bundle
 
 
