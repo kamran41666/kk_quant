@@ -17,6 +17,17 @@
 
 ## 记录
 
+### 2026-09-10 15:07 CST — H2b证据写出、指标与内部重放
+
+- Git：`phase4-factor-develop`；提交`28d99ec`已创建，本条Progress随后提交并推送。
+- 证据：新增`manual_portfolio_evidence.py`，v3可写出8个固定列Parquet和audit/replay/summary/manifest四个JSON；同父临时目录完成后原子rename，目标存在拒绝覆盖。manifest保存其余11文件size/SHA-256、策略core、scenario bundle、输入身份、指标及replay hash。
+- 指标：从明细重算策略/基准总收益与超额、252日Sharpe、非负最大回撤、双边年化换手、实际费用和按稳定`logical_intent_id`去重的金额加权成交率。退出多日重试不再重复增加分母；无样本Sharpe/成交率返回不可计算。
+- 重放：独立检查intent/attempt/fill关联、共享容量、gross与费用、现金、应收、cohort股份、持仓`close×quantity`、每日市值/权益和收益。修复锁定股份裁剪后仍按请求量收费的问题，并覆盖协同抬高position/daily市值的伪收益反例。
+- 门禁：v3强制公司行动source hash与输入manifest一致，资格只接受布尔值，benchmark日期唯一且完整；result hash增加协议、日期、初始资本和成本policy。源行情/昨量/资格/action比例尚未从受控正文重放，因此`source_and_execution_passed=false`、总体replay和artifact注册资格固定false。
+- 验证：当前macOS后端全量`780 passed, 2 warnings`；v3/账本专项`17 passed`；compileall、关键错误级Ruff、`git diff --check`及变更Markdown链接检查通过。
+- 边界：下一步补Arrow精确schema/schema hash、受控输入文件路径/hash重验、完整目标记录和源执行重放；完成后才能登记baseline/stress artifact并实现`portfolio_passed` resolver。
+- 入口：[`证据写出记录`](docs/manual-daily-trading-implementation-plan.md#34-h2b证据写出与内部独立重放检查点)、[`组合证据合同`](docs/research-runs/manual-daily-portfolio-evidence-v1.md)、[`证据模块`](quant_engine/backtest/manual_portfolio_evidence.py)。
+
 ### 2026-09-10 14:50 CST — H2b正式v3组合循环接通
 
 - Git：`phase4-factor-develop`；提交`b9c9383`已创建，本条Progress随后提交并推送。
