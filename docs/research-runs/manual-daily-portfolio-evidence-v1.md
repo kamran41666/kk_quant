@@ -2,7 +2,7 @@
 
 > 类型：active-research-contract
 > 适用阶段：H2b / `research_passed → portfolio_passed`
-> 当前实现状态：合同已冻结；v3循环、精确Arrow 12文件写出、目录验证和内部会计重放已完成；源输入重放和artifact resolver尚未完成
+> 当前实现状态：合同已冻结；v3循环、精确Arrow证据、目录验证、内部账务与基础源执行重放已完成；公司行动经济重算深化和artifact resolver尚未完成
 
 ## 1. 目标
 
@@ -136,5 +136,5 @@ fill_rate   = numerator / denominator
 2. 已完成底层模块：提取cohort-aware原子成交和共享容量池；尚未接入正式v3组合循环。
 3. 已完成：历史资格进入原子买入门；公司行动cohort子账覆盖登记、应收、派息、红股分配和上市锁定，并已接入正式v3循环。
 4. 已完成内部证据层：v3保存signals/cohorts/intents/attempts/trades/actions/positions/daily/benchmark，并以固定Arrow schema的12文件、物理/schema/逻辑三层hash和不可覆盖原子目录写出；cohort终态合并到signals证据。
-5. 进行中：受控输入加载器已验证normalized dataset、日线、公司行动、证券、日历、信号和benchmark文件及hash；内部重放已覆盖账务，下一步将两者接通以独立验证行情、昨量、资格、公司行动和benchmark执行语义。
+5. 已完成基础源重放：受控输入重新从磁盘核验并加载，独立检查日历、benchmark、signals、原始执行价格/滑点、昨量容量、历史资格、T+1和action定义；下一步深化登记权益、现金/红股分配与锁仓源重算。
 6. 接入artifact登记和`portfolio_passed` resolver。

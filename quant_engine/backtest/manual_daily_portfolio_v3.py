@@ -139,15 +139,15 @@ class ManualDailyPortfolioV3Result:
 
         return calculate_portfolio_metrics(self)
 
-    def replay(self) -> dict[str, Any]:
+    def replay(self, sources: Any | None = None) -> dict[str, Any]:
         from quant_engine.backtest.manual_portfolio_evidence import replay_portfolio_result
 
-        return replay_portfolio_result(self)
+        return replay_portfolio_result(self, sources=sources)
 
-    def write_evidence(self, output_dir: str | Path) -> Path:
+    def write_evidence(self, output_dir: str | Path, *, sources: Any | None = None) -> Path:
         from quant_engine.backtest.manual_portfolio_evidence import write_portfolio_evidence
 
-        return write_portfolio_evidence(self, output_dir)
+        return write_portfolio_evidence(self, output_dir, sources=sources)
 
 
 def _bar_map(frame: pd.DataFrame) -> dict[tuple[date, str], dict[str, Any]]:
@@ -220,6 +220,10 @@ def run_manual_daily_portfolio_v3(
         raise ValueError("manual_v3_start_after_end")
     if input_manifest.dataset_content_hash != bundle.dataset_content_hash:
         raise ValueError("manual_v3_bundle_dataset_hash_mismatch")
+    if input_manifest.training_artifact_hash and input_manifest.training_artifact_hash != bundle.training_evidence_hash:
+        raise ValueError("manual_v3_training_artifact_hash_mismatch")
+    if input_manifest.validation_artifact_hash and input_manifest.validation_artifact_hash != bundle.validation_evidence_hash:
+        raise ValueError("manual_v3_validation_artifact_hash_mismatch")
     coverage = calendar.ensure_coverage(start, end)
     if not coverage.get("complete") or coverage.get("content_hash") != input_manifest.calendar_content_hash:
         raise ValueError("manual_v3_calendar_evidence_mismatch")

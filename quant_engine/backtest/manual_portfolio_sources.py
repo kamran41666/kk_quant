@@ -68,6 +68,7 @@ class VerifiedPortfolioSources:
     calendar: FrozenTradingCalendar
     input_manifest: ManualPortfolioInputManifest
     source_root: Path
+    signal_value_column: str = "factor"
 
     def verify_files(self) -> bool:
         try:
@@ -80,6 +81,38 @@ class VerifiedPortfolioSources:
         except (KeyError, OSError, TypeError, ValueError):
             return False
         return self.input_manifest.source_files_complete
+
+    def source_path(self, role: str) -> Path:
+        item = next((value for value in self.input_manifest.source_files if value.get("role") == role), None)
+        if item is None:
+            raise KeyError(f"verified_source_role_missing:{role}")
+        path = (self.source_root / str(item["path"])).resolve(strict=True)
+        if self.source_root not in path.parents or path.is_symlink():
+            raise ValueError(f"verified_source_path_invalid:{role}")
+        return path
+
+    def reload(self) -> dict[str, Any]:
+        if not self.verify_files():
+            raise ValueError("verified_source_files_changed")
+        daily = pd.read_parquet(self.source_path("daily"))
+        securities = pd.read_parquet(self.source_path("securities"))
+        actions_frame = pd.read_parquet(self.source_path("actions"))
+        signal_frame = pd.read_parquet(self.source_path("signals"))
+        signals: dict[date, dict[str, Any]] = {}
+        for row in signal_frame[["date", "code", self.signal_value_column]].to_dict("records"):
+            if pd.isna(row[self.signal_value_column]):
+                continue
+            signals.setdefault(pd.Timestamp(row["date"]).date(), {})[str(row["code"]).upper()] = row[self.signal_value_column]
+        return {
+            "daily": daily,
+            "eligibility": _eligibility(daily, securities),
+            "actions": tuple(load_research_corporate_actions(
+                actions_frame, source_hash=self.input_manifest.corporate_action_content_hash,
+            )),
+            "calendar": tuple(pd.Timestamp(value).date() for value in pd.read_parquet(self.source_path("calendar"))["date"].tolist()),
+            "benchmark": pd.read_parquet(self.source_path("benchmark"))[["date", "close"]],
+            "signals": signals,
+        }
 
 
 def _source_entry(role: str, path: Path, root: Path) -> dict[str, Any]:
@@ -206,7 +239,7 @@ def load_verified_portfolio_sources(
         signals=signals,
         corporate_actions=tuple(load_research_corporate_actions(actions_frame, source_hash=files["actions"]["sha256"])),
         calendar=FrozenTradingCalendar(days, calendar_hash), input_manifest=manifest,
-        source_root=root,
+        source_root=root, signal_value_column=signal_value_column,
     )
     if not result.verify_files():
         raise ValueError("verified_source_files_changed_during_load")

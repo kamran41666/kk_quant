@@ -821,3 +821,12 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - `ManualPortfolioInputManifest`增加训练/验证artifact hash及六类相对source file引用，`source_files_complete`要求daily/actions/securities/calendar/benchmark/signals恰好齐全；`VerifiedPortfolioSources.verify_files()`可在运行后再次发现任何源文件变化。
 - 本机实际验证`normalized-v2`：dataset/content及四文件hash匹配，1,625,850条日线和资格、4,645条公司行动、244个信号日、沪深300基准均成功加载；50条未解释参考调整进入`unresolved_adjustment_count`，因此该数据版本继续不能晋级。
 - 当前已解决“只有hash、无法定位正文”的缺口；源执行replay尚未逐笔对照价格、前日volume、资格、action比例及benchmark，整体证据仍保持关闭。
+
+## 37. H2b受控源执行重放检查点
+
+- `VerifiedPortfolioSources.reload()`在每次审计前重新校验六类source文件并从磁盘加载，replay不使用调用方可能已变异的内存DataFrame。input manifest hash必须与结果逐值一致。
+- 源重放独立核对交易日序列、benchmark价格/nav/日收益、全部信号分数、成交open/close原价与冻结滑点、前一完整交易日volume容量、买入历史资格、T+1和公司行动definition/action/source hash。
+- 目标覆盖从受控信号、cohort预算、入场日原始open和TopN重新计算应有整手进入intent；缺失目标使`target_completion_verifiable=false`。内部账务、源执行、目标覆盖和quality errors四层共同决定总体passed。
+- v3强制bundle绑定输入manifest中的dataset及训练/验证artifact hash。源文件被篡改、可变内存与磁盘不一致、资格/价格/容量/信号/基准错误都会阻断总体replay。
+- 受控无缺陷合成案例已实现三门通过并生成`eligible_for_artifact_registration=true`；磁盘信号字节篡改后源门和总体门失败。真实normalized-v2因50条未知调整仍固定不具备注册资格。
+- 公司行动当前验证完整definition身份，登记权益、现金/红股最大余数分配和上市锁仓仍需直接从源action正文独立重算后，才能开放pair artifact resolver。

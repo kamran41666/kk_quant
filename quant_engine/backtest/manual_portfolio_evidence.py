@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 import hashlib
 import json
 import math
@@ -16,6 +16,7 @@ from typing import Any, Mapping, Sequence
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pandas as pd
 
 from quant_engine.backtest.manual_research_ledger import RESEARCH_EXECUTION_COSTS
 from quant_engine.trading.effective_rules import EffectiveDatedTradingRuleRegistry
@@ -113,7 +114,7 @@ def calculate_portfolio_metrics(result: Any) -> dict[str, str | int]:
     }
 
 
-def replay_portfolio_result(result: Any) -> dict[str, Any]:
+def replay_portfolio_result(result: Any, sources: Any | None = None) -> dict[str, Any]:
     errors: list[dict[str, Any]] = []
 
     def fail(check: str, **details: Any) -> None:
@@ -243,6 +244,142 @@ def replay_portfolio_result(result: Any) -> dict[str, Any]:
             fail("daily_return_replay", date=day)
         prior_equity = equity
 
+    source_checks = {
+        "source_files": False, "calendar_source": False, "benchmark_source": False,
+        "signal_source": False, "execution_price_source": False,
+        "capacity_source": False, "eligibility_source": False,
+        "corporate_action_source": False, "t_plus_one_source": False,
+    }
+    target_completion_verifiable = False
+    if sources is not None:
+        try:
+            fresh = sources.reload()
+            source_checks["source_files"] = sources.input_manifest.manifest_hash == result.input_manifest.manifest_hash
+            daily_dates = [date.fromisoformat(row["date"]) for row in result.daily]
+            expected_dates = [day for day in fresh["calendar"] if result.start_date <= day <= result.end_date]
+            source_checks["calendar_source"] = daily_dates == expected_dates
+            daily_source = {
+                (pd.Timestamp(row["date"]).date(), str(row["code"]).upper()): row
+                for row in fresh["daily"].to_dict("records")
+            }
+            eligibility_source = {
+                (pd.Timestamp(row["date"]).date(), str(row["code"]).upper()): bool(row["is_eligible"])
+                for row in fresh["eligibility"].to_dict("records")
+            }
+            benchmark_values = {
+                pd.Timestamp(row["date"]).date(): _decimal(row["close"], "benchmark_close")
+                for row in fresh["benchmark"].to_dict("records")
+            }
+            benchmark_ok = bool(expected_dates)
+            if benchmark_ok:
+                origin = benchmark_values.get(expected_dates[0])
+                prior = origin
+                for recorded, day in zip(result.benchmark, expected_dates):
+                    close = benchmark_values.get(day)
+                    if close is None or origin is None or prior is None:
+                        benchmark_ok = False
+                        break
+                    if (
+                        recorded["date"] != day.isoformat()
+                        or _decimal(recorded["close"], "benchmark_close") != close
+                        or _decimal(recorded["nav"], "benchmark_nav") != close / origin
+                        or _decimal(recorded["daily_return"], "benchmark_return") != close / prior - Decimal("1")
+                    ):
+                        benchmark_ok = False
+                        break
+                    prior = close
+            source_checks["benchmark_source"] = benchmark_ok and len(result.benchmark) == len(expected_dates)
+
+            expected_signals = {
+                (day.isoformat(), code): _decimal(score, "source_signal")
+                for day, values in fresh["signals"].items()
+                if result.start_date <= day <= result.end_date
+                for code, score in values.items()
+            }
+            recorded_signals = {
+                (row["signal_date"], row["code"]): _decimal(row["score"], "recorded_signal")
+                for row in result.signals
+            }
+            source_checks["signal_source"] = expected_signals == recorded_signals
+
+            day_index = {day: index for index, day in enumerate(fresh["calendar"])}
+            costs = RESEARCH_EXECUTION_COSTS[result.bundle.cost_scenario]
+            price_ok = capacity_ok = eligibility_ok = t1_ok = True
+            buy_dates: dict[tuple[str, str], list[date]] = defaultdict(list)
+            attempt_by_intent = {row["intent_id"]: row for row in result.attempts}
+            for trade in sorted(result.trades, key=lambda row: int(row["event_sequence"])):
+                day = date.fromisoformat(trade["date"])
+                bar = daily_source.get((day, trade["code"]))
+                if bar is None or bool(bar.get("is_suspended", True)):
+                    price_ok = False
+                    continue
+                field = "open" if trade["phase"] == "open" else "close"
+                direction = Decimal("1") if trade["side"] == "buy" else Decimal("-1")
+                expected_price = (
+                    _decimal(bar[field], field) * (Decimal("1") + direction * costs["slippage_rate"])
+                ).quantize(CENT, rounding=ROUND_HALF_UP)
+                if expected_price != _decimal(trade["price"], "trade_price"):
+                    price_ok = False
+                if trade["side"] == "buy":
+                    if not eligibility_source.get((day, trade["code"]), False):
+                        eligibility_ok = False
+                    buy_dates[(trade["cohort_id"], trade["code"])].append(day)
+                elif not any(buy_day < day for buy_day in buy_dates[(trade["cohort_id"], trade["code"])]):
+                    # Bonus shares are handled by the corporate-action check;
+                    # a normal exit still needs an earlier acquisition.
+                    t1_ok = False
+                attempt = attempt_by_intent.get(trade["intent_id"])
+                previous_index = day_index.get(day, 0) - 1
+                previous_day = fresh["calendar"][previous_index] if previous_index >= 0 else None
+                previous_bar = daily_source.get((previous_day, trade["code"])) if previous_day else None
+                expected_capacity = int(
+                    (_decimal((previous_bar or {}).get("volume", 0), "previous_volume") * costs["participation_rate"])
+                    .to_integral_value(rounding=ROUND_DOWN)
+                )
+                if attempt is None or int(attempt["capacity_total"]) != expected_capacity:
+                    capacity_ok = False
+            source_checks["execution_price_source"] = price_ok
+            source_checks["capacity_source"] = capacity_ok
+            source_checks["eligibility_source"] = eligibility_ok
+            source_checks["t_plus_one_source"] = t1_ok
+
+            source_actions = {item.action_id: item for item in fresh["actions"]}
+            definitions = {row["action_id"]: row for row in result.corporate_actions if row["stage"] == "definition"}
+            action_ok = set(source_actions) == set(definitions)
+            for action_id, action in source_actions.items():
+                row = definitions.get(action_id, {})
+                if (
+                    row.get("action_hash") != action.action_hash
+                    or row.get("economic_key") != action.economic_key
+                    or row.get("source_hash") != action.source_hash
+                ):
+                    action_ok = False
+            source_checks["corporate_action_source"] = action_ok
+
+            logical_rows: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+            for row in result.intents:
+                logical_rows[str(row.get("logical_intent_id") or row["intent_id"])].append(row)
+            target_ok = True
+            for cohort in result.cohorts:
+                signal_day = date.fromisoformat(cohort["signal_date"])
+                ranked = sorted(fresh["signals"].get(signal_day, {}).items(), key=lambda item: (-_decimal(item[1], "signal"), item[0]))[:result.bundle.top_n]
+                if not ranked:
+                    continue
+                budget = _decimal(cohort["budget"], "cohort_budget") / len(ranked)
+                entry_day = date.fromisoformat(cohort["entry_date"])
+                for code, _score in ranked:
+                    bar = daily_source.get((entry_day, code), {})
+                    raw = bar.get("open")
+                    if raw is None or _decimal(raw, "open") <= 0:
+                        target_ok = False
+                        continue
+                    requested = int((budget / _decimal(raw, "open")).to_integral_value(rounding=ROUND_DOWN)) // 100 * 100
+                    if requested > 0 and f"{cohort['id']}:entry:{code}" not in logical_rows:
+                        target_ok = False
+            target_completion_verifiable = target_ok
+        except Exception as exc:
+            fail("source_replay_exception", error=f"{type(exc).__name__}:{exc}")
+
     checks = {
         "intent_trade_binding": not any(item["check"].startswith("intent_") or item["check"].startswith("trade_") for item in errors),
         "capacity_replay": not any(item["check"].startswith("capacity_") for item in errors),
@@ -253,19 +390,33 @@ def replay_portfolio_result(result: Any) -> dict[str, Any]:
         "valuation_replay": not any(item["check"] in {"position_market_value_replay", "daily_market_value_replay"} for item in errors),
         "corporate_action_identity": not any(item["check"] == "corporate_action_source_hash" for item in errors),
         "equity_replay": not any(item["check"] in {"equity_replay", "daily_return_replay"} for item in errors),
+        **source_checks,
     }
-    accounting_passed = all(checks.values()) and not errors
+    accounting_keys = {
+        "intent_trade_binding", "capacity_replay", "fee_replay", "cash_replay",
+        "receivable_replay", "share_replay", "valuation_replay",
+        "corporate_action_identity", "equity_replay",
+    }
+    accounting_passed = all(checks[key] for key in accounting_keys) and not any(
+        item["check"] not in {"source_replay_exception"} for item in errors
+    )
+    source_and_execution_passed = sources is not None and all(source_checks.values()) and not any(
+        item["check"] == "source_replay_exception" for item in errors
+    )
+    overall_passed = (
+        accounting_passed and source_and_execution_passed
+        and target_completion_verifiable and not result.quality_errors
+    )
     payload = {
         "protocol_version": "manual-portfolio-replay-v1",
         "result_hash": result.result_hash,
         "checks": checks,
         "accounting_passed": accounting_passed,
-        "source_and_execution_passed": False,
-        "target_completion_verifiable": False,
-        "passed": False,
-        "limitations": [
-            "Frozen input files are not yet available to recheck prices, previous volume, eligibility and action definitions.",
-            "Logical intent retry grouping is not yet complete.",
+        "source_and_execution_passed": source_and_execution_passed,
+        "target_completion_verifiable": target_completion_verifiable,
+        "passed": overall_passed,
+        "limitations": [] if sources is not None else [
+            "VerifiedPortfolioSources is required for source and execution replay.",
         ],
         "first_difference": errors[0] if errors else None,
         "differences": errors,
@@ -414,7 +565,7 @@ def _json_entry(path: Path, role: str) -> dict[str, Any]:
     }
 
 
-def write_portfolio_evidence(result: Any, output_dir: str | Path) -> Path:
+def write_portfolio_evidence(result: Any, output_dir: str | Path, *, sources: Any | None = None) -> Path:
     target = Path(output_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
     lock_path = target.parent / f".{target.name}.lock"
@@ -442,7 +593,7 @@ def write_portfolio_evidence(result: Any, output_dir: str | Path) -> Path:
             table = _table(rows_by_file[name], schema)
             pq.write_table(table, temporary / name, compression="zstd")
             tables[name] = table
-        replay = replay_portfolio_result(result)
+        replay = replay_portfolio_result(result, sources=sources)
         metrics = calculate_portfolio_metrics(result)
         summary = {
             "protocol_version": "manual-daily-portfolio-summary-v3",
