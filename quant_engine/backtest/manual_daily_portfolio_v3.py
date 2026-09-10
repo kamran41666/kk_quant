@@ -56,6 +56,9 @@ class ManualPortfolioInputManifest:
     benchmark_content_hash: str
     training_artifact_id: str
     validation_artifact_id: str
+    training_artifact_hash: str = ""
+    validation_artifact_hash: str = ""
+    source_files: tuple[Mapping[str, Any], ...] = ()
     unresolved_adjustment_count: int = 0
     protocol_version: str = "manual-daily-portfolio-input-v1"
 
@@ -71,12 +74,21 @@ class ManualPortfolioInputManifest:
             value = getattr(self, name)
             if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
                 raise ValueError(f"{name}_must_be_sha256")
+        for name in ("training_artifact_hash", "validation_artifact_hash"):
+            value = getattr(self, name)
+            if value and (len(value) != 64 or any(char not in "0123456789abcdef" for char in value)):
+                raise ValueError(f"{name}_must_be_sha256")
         if isinstance(self.unresolved_adjustment_count, bool) or self.unresolved_adjustment_count < 0:
             raise ValueError("unresolved_adjustment_count_must_be_nonnegative")
 
     @property
     def manifest_hash(self) -> str:
         return _hash(self.__dict__)
+
+    @property
+    def source_files_complete(self) -> bool:
+        roles = {str(item.get("role")) for item in self.source_files}
+        return roles == {"daily", "actions", "securities", "calendar", "benchmark", "signals"}
 
 
 @dataclass

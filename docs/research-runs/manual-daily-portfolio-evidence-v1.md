@@ -136,5 +136,5 @@ fill_rate   = numerator / denominator
 2. 已完成底层模块：提取cohort-aware原子成交和共享容量池；尚未接入正式v3组合循环。
 3. 已完成：历史资格进入原子买入门；公司行动cohort子账覆盖登记、应收、派息、红股分配和上市锁定，并已接入正式v3循环。
 4. 已完成内部证据层：v3保存signals/cohorts/intents/attempts/trades/actions/positions/daily/benchmark，并以固定Arrow schema的12文件、物理/schema/逻辑三层hash和不可覆盖原子目录写出；cohort终态合并到signals证据。
-5. 进行中：内部重放已覆盖intent、容量、费用、现金、应收、cohort股数、持仓市值和权益；尚需从受控输入文件独立验证行情、昨量、资格、公司行动和benchmark来源。
+5. 进行中：受控输入加载器已验证normalized dataset、日线、公司行动、证券、日历、信号和benchmark文件及hash；内部重放已覆盖账务，下一步将两者接通以独立验证行情、昨量、资格、公司行动和benchmark执行语义。
 6. 接入artifact登记和`portfolio_passed` resolver。

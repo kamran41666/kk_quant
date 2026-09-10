@@ -813,3 +813,11 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - writer在目标同父目录创建独占锁与随机staging，写完后逐文件fsync、目录fsync、调用独立目录验证器，再原子rename并fsync父目录；目标存在、并发锁存在或任一步失败都不会覆盖已有证据。
 - 新`verify_portfolio_evidence_directory`要求目录恰好包含合同12文件，拒绝额外/缺失文件、符号链接、绝对/越界路径、重复entry、物理hash、schema、row count、逻辑hash或manifest hash不一致。
 - 本检查点只证明输出目录内部不可变和可验证；受控输入正文及执行规则尚未进入目录，`source_and_execution_passed`继续为false，不能注册晋级artifact。
+
+## 36. H2b受控源输入检查点
+
+- 新增`VerifiedPortfolioSources`、`FrozenTradingCalendar`和`load_verified_portfolio_sources`。加载器从normalized manifest解析daily/actions/securities/calendar，按构建器原始identity重算dataset content hash，并逐文件核验受控根目录、非符号链接、size和SHA-256。
+- 基准由独立receipt定位并核对Parquet SHA；因子信号必须提供受控Parquet及实际SHA，日期/代码唯一。历史资格由daily与securities按上市满180日、未退市、非ST、非停牌的冻结policy确定性生成。
+- `ManualPortfolioInputManifest`增加训练/验证artifact hash及六类相对source file引用，`source_files_complete`要求daily/actions/securities/calendar/benchmark/signals恰好齐全；`VerifiedPortfolioSources.verify_files()`可在运行后再次发现任何源文件变化。
+- 本机实际验证`normalized-v2`：dataset/content及四文件hash匹配，1,625,850条日线和资格、4,645条公司行动、244个信号日、沪深300基准均成功加载；50条未解释参考调整进入`unresolved_adjustment_count`，因此该数据版本继续不能晋级。
+- 当前已解决“只有hash、无法定位正文”的缺口；源执行replay尚未逐笔对照价格、前日volume、资格、action比例及benchmark，整体证据仍保持关闭。
