@@ -1,8 +1,10 @@
 """H2b integrated v3 loop tests for cohort execution and evidence rows."""
 from datetime import date, timedelta
 from decimal import Decimal
+import shutil
 
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 
 from quant_engine.backtest.manual_daily_portfolio_v3 import (
@@ -10,6 +12,7 @@ from quant_engine.backtest.manual_daily_portfolio_v3 import (
     run_manual_daily_portfolio_v3,
 )
 from quant_engine.backtest.manual_research_ledger import ResearchCorporateAction
+from quant_engine.backtest.manual_portfolio_evidence import verify_portfolio_evidence_directory
 from tests.test_manual_daily_factor_research import _bundle
 
 
@@ -143,8 +146,22 @@ def test_v3_metrics_replay_and_atomic_twelve_file_output(tmp_path):
     assert len(manifest["files"]) == 11
     assert len(manifest["manifest_hash"]) == 64
     assert manifest["eligible_for_artifact_registration"] is False
+    verified = verify_portfolio_evidence_directory(output)
+    assert verified["verified"] is True and verified["file_count"] == 12
+    assert str(pq.read_schema(output / "corporate_actions.parquet").field("cash_per_share").type) == "decimal128(24, 8)"
+    assert pq.read_table(output / "corporate_actions.parquet").num_rows == 0
     with pytest.raises(FileExistsError, match="output_exists"):
         result.write_evidence(output)
+    tampered = tmp_path / "tampered"
+    shutil.copytree(output, tampered)
+    (tampered / "summary.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="file_hash_mismatch:summary.json"):
+        verify_portfolio_evidence_directory(tampered)
+    extra = tmp_path / "extra"
+    shutil.copytree(output, extra)
+    (extra / "unexpected.txt").write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError, match="file_set_mismatch"):
+        verify_portfolio_evidence_directory(extra)
     result.daily[-1]["cash"] = "0"
     replay = result.replay()
     assert replay["passed"] is False

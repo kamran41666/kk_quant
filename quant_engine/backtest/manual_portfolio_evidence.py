@@ -14,7 +14,8 @@ import statistics
 import tempfile
 from typing import Any, Mapping, Sequence
 
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from quant_engine.backtest.manual_research_ledger import RESEARCH_EXECUTION_COSTS
 from quant_engine.trading.effective_rules import EffectiveDatedTradingRuleRegistry
@@ -273,29 +274,159 @@ def replay_portfolio_result(result: Any) -> dict[str, Any]:
     return {**payload, "replay_hash": _hash(payload)}
 
 
-_SCHEMAS = {
-    "signals.parquet": ["signal_date", "code", "score", "rank_status", "cohort_id", "entry_date", "planned_exit_date", "cohort_budget", "cohort_terminal_status", "closed_date"],
-    "order_intents.parquet": ["intent_id", "logical_intent_id", "date", "phase", "cohort_id", "code", "side", "requested_quantity", "reference_price", "requested_notional", "reason", "status", "filled_quantity"],
-    "order_attempts.parquet": ["attempt_id", "intent_id", "logical_intent_id", "attempt_sequence", "date", "phase", "cohort_id", "code", "side", "requested_quantity", "capacity_total", "capacity_used_before", "capacity_available", "capacity_used_after", "filled_quantity", "status", "reason"],
-    "trades.parquet": ["trade_id", "intent_id", "attempt_id", "event_sequence", "date", "phase", "cohort_id", "code", "side", "quantity", "price", "gross", "commission", "transfer_fee", "stamp_duty", "total_fee"],
-    "corporate_actions.parquet": ["action_id", "action_hash", "economic_key", "date", "stage", "code", "cohort_id", "record_date", "ex_date", "pay_date", "stock_listing_date", "cash_per_share", "bonus_ratio", "allocation_verified", "eligible_quantity", "gross_cash", "receivable_cash", "cash", "bonus_quantity", "source_hash"],
-    "positions.parquet": ["date", "cohort_id", "code", "quantity", "sellable_quantity", "close", "market_value"],
-    "daily_portfolio.parquet": ["date", "cash", "receivable_cash", "market_value", "equity", "daily_return", "position_count"],
-    "benchmark.parquet": ["date", "close", "nav", "daily_return"],
+MONEY = pa.decimal128(24, 2)
+PRICE = pa.decimal128(24, 8)
+RATIO = pa.decimal128(38, 18)
+TEXT = pa.string()
+DAY = pa.date32()
+INT = pa.int64()
+BOOL = pa.bool_()
+
+
+def _schema(fields: Sequence[tuple[str, pa.DataType, bool]]) -> pa.Schema:
+    return pa.schema([pa.field(name, kind, nullable=nullable) for name, kind, nullable in fields])
+
+
+_ARROW_SCHEMAS = {
+    "signals.parquet": _schema([
+        ("signal_date", DAY, False), ("code", TEXT, False), ("score", RATIO, False),
+        ("rank_status", TEXT, False), ("cohort_id", TEXT, True), ("entry_date", DAY, True),
+        ("planned_exit_date", DAY, True), ("cohort_budget", MONEY, True),
+        ("cohort_terminal_status", TEXT, True), ("closed_date", DAY, True),
+    ]),
+    "order_intents.parquet": _schema([
+        ("intent_id", TEXT, False), ("logical_intent_id", TEXT, False), ("date", DAY, False),
+        ("phase", TEXT, False), ("cohort_id", TEXT, False), ("code", TEXT, False),
+        ("side", TEXT, False), ("requested_quantity", INT, False), ("reference_price", PRICE, False),
+        ("requested_notional", MONEY, False), ("reason", TEXT, False), ("status", TEXT, False),
+        ("filled_quantity", INT, False),
+    ]),
+    "order_attempts.parquet": _schema([
+        ("attempt_id", TEXT, False), ("intent_id", TEXT, False), ("logical_intent_id", TEXT, False),
+        ("attempt_sequence", INT, False), ("date", DAY, False), ("phase", TEXT, False),
+        ("cohort_id", TEXT, False), ("code", TEXT, False), ("side", TEXT, False),
+        ("requested_quantity", INT, False), ("capacity_total", INT, False),
+        ("capacity_used_before", INT, False), ("capacity_available", INT, False),
+        ("capacity_used_after", INT, True), ("filled_quantity", INT, False),
+        ("status", TEXT, False), ("reason", TEXT, True),
+    ]),
+    "trades.parquet": _schema([
+        ("trade_id", TEXT, False), ("intent_id", TEXT, False), ("attempt_id", TEXT, False),
+        ("event_sequence", INT, False), ("date", DAY, False), ("phase", TEXT, False),
+        ("cohort_id", TEXT, False), ("code", TEXT, False), ("side", TEXT, False),
+        ("quantity", INT, False), ("price", PRICE, False), ("gross", MONEY, False),
+        ("commission", MONEY, False), ("transfer_fee", MONEY, False),
+        ("stamp_duty", MONEY, False), ("total_fee", MONEY, False),
+    ]),
+    "corporate_actions.parquet": _schema([
+        ("action_id", TEXT, False), ("action_hash", TEXT, False), ("economic_key", TEXT, False),
+        ("date", DAY, False), ("stage", TEXT, False), ("code", TEXT, False),
+        ("cohort_id", TEXT, True), ("record_date", DAY, True), ("ex_date", DAY, True),
+        ("pay_date", DAY, True), ("stock_listing_date", DAY, True),
+        ("cash_per_share", PRICE, True), ("bonus_ratio", RATIO, True),
+        ("allocation_verified", BOOL, True), ("eligible_quantity", INT, True),
+        ("gross_cash", MONEY, True), ("receivable_cash", MONEY, True),
+        ("cash", MONEY, True), ("bonus_quantity", INT, True), ("source_hash", TEXT, False),
+    ]),
+    "positions.parquet": _schema([
+        ("date", DAY, False), ("cohort_id", TEXT, False), ("code", TEXT, False),
+        ("quantity", INT, False), ("sellable_quantity", INT, False),
+        ("close", PRICE, False), ("market_value", MONEY, False),
+    ]),
+    "daily_portfolio.parquet": _schema([
+        ("date", DAY, False), ("cash", MONEY, False), ("receivable_cash", MONEY, False),
+        ("market_value", MONEY, False), ("equity", MONEY, False),
+        ("daily_return", RATIO, False), ("position_count", INT, False),
+    ]),
+    "benchmark.parquet": _schema([
+        ("date", DAY, False), ("close", PRICE, False), ("nav", RATIO, False),
+        ("daily_return", RATIO, False),
+    ]),
+}
+
+_PRIMARY_KEYS = {
+    "signals.parquet": ("signal_date", "code"),
+    "order_intents.parquet": ("intent_id",),
+    "order_attempts.parquet": ("attempt_id",),
+    "trades.parquet": ("trade_id",),
+    "corporate_actions.parquet": ("date", "action_id", "stage", "cohort_id"),
+    "positions.parquet": ("date", "cohort_id", "code"),
+    "daily_portfolio.parquet": ("date",),
+    "benchmark.parquet": ("date",),
 }
 
 
-def _frame(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> pd.DataFrame:
-    return pd.DataFrame([{column: row.get(column) for column in columns} for row in rows], columns=columns)
+def _schema_identity(schema: pa.Schema) -> list[dict[str, Any]]:
+    return [{"name": item.name, "type": str(item.type), "nullable": item.nullable} for item in schema]
+
+
+def _coerce(value: Any, kind: pa.DataType) -> Any:
+    if value is None:
+        return None
+    if pa.types.is_date32(kind):
+        return value if isinstance(value, date) else date.fromisoformat(str(value))
+    if pa.types.is_decimal(kind):
+        number = _decimal(value, "arrow_decimal")
+        quantum = Decimal(1).scaleb(-kind.scale)
+        return number.quantize(quantum)
+    if pa.types.is_integer(kind):
+        return int(value)
+    if pa.types.is_boolean(kind):
+        if not isinstance(value, bool):
+            raise ValueError("arrow_boolean_value_required")
+        return value
+    return str(value)
+
+
+def _table(rows: Sequence[Mapping[str, Any]], schema: pa.Schema) -> pa.Table:
+    values = [
+        {item.name: _coerce(row.get(item.name), item.type) for item in schema}
+        for row in rows
+    ]
+    return pa.Table.from_pylist(values, schema=schema)
+
+
+def _logical_rows(table: pa.Table, primary_key: Sequence[str]) -> list[dict[str, Any]]:
+    rows = table.to_pylist()
+    return sorted(rows, key=lambda row: tuple("" if row.get(key) is None else str(row.get(key)) for key in primary_key))
+
+
+def _parquet_entry(path: Path, role: str, table: pa.Table) -> dict[str, Any]:
+    schema_hash = _hash(_schema_identity(table.schema))
+    logical_hash = _hash(_logical_rows(table, _PRIMARY_KEYS[path.name]))
+    return {
+        "role": role, "path": path.name, "format": "parquet",
+        "schema_version": "manual-portfolio-arrow-v1", "row_count": table.num_rows,
+        "size": path.stat().st_size, "sha256": _file_hash(path),
+        "schema_hash": schema_hash, "logical_content_hash": logical_hash,
+    }
+
+
+def _json_entry(path: Path, role: str) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        "role": role, "path": path.name, "format": "json",
+        "schema_version": str(payload.get("schema_version") or payload.get("protocol_version")),
+        "row_count": len(payload.get("items", [])) if isinstance(payload, Mapping) else 1,
+        "size": path.stat().st_size, "sha256": _file_hash(path),
+        "schema_hash": _hash({"role": role, "schema_version": payload.get("schema_version") or payload.get("protocol_version")}),
+        "logical_content_hash": _hash(payload),
+    }
 
 
 def write_portfolio_evidence(result: Any, output_dir: str | Path) -> Path:
     target = Path(output_dir)
-    if target.exists():
-        raise FileExistsError("portfolio_evidence_output_exists")
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
+    lock_path = target.parent / f".{target.name}.lock"
     try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise FileExistsError("portfolio_evidence_output_locked") from exc
+    temporary: Path | None = None
+    try:
+        if target.exists():
+            raise FileExistsError("portfolio_evidence_output_exists")
+        temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
         rows_by_file = {
             "signals.parquet": result.signals,
             "order_intents.parquet": result.intents,
@@ -306,8 +437,11 @@ def write_portfolio_evidence(result: Any, output_dir: str | Path) -> Path:
             "daily_portfolio.parquet": result.daily,
             "benchmark.parquet": result.benchmark,
         }
-        for name, columns in _SCHEMAS.items():
-            _frame(rows_by_file[name], columns).to_parquet(temporary / name, index=False)
+        tables = {}
+        for name, schema in _ARROW_SCHEMAS.items():
+            table = _table(rows_by_file[name], schema)
+            pq.write_table(table, temporary / name, compression="zstd")
+            tables[name] = table
         replay = replay_portfolio_result(result)
         metrics = calculate_portfolio_metrics(result)
         summary = {
@@ -319,12 +453,24 @@ def write_portfolio_evidence(result: Any, output_dir: str | Path) -> Path:
             "promotion_eligible": False,
             "evidence_status": "unregistered",
         }
-        (temporary / "audit.json").write_text(json.dumps(result.audit, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        audit = {
+            "schema_version": "manual-portfolio-audit-v1",
+            "items": result.audit, "quality_errors": result.quality_errors,
+            "error_count": sum(item.get("severity") == "error" for item in result.audit),
+            "warning_count": sum(item.get("severity") == "warning" for item in result.audit),
+        }
+        (temporary / "audit.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         (temporary / "replay.json").write_text(json.dumps(replay, ensure_ascii=False, indent=2), encoding="utf-8")
         (temporary / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-        files = []
-        for path in sorted(temporary.iterdir(), key=lambda item: item.name):
-            files.append({"path": path.name, "size": path.stat().st_size, "sha256": _file_hash(path)})
+        files = [
+            _parquet_entry(temporary / name, name.removesuffix(".parquet"), tables[name])
+            for name in sorted(tables)
+        ]
+        files.extend(
+            _json_entry(temporary / name, name.removesuffix(".json"))
+            for name in ("audit.json", "replay.json", "summary.json")
+        )
+        files.sort(key=lambda item: item["path"])
         manifest = {
             "protocol_version": "manual-daily-portfolio-evidence-v1",
             "strategy_core_hash": result.bundle.strategy_core_hash,
@@ -341,14 +487,89 @@ def write_portfolio_evidence(result: Any, output_dir: str | Path) -> Path:
         }
         manifest["manifest_hash"] = _hash(manifest)
         (temporary / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        verification = verify_portfolio_evidence_directory(temporary)
+        if not verification["verified"]:
+            raise ValueError("portfolio_evidence_staging_verification_failed")
+        for path in temporary.iterdir():
+            with path.open("rb") as handle:
+                os.fsync(handle.fileno())
+        directory_fd = os.open(temporary, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
         os.replace(temporary, target)
+        temporary = None
+        parent_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
         return target.resolve()
     except Exception:
-        shutil.rmtree(temporary, ignore_errors=True)
+        if temporary is not None:
+            shutil.rmtree(temporary, ignore_errors=True)
         raise
+    finally:
+        os.close(lock_fd)
+        lock_path.unlink(missing_ok=True)
+
+
+_EXPECTED_FILES = frozenset({*_ARROW_SCHEMAS, "audit.json", "replay.json", "summary.json", "manifest.json"})
+
+
+def verify_portfolio_evidence_directory(source: str | Path) -> dict[str, Any]:
+    root = Path(source)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("portfolio_evidence_directory_invalid")
+    names = {path.name for path in root.iterdir()}
+    if names != _EXPECTED_FILES:
+        raise ValueError("portfolio_evidence_file_set_mismatch")
+    if any(path.is_symlink() or not path.is_file() for path in root.iterdir()):
+        raise ValueError("portfolio_evidence_file_invalid")
+    try:
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("portfolio_evidence_manifest_invalid") from exc
+    expected_manifest_hash = manifest.get("manifest_hash")
+    payload = {key: value for key, value in manifest.items() if key != "manifest_hash"}
+    if expected_manifest_hash != _hash(payload):
+        raise ValueError("portfolio_evidence_manifest_hash_mismatch")
+    entries = manifest.get("files")
+    if not isinstance(entries, list) or len(entries) != 11:
+        raise ValueError("portfolio_evidence_manifest_files_invalid")
+    by_path = {item.get("path"): item for item in entries if isinstance(item, Mapping)}
+    if set(by_path) != _EXPECTED_FILES - {"manifest.json"} or len(by_path) != len(entries):
+        raise ValueError("portfolio_evidence_manifest_paths_invalid")
+    for name, entry in by_path.items():
+        if Path(name).name != name or Path(name).is_absolute():
+            raise ValueError("portfolio_evidence_manifest_path_escape")
+        path = root / name
+        if path.stat().st_size != int(entry.get("size", -1)) or _file_hash(path) != entry.get("sha256"):
+            raise ValueError(f"portfolio_evidence_file_hash_mismatch:{name}")
+        if name in _ARROW_SCHEMAS:
+            table = pq.read_table(path)
+            schema = _ARROW_SCHEMAS[name]
+            if not table.schema.equals(schema, check_metadata=True):
+                raise ValueError(f"portfolio_evidence_schema_mismatch:{name}")
+            if _hash(_schema_identity(schema)) != entry.get("schema_hash"):
+                raise ValueError(f"portfolio_evidence_schema_hash_mismatch:{name}")
+            if table.num_rows != int(entry.get("row_count", -1)):
+                raise ValueError(f"portfolio_evidence_row_count_mismatch:{name}")
+            if _hash(_logical_rows(table, _PRIMARY_KEYS[name])) != entry.get("logical_content_hash"):
+                raise ValueError(f"portfolio_evidence_logical_hash_mismatch:{name}")
+        else:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            if _hash(parsed) != entry.get("logical_content_hash"):
+                raise ValueError(f"portfolio_evidence_logical_hash_mismatch:{name}")
+    return {
+        "verified": True, "manifest_hash": expected_manifest_hash,
+        "manifest_file_sha256": _file_hash(root / "manifest.json"),
+        "file_count": len(names),
+    }
 
 
 __all__ = [
     "calculate_portfolio_metrics", "replay_portfolio_result",
-    "write_portfolio_evidence",
+    "write_portfolio_evidence", "verify_portfolio_evidence_directory",
 ]

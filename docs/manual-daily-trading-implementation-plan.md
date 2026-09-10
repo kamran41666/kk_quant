@@ -805,3 +805,11 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - 修复锁定股份裁剪后的卖出费用：先确定最终可卖成交量，再按实际gross计算佣金、过户费和印花税。独立费用重算覆盖该反例。
 - v3结果以同父目录临时目录写出8个固定列schema Parquet及audit/replay/summary/manifest四个JSON，目标存在时拒绝覆盖；manifest保存其余11文件的size/SHA-256、策略core、scenario bundle、输入身份、指标和replay hash。Arrow精确类型与schema hash仍由下一检查点补齐。
 - 内部重放验证intent/attempt/fill关联、共享容量、gross/费用、现金、应收、cohort股数、持仓`close×quantity`、每日市值/权益和收益。尚未从受控输入正文复核原始价格、昨量、资格及action比例，故`source_and_execution_passed=false`、总体`passed=false`、artifact注册资格固定false。
+
+## 35. H2b精确Arrow与证据目录验证检查点
+
+- 8个Parquet改用显式pyarrow schema：日期`date32`、股数/序号`int64`、验证状态`bool`、金额`decimal128(24,2)`、价格`decimal128(24,8)`、收益/分数`decimal128(38,18)`；零行文件同样保留完整列、顺序、类型和nullable定义。
+- 每个Parquet manifest项保存row count、物理文件SHA-256、schema hash和按稳定主键排序的逻辑内容hash；JSON保存版本化schema及逻辑hash。manifest自身使用去掉`manifest_hash`后的规范内容计算自hash，避免自引用。
+- writer在目标同父目录创建独占锁与随机staging，写完后逐文件fsync、目录fsync、调用独立目录验证器，再原子rename并fsync父目录；目标存在、并发锁存在或任一步失败都不会覆盖已有证据。
+- 新`verify_portfolio_evidence_directory`要求目录恰好包含合同12文件，拒绝额外/缺失文件、符号链接、绝对/越界路径、重复entry、物理hash、schema、row count、逻辑hash或manifest hash不一致。
+- 本检查点只证明输出目录内部不可变和可验证；受控输入正文及执行规则尚未进入目录，`source_and_execution_passed`继续为false，不能注册晋级artifact。
