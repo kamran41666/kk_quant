@@ -17,6 +17,16 @@
 
 ## 记录
 
+### 2026-09-10 15:39 CST — H2b受控源执行重放
+
+- Git：`phase4-factor-develop`；提交`f57df16`已创建，本条Progress随后提交并推送。
+- 重放：`VerifiedPortfolioSources.reload()`在每次审计时重新核验并从磁盘加载六类source，避免信任可变内存。源重放核对交易日、benchmark价格/nav/日收益、信号、open/close原价与滑点、前日volume容量、历史资格、T+1和公司行动definition/action/source hash。
+- 目标：从受控信号、TopN、cohort预算、入场日open重新计算应有整手entry并核对稳定logical intent。内部账务、源执行、目标覆盖及quality errors共同决定总体replay；bundle额外绑定训练/验证artifact hash。
+- 证据：无缺陷受控合成案例的accounting/source/target三门全部通过，写出manifest可标记`eligible_for_artifact_registration=true`；审计始终从磁盘重载，修改内存DataFrame无效，篡改信号文件后源门和总体门立即失败。
+- 验证：当前macOS后端全量`783 passed, 2 warnings`；源/v3/账本专项`20 passed`；compileall、关键错误级Ruff、`git diff --check`及变更Markdown链接检查通过。
+- 边界：公司行动当前完成定义身份核对，尚未从源比例独立重算登记权益、现金/红股最大余数分配与上市锁；artifact pair登记和`portfolio_passed` resolver继续关闭。真实normalized-v2仍被50条未知调整阻断。
+- 入口：[`源重放记录`](docs/manual-daily-trading-implementation-plan.md#37-h2b受控源执行重放检查点)、[`组合证据合同`](docs/research-runs/manual-daily-portfolio-evidence-v1.md)、[`源重放实现`](quant_engine/backtest/manual_portfolio_evidence.py)。
+
 ### 2026-09-10 15:27 CST — H2b受控源输入与真实normalized核验
 
 - Git：`phase4-factor-develop`；提交`39f6962`已创建，本条Progress随后提交并推送。
