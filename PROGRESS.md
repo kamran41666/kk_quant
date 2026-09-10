@@ -17,6 +17,15 @@
 
 ## 记录
 
+### 2026-09-10 14:26 CST — H2b cohort原子成交与共享容量
+
+- Git：`phase4-factor-develop`；提交`0847559`已创建，本条Progress随后提交并推送。
+- 修改：新增纯计算`ManualResearchLedger`、`ResearchExecutionIntent`和cohort lot。原子执行覆盖指定cohort、T+1、A股整手/零股清仓、有效日期费用、开/收盘价格限制、现金与历史资格；所有intent、attempt、拒绝和fill分别保存，不调用paper或券商路径。
+- 容量：同证券同交易日的全部cohort和买卖共享一份由前一完整交易日volume计算的容量；失败计划保留在金额加权成交率分母。同票旧cohort退出不会消费新cohort持仓，逐cohort快照加总等于账户持仓与权益。
+- 验证：当前macOS后端全量`767 passed, 2 warnings`；新原子账本专项`4 passed`；compileall、关键错误级Ruff、`git diff --check`和变更Markdown链接检查通过。
+- 边界：原子账本尚未接入正式v3组合循环；公司行动cohort子账、benchmark、完整12项输出、独立replay和portfolio artifact resolver仍未完成，因此不能产生`portfolio_passed`证据。
+- 入口：[`H2b原子成交记录`](docs/manual-daily-trading-implementation-plan.md#31-h2b-cohort原子成交检查点)、[`组合证据合同`](docs/research-runs/manual-daily-portfolio-evidence-v1.md)、[`研究执行账本`](quant_engine/backtest/manual_research_ledger.py)。
+
 ### 2026-09-10 14:19 CST — H2b组合证据第一检查点
 
 - Git：`phase4-factor-develop`；提交`f63bcf2`已创建，本条Progress随后提交并一并推送。
