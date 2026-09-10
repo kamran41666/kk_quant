@@ -17,6 +17,11 @@
 
 ## 记录
 
+### 2026-09-10 14:07 CST — H1/H2a远端同步
+
+- Git：`phase4-factor-develop`已将`fb92672..96160d3`推送到`origin/phase4-factor-develop`，包含H1加固、审查记录、H2a研究证据解析器及对应Progress；此前两条记录中的“尚未推送”是阶段当时状态，本条确认远端已更新。
+- 边界不变：当前最高只允许数据库证据resolver把release推进到`research_passed`；组合、holdout、真实前瞻及人工执行门仍保持关闭。
+
 ### 2026-09-10 14:05 CST — H2a研究证据锚定与晋级解析器
 
 - Git：`phase4-factor-develop`；H2a提交`03ddc4e`已创建，本条Progress随后单独提交。连同H1，本地分支尚未推送，领先`origin/phase4-factor-develop`。
