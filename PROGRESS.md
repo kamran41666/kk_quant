@@ -17,6 +17,16 @@
 
 ## 记录
 
+### 2026-09-10 16:18 CST — H2b公司行动源经济重放与残留持仓修复
+
+- Git：`phase4-factor-develop`；功能提交`15773c9`已创建，本条Progress随后提交并推送到`origin/phase4-factor-develop`。
+- 重放：从受控action正文和不可变成交独立重建逐cohort股份批次、登记日权益、税后现金分币、账户级红股最大余数分配、应收派息、上市解锁和每日可卖数量；未调用生产账本的公司行动分配或lot可卖函数。经济事件同时核对source/action/economic hash，definition核对完整日期、比例和验证字段，持仓close直接对照受控daily原价。
+- 修复：审查实际复现“登记后先卖出关闭，除权送股重新产生lot但cohort不再退出”的P0残留持仓。v3在公司行动重建lot时把已关闭cohort恢复为`exiting`，上市后按容量继续退出；源门拒绝终态closed/entry_failed仍持股的结果。
+- 反例：完整合成路径覆盖买入、登记、先退出、现金/送股除权、红股锁定、派息/上市和二次退出；篡改应收1分钱、红股数量、事件身份hash、definition上市日或上市前可卖数量均被对应门拒绝。现金与红股分配另覆盖账户总量取整及cohort ID稳定破同分。
+- 验证：当前macOS后端全量`785 passed, 2 warnings`，公司行动源/v3/账本专项`22 passed`；compileall、关键错误级Ruff、`git diff --check`及3份变更Markdown本地链接检查通过。warning仍为既有Starlette TestClient弃用提示和撮合超剩余量截断提示。
+- 边界：单个受控结果已具备公司行动经济源重放，但baseline/stress pair登记和数据库`portfolio_passed` resolver尚未实现；writer展示的注册资格仍不能由晋级服务直接采信。真实normalized-v2继续被50条未知调整阻断，旧v2结果不能复用。
+- 入口：[`公司行动源重放记录`](docs/manual-daily-trading-implementation-plan.md#38-h2b公司行动源经济重放检查点)、[`组合证据合同`](docs/research-runs/manual-daily-portfolio-evidence-v1.md)、[`更新后的H2b审查状态`](docs/research-runs/manual-daily-implementation-audit-2026-09-10.md#h2b-实施状态2026-09-10)、[`重放实现`](quant_engine/backtest/manual_portfolio_evidence.py)。
+
 ### 2026-09-10 15:39 CST — H2b受控源执行重放
 
 - Git：`phase4-factor-develop`；提交`f57df16`已创建，本条Progress随后提交并推送。
