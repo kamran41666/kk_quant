@@ -134,7 +134,7 @@ fill_rate   = numerator / denominator
 
 1. 已完成：前一交易日容量、1%/0.5%成本口径、`strategy_core_hash`和追加式晋级评价哈希链。
 2. 已完成底层模块：提取cohort-aware原子成交和共享容量池；尚未接入正式v3组合循环。
-3. 接入历史资格和公司行动子账。
+3. 已完成底层模块：历史资格进入原子买入门；公司行动cohort子账覆盖登记、应收、派息、红股分配和上市锁定；尚未接入正式v3循环及manifest质量门。
 4. 保存全部intent/attempt/position/benchmark证据。
 5. 实现独立重放和pair manifest。
 6. 接入artifact登记和`portfolio_passed` resolver。
