@@ -721,6 +721,13 @@ def execute_experiment(
         )
         candidate.updated_at = completed
         db.commit()
+        if label_spec.get("label_id") == "manual-daily-label-v1":
+            from server.services.manual_evidence import register_factor_experiment_artifact
+
+            register_factor_experiment_artifact(
+                db, row.id,
+                allowed_root=result_root or Path(settings.result_dir) / "factor-experiments",
+            )
         return report
     except Exception as exc:
         failed = _now().isoformat()

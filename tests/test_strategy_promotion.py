@@ -19,45 +19,28 @@ def _evidence():
     }
 
 
-def _advance_to_paper_passed(db, release):
-    for status in ("research_passed", "portfolio_passed", "holdout_passed", "paper_observing", "paper_passed"):
-        release = promote_release(db, release.id, target_status=status, evidence={})
-    return release
-
-
 def test_policy_fails_closed_on_missing_evidence():
     result = evaluate_promotion({"research": {"training_decision": "training_passed"}})
     assert result["passed"] is False
     assert "stress_net_return_positive" in result["failed"]
 
 
-def test_release_requires_all_gates_and_is_not_legacy_inherited(db_session):
+def test_legacy_release_promotion_path_is_disabled(db_session):
     release = create_strategy_release(
         db_session, strategy_key="manual-test", version="v2", bundle_hash="1" * 64,
         strategy_fingerprint="2" * 64, research_evidence=_evidence(),
         execution_policy={"auto_submit": False}, risk_policy={"max_drawdown": "0.2"},
     )
-    with pytest.raises(PromotionError, match="does_not_match"):
-        _advance_to_paper_passed(db_session, release)
-        promote_release(db_session, release.id, target_status="manual_ready", evidence={"research": _evidence()["research"], "portfolio": {}, "holdout": {}, "paper": {}}, approved_by="operator")
-    promoted = promote_release(db_session, release.id, target_status="manual_ready", evidence=_evidence(), approved_by="operator")
-    assert promoted.status == "manual_ready"
-    assert promoted.approved_by == "operator"
+    with pytest.raises(PromotionError, match="evidence_resolver"):
+        promote_release(db_session, release.id, target_status="manual_ready", evidence=_evidence(), approved_by="operator")
+    assert db_session.get(type(release), release.id).status == "draft"
 
 
 def test_policy_hash_is_stable():
     assert ManualDailyPromotionPolicyV1().policy_hash == ManualDailyPromotionPolicyV1().policy_hash
 
 
-def test_intermediate_status_and_drawdown_magnitude_are_strict(db_session):
-    release = create_strategy_release(
-        db_session, strategy_key="manual-stage", version="v1", bundle_hash="3" * 64,
-        strategy_fingerprint="4" * 64, research_evidence=_evidence(),
-        execution_policy={"auto_submit": False}, risk_policy={"max_drawdown": "0.2"},
-    )
-    assert promote_release(db_session, release.id, target_status="research_passed", evidence={}).status == "research_passed"
-    with pytest.raises(PromotionError, match="transition_not_allowed"):
-        promote_release(db_session, release.id, target_status="holdout_passed", evidence={})
+def test_drawdown_magnitude_is_strict():
     invalid = _evidence()
     invalid["portfolio"]["stress_max_drawdown"] = "-0.95"
     with pytest.raises(PromotionError, match="stress_max_drawdown_below_minimum"):

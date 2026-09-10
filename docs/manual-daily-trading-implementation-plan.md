@@ -759,3 +759,10 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - H1已修正单日双sleeve、同票跨批误卖、自由成交绕过、跨服务提前commit、成交/更正状态漂移、未来/跨日pilot、未对账review、label close字段、退出重试、晋级回撤/冻结证据、授权竞争、holdout重封和bundle CLI往返。
 - 人工操作台成交入口已改为“查看计划→确认计划项→绑定回填”，通用执行事件入口不再接受经济成交；所有真实动作仍由用户在券商端完成。
 - H1完成不代表M8/M9真实验收。公司行动级组合回测、数据库证据resolver、worker handler、统一HTTP幂等、完整闭环API和真实30日观察仍按审查文档H2—H6推进；这些门完成前不得创建人工执行资格。
+
+## 29. H2a研究证据解析记录
+
+- 新增追加式`ResearchEvidenceArtifact`与`StrategyPromotionEvaluation`，release核心hash不写入未来holdout或pilot结果，后续阶段证据通过不可变判定记录连接。
+- 日频训练/验证实验由worker完成时登记受控目录内的`factor_values.parquet`、`ic_series.parquet`、`quantile_returns.parquet`和`report.json`。晋级时重新核验文件hash、数据库结果、候选表达式、数据版本、label、policy和非重叠切分。
+- 新release和`draft → research_passed`接口只接收artifact ID；旧的调用方布尔/指标晋级入口已关闭。缺少组合、holdout经济结果或pilot底层事实解析能力时固定追加blocked evaluation，不改变release状态。
+- H2a只完成研究阶段证据锚定；H2b继续实现baseline/stress组合manifest、公司行动与账务重放证据，再接holdout和daily checkpoint。当前没有release可越过`research_passed`。

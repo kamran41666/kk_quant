@@ -7,6 +7,7 @@ from typing import Any, Mapping
 import hashlib
 import json
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from server.models.schema import StrategyRelease, manual_now_str, uuid4_str
@@ -157,6 +158,17 @@ def create_strategy_release(
         research_evidence=_canonical(research_evidence), execution_policy=_canonical(execution_policy),
         risk_policy=_canonical(risk_policy), promotion_policy=_canonical(promotion_json), status="draft",
     )
+    existing = db.scalars(select(StrategyRelease).where(
+        StrategyRelease.release_hash == row.release_hash,
+    )).first()
+    if existing is not None:
+        return existing
+    conflicting = db.scalars(select(StrategyRelease).where(
+        StrategyRelease.strategy_key == strategy_key,
+        StrategyRelease.version == version,
+    )).first()
+    if conflicting is not None:
+        raise PromotionError("strategy_release_version_conflict")
     db.add(row)
     db.commit()
     db.refresh(row)
@@ -171,6 +183,8 @@ def promote_release(
     evidence: Mapping[str, Any],
     approved_by: str | None = None,
 ) -> StrategyRelease:
+    if target_status not in {"suspended", "retired"}:
+        raise PromotionError("legacy_promotion_path_disabled_use_evidence_resolver")
     row = db.get(StrategyRelease, release_id)
     if row is None:
         raise PromotionError("strategy_release_not_found")

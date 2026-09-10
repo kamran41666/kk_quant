@@ -85,6 +85,8 @@ def test_manual_api_is_operator_protected_and_idempotent():
 
             routes = set(app.openapi()["paths"])
             assert "/api/v1/manual-trading/accounts/{account_id}/execution-events" in routes
+            assert "/api/v1/manual-trading/releases/{release_id}/promotions" in routes
+            assert "/api/v1/manual-trading/releases/{release_id}/evidence" in routes
             assert not any("submit" in route for route in routes if "manual-trading" in route)
     finally:
         app.dependency_overrides.pop(get_db, None)

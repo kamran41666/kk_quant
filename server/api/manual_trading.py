@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+import json
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -16,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from quant_engine.data.calendar import TradingCalendar
 from server.models.database import get_db
-from server.models.schema import ManualAccount, ManualDailyJob, ManualDailyReview, ManualExecutionAuthorization, ManualExecutionConfirmation, ManualExecutionEvent, ManualExecutionItem, ManualExecutionPlan, ManualValuation
+from server.models.schema import ManualAccount, ManualDailyJob, ManualDailyReview, ManualExecutionAuthorization, ManualExecutionConfirmation, ManualExecutionEvent, ManualExecutionItem, ManualExecutionPlan, ManualValuation, ResearchEvidenceArtifact, StrategyPromotionEvaluation, StrategyRelease
 from server.services.manual_ledger import (
     ManualLedgerError,
     create_manual_account,
@@ -24,6 +25,11 @@ from server.services.manual_ledger import (
     reconcile_account,
     record_cash_event,
     record_execution_event,
+)
+from server.services.manual_evidence import (
+    ManualEvidenceError,
+    advance_release_from_evidence,
+    create_evidence_bound_release,
 )
 from server.services.manual_plan_persistence import mark_plan_viewed
 from server.services.manual_review import (
@@ -64,6 +70,24 @@ class StrictModel(BaseModel):
 class AccountRequest(StrictModel):
     name: str = Field(min_length=1, max_length=120)
     broker_label: str = Field(default="", max_length=120)
+
+
+class ReleaseCreateRequest(StrictModel):
+    strategy_key: str = Field(min_length=3, max_length=100)
+    version: str = Field(min_length=1, max_length=40)
+    bundle_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    strategy_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    training_artifact_id: str = Field(min_length=1, max_length=36)
+    validation_artifact_id: str = Field(min_length=1, max_length=36)
+    execution_policy: dict[str, Any]
+    risk_policy: dict[str, Any]
+    promotion_policy: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromotionRequest(StrictModel):
+    target_status: str = Field(pattern=r"^(research_passed|portfolio_passed|holdout_passed|paper_observing|paper_passed|manual_ready)$")
+    evidence_refs: dict[str, str]
+    actor: str = Field(min_length=1, max_length=80)
 
 
 class CashEventRequest(StrictModel):
@@ -248,6 +272,103 @@ def _calendar_for(value: Any) -> TradingCalendar:
     if not report.get("complete"):
         raise ManualLedgerError("TRADING_CALENDAR_UNAVAILABLE")
     return calendar
+
+
+def _release(row: StrategyRelease) -> dict[str, Any]:
+    return {
+        "id": row.id, "strategy_key": row.strategy_key, "version": row.version,
+        "bundle_hash": row.bundle_hash, "release_hash": row.release_hash,
+        "strategy_fingerprint": row.strategy_fingerprint, "market": row.market,
+        "status": row.status, "research_evidence": json.loads(row.research_evidence or "{}"),
+        "execution_policy": json.loads(row.execution_policy or "{}"),
+        "risk_policy": json.loads(row.risk_policy or "{}"),
+        "promotion_policy": json.loads(row.promotion_policy or "{}"),
+        "approved_by": row.approved_by, "approved_at": row.approved_at,
+        "created_at": row.created_at, "updated_at": row.updated_at,
+    }
+
+
+@router.post("/releases", status_code=201)
+def create_release(
+    req: ReleaseCreateRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=160),
+    db: Session = Depends(get_db),
+):
+    del idempotency_key  # release_hash supplies deterministic replay until H4's shared HTTP ledger lands
+    try:
+        row = create_evidence_bound_release(db, **req.model_dump())
+        return _envelope(_release(row), evidence_status=row.status)
+    except (ManualEvidenceError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/releases")
+def list_releases(db: Session = Depends(get_db)):
+    rows = db.scalars(select(StrategyRelease).order_by(
+        StrategyRelease.created_at.desc(), StrategyRelease.id.desc(),
+    )).all()
+    return _envelope([_release(row) for row in rows], evidence_status="database_resolved")
+
+
+@router.get("/releases/{release_id}")
+def get_release(release_id: str, db: Session = Depends(get_db)):
+    row = db.get(StrategyRelease, release_id)
+    if row is None:
+        raise _error(ManualEvidenceError("strategy_release_not_found"))
+    return _envelope(_release(row), evidence_status=row.status)
+
+
+@router.get("/releases/{release_id}/evidence")
+def get_release_evidence(release_id: str, db: Session = Depends(get_db)):
+    release = db.get(StrategyRelease, release_id)
+    if release is None:
+        raise _error(ManualEvidenceError("strategy_release_not_found"))
+    evaluations = db.scalars(select(StrategyPromotionEvaluation).where(
+        StrategyPromotionEvaluation.release_id == release_id,
+    ).order_by(StrategyPromotionEvaluation.created_at.asc())).all()
+    artifact_ids = set(json.loads(release.research_evidence or "{}").values())
+    artifacts = db.scalars(select(ResearchEvidenceArtifact).where(
+        ResearchEvidenceArtifact.id.in_(artifact_ids),
+    )).all() if artifact_ids else []
+    return _envelope({
+        "release_id": release.id,
+        "release_hash": release.release_hash,
+        "artifacts": [{
+            "id": row.id, "kind": row.kind, "status": row.status,
+            "identity_hash": row.identity_hash, "manifest_hash": row.manifest_hash,
+            "evidence_hash": row.evidence_hash,
+        } for row in artifacts],
+        "evaluations": [{
+            "id": row.id, "from_status": row.from_status, "target_status": row.target_status,
+            "decision": row.decision, "checks": json.loads(row.checks_json),
+            "resolved_evidence_hash": row.resolved_evidence_hash,
+            "resolver_version": row.resolver_version, "created_at": row.created_at,
+        } for row in evaluations],
+    }, evidence_status="database_resolved")
+
+
+@router.post("/releases/{release_id}/promotions", status_code=201)
+def promote_release_from_ids(
+    release_id: str,
+    req: PromotionRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=160),
+    db: Session = Depends(get_db),
+):
+    try:
+        row = advance_release_from_evidence(
+            db, release_id=release_id, target_status=req.target_status,
+            evidence_refs=req.evidence_refs, actor=req.actor,
+            idempotency_key=idempotency_key,
+        )
+        return _envelope({
+            "id": row.id, "release_id": row.release_id,
+            "from_status": row.from_status, "target_status": row.target_status,
+            "decision": row.decision, "checks": json.loads(row.checks_json),
+            "resolved_evidence_hash": row.resolved_evidence_hash,
+            "resolver_version": row.resolver_version,
+        }, evidence_status=row.decision)
+    except (ManualEvidenceError, ValueError) as exc:
+        raise _error(exc) from exc
 
 
 @router.get("/accounts")

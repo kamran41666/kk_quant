@@ -37,7 +37,9 @@ from server.models.schema import (
     ManualValuation,
     ResearchHoldoutAccess,
     ResearchHoldoutWindow,
+    ResearchEvidenceArtifact,
     ResearchRevision,
+    StrategyPromotionEvaluation,
     StrategyRelease,
 )
 
@@ -47,7 +49,7 @@ class ManualBackupError(ValueError):
 
 
 MANUAL_MODELS = (
-    ManualAccount, StrategyRelease, ManualExecutionAuthorization,
+    ManualAccount, StrategyRelease, ResearchEvidenceArtifact, StrategyPromotionEvaluation, ManualExecutionAuthorization,
     ResearchHoldoutWindow, ResearchHoldoutAccess, DailyDecision, ManualCohort,
     ManualExecutionPlan, ManualExecutionItem, ManualExecutionEvent, ManualExecutionConfirmation, ManualCashEvent,
     ManualLedgerEvent, ManualPositionLot, ManualAccountSnapshot, ManualPositionSnapshot,
@@ -55,7 +57,7 @@ MANUAL_MODELS = (
     ResearchRevision, ManualCorporateActionFact, ManualProspectivePilot,
     ManualPilotObservation,
 )
-SCHEMA_VERSION = "manual-backup-v1"
+SCHEMA_VERSION = "manual-backup-v2"
 
 
 def _json_value(value: Any) -> Any:

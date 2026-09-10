@@ -632,6 +632,62 @@ class StrategyRelease(Base):
     updated_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
 
 
+class ResearchEvidenceArtifact(Base):
+    """Immutable manifest for one worker-produced research artifact set."""
+    __tablename__ = "research_evidence_artifact"
+    __table_args__ = (
+        UniqueConstraint("kind", "producer_entity_id", "producer_attempt", name="uq_research_artifact_producer"),
+        UniqueConstraint("evidence_hash", name="uq_research_artifact_hash"),
+        CheckConstraint(
+            "kind IN ('factor_training', 'factor_validation', 'manual_portfolio_baseline', 'manual_portfolio_stress', 'holdout_result', 'pilot_report')",
+            name="ck_research_artifact_kind",
+        ),
+        CheckConstraint("status IN ('verified', 'invalidated', 'legacy_unsupported')", name="ck_research_artifact_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    producer_protocol: Mapped[str] = mapped_column(String(80), nullable=False)
+    producer_entity_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    producer_entity_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    producer_attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="verified")
+    identity_json: Mapped[str] = mapped_column(Text, nullable=False)
+    identity_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_json: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    invalidated_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    invalidation_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class StrategyPromotionEvaluation(Base):
+    """Append-only resolver decision for one release status transition."""
+    __tablename__ = "strategy_promotion_evaluation"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_strategy_promotion_evaluation_key"),
+        CheckConstraint("decision IN ('passed', 'blocked')", name="ck_strategy_promotion_evaluation_decision"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    release_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    release_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    from_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    target_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    policy_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_refs_json: Mapped[str] = mapped_column(Text, nullable=False)
+    resolved_evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    checks_json: Mapped[str] = mapped_column(Text, nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    resolver_version: Mapped[str] = mapped_column(String(60), nullable=False)
+    resolver_code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor: Mapped[str] = mapped_column(String(80), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
 class ManualExecutionAuthorization(Base):
     """User/account-specific limits; it is not a broker authorization token."""
     __tablename__ = "manual_execution_authorization"

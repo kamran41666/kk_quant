@@ -9,8 +9,8 @@ from server.services.manual_authorization import (
     revoke_authorization,
 )
 from server.services.manual_ledger import create_manual_account
-from server.services.strategy_promotion import create_strategy_release, promote_release
-from tests.test_strategy_promotion import _advance_to_paper_passed, _evidence
+from server.services.strategy_promotion import create_strategy_release
+from tests.test_strategy_promotion import _evidence
 
 
 def _ready_release(db):
@@ -19,8 +19,10 @@ def _ready_release(db):
         strategy_fingerprint="2" * 64, research_evidence=_evidence(),
         execution_policy={"auto_submit": False}, risk_policy={"max_drawdown": "0.2"},
     )
-    _advance_to_paper_passed(db, release)
-    return promote_release(db, release.id, target_status="manual_ready", evidence=_evidence(), approved_by="operator")
+    release.status = "manual_ready"
+    db.commit()
+    db.refresh(release)
+    return release
 
 
 def _limits(db, release_id, account_id):

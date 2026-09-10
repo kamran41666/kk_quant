@@ -52,4 +52,12 @@
 4. **H5 研究重跑：** 在公司行动、容量、历史资格、成本和manifest均绑定后，重新运行日频因子训练/验证、长区间广股票池组合回测；通过后才能创建新的sealed holdout。
 5. **H6 真实前瞻与人工试运行：** 等待真实到达的连续30个交易日，逐日对账；通过后由用户显式设置资金限额并批准首次人工计划。
 
+## H2a 实施状态（2026-09-10）
+
+已新增`ResearchEvidenceArtifact`与`StrategyPromotionEvaluation`：前者保存可信worker产物的身份、逐文件路径/大小/SHA-256和总证据hash，后者追加保存release状态转换的证据引用、服务端解析检查、解析器版本/代码hash和决定。日频FactorExperiment完成后会自动登记训练/验证产物；release创建与晋级HTTP只接受artifact ID，不接受复制的收益或`passed`布尔值。
+
+`draft → research_passed`解析器已经实现并重新核验候选表达式、实验状态、manual daily label、数据hash、评价policy、训练/验证时间隔离、数据库报告与`report.json`语义一致以及全部Parquet/JSON字节hash。旧`promote_release(..., evidence={...})`不能再提升状态；组合、holdout、paper和manual_ready解析器未具备足够底层证据时会追加blocked evaluation并保持当前release状态。
+
+H2尚未整体完成。下一步H2b需要新增日频组合产物登记与重放证明，再将holdout结果和真实前瞻daily checkpoint接入相同resolver；当前任何release最多只能由新解析器到达`research_passed`。
+
 本审查不修改冻结研究结果，也不评价远端提交中与日频闭环无关的新增内容。
