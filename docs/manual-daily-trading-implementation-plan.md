@@ -789,3 +789,11 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - 原始股与红股上市锁分别计算，上市前红股不可卖；公司行动不消耗交易容量。逐日权益改为`cash + receivable_cash + market_value`，派息只做应收到现金的等额转移。
 - 缺登记/除权/派息/上市证据、未验证红股资格和异常日期产生P0式错误审计并使公司行动证据失效。来源派息日早于除权日时保留原日期，但有效派息日置空，禁止提前形成买入力。
 - 本检查点专项覆盖登记后卖空、应收/现金守恒、红股锁、账户级取整与稳定分配、重复行动和异常派息日。正式v3循环与manifest尚未接通，不能晋级。
+
+## 33. H2b正式v3组合循环检查点
+
+- 新增`ManualPortfolioInputManifest`、`ManualDailyPortfolioV3Result`和`run_manual_daily_portfolio_v3`，使用cohort-aware账本替代旧v2内部现金/持仓循环；旧v2继续作为不可晋级兼容入口。
+- 每个交易日固定执行：公司行动除权/派息/上市结转→计划cohort开盘进入→到期cohort收盘退出/重试→收盘估值→登记日权益冻结→捕获新收盘信号。退出受阻时cohort保持`exiting`并占用sleeve，禁止新增批次突破上限。
+- 输入身份覆盖dataset、日历、信号、历史资格、公司行动、benchmark和训练/验证artifact；bundle dataset hash或日历hash不一致直接拒绝。基准必须逐交易日覆盖，不前填缺日。
+- v3在内存形成signals、cohorts、intents、attempts、trades、corporate actions、positions、daily portfolio和benchmark九类明细；结果hash覆盖全部明细与质量错误。同一输入逐值稳定。
+- 已知未解释调整显式进入`quality_errors`，`promotion_eligible`在独立重放和artifact pair完成前固定为false。下一步实现固定12文件schema、原子写出、指标与独立replay。

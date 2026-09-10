@@ -221,8 +221,6 @@ class ManualResearchLedger:
                 self._action_issue(action, "pay_date_unresolved")
             if action.ex_date and action.pay_date and action.pay_date < action.ex_date:
                 self._action_issue(action, "pay_date_precedes_ex_date")
-            if action.ex_date and action.pay_date and action.pay_date < action.ex_date:
-                self._action_issue(action, "pay_date_precedes_ex_date")
             if action.bonus_ratio > 0 and action.stock_listing_date is None:
                 self._action_issue(action, "stock_listing_date_unresolved")
             if action.ex_date and action.stock_listing_date and action.stock_listing_date < action.ex_date:
