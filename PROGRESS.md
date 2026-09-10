@@ -17,6 +17,16 @@
 
 ## 记录
 
+### 2026-09-10 14:19 CST — H2b组合证据第一检查点
+
+- Git：`phase4-factor-develop`；提交`f63bcf2`已创建，本条Progress随后提交并一并推送。
+- 修复：日频组合开盘容量不再读取当日最终volume，固定使用前一完整交易日成交量；baseline/stress参与率与`ResearchLedger`统一为1%/0.5%。新增反例证明当日巨量不能覆盖前日零量并制造成交。
+- 协议：`ManualDailyFactorBundleV2`新增排除cost scenario的`strategy_core_hash`，baseline/stress共享core且保持各自bundle hash。`StrategyPromotionEvaluation`新增上一条通过评价引用和自身评价hash，形成追加式晋级链；SQLite旧库增加兼容列。
+- 文档：新增[`日频组合证据合同v1`](docs/research-runs/manual-daily-portfolio-evidence-v1.md)，冻结输入manifest、公司行动/cohort会计、共享容量、全量intent/attempt、基准、指标、12项输出、独立重放和artifact pair resolver标准。
+- 验证：当前macOS工作区后端全量`763 passed, 2 warnings`；组合/H2b专项`10 passed`；compileall、关键错误级Ruff、`git diff --check`和变更Markdown链接检查通过。
+- 边界：旧`manual-daily-portfolio-v2`仍是不可晋级工程模拟。H2b下一步必须提取cohort-aware原子成交和共享容量池，接入历史资格与公司行动子账，再保存全量intent、benchmark和独立replay；当前没有release可达到`portfolio_passed`。
+- 入口：[`H2b记录`](docs/manual-daily-trading-implementation-plan.md#30-h2b组合证据第一检查点)、[`组合证据合同`](docs/research-runs/manual-daily-portfolio-evidence-v1.md)、[`证据解析器`](server/services/manual_evidence.py)。
+
 ### 2026-09-10 14:07 CST — H1/H2a远端同步
 
 - Git：`phase4-factor-develop`已将`fb92672..96160d3`推送到`origin/phase4-factor-develop`，包含H1加固、审查记录、H2a研究证据解析器及对应Progress；此前两条记录中的“尚未推送”是阶段当时状态，本条确认远端已更新。
