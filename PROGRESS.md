@@ -17,6 +17,15 @@
 
 ## 记录
 
+### 2026-09-10 09:40 CST — 远端日频闭环大审查与H1加固
+
+- Git：`phase4-factor-develop`从`5c225a4`安全快进到远端`fb92672`，只审查其日频人工闭环建设；H1修复提交为`92ddb68`，本条Progress随后单独提交。当前本地提交尚未推送，分支领先`origin/phase4-factor-develop`。
+- 审查：对`5c225a4...fb92672`的M1—M9新增代码并行核对研究/晋级、计划/账本、API/调度/前端。实际复现单日创建两个45%批次、同票跨批误卖、自由成交绕过授权、跨服务提前commit、成交更正后状态漂移、未来30日pilot即时通过、未对账review仍ready等问题；完整证据和遗留见[`日频建设审查`](docs/research-runs/manual-daily-implementation-audit-2026-09-10.md)。其余远端新增不纳入本轮审查或修改。
+- 修复：每个信号日只创建一个交替sleeve，计划和账本卖出均按cohort隔离；到期退出不被blocked/reconcile取消。人工计划成交、授权激活、账本和计划状态改为顶层单事务；成交携带cohort，幂等冲突和更正链严格校验并重算item/plan/cohort。通用API拒绝无计划经济成交，前端改为查看计划、确认项后绑定回填。同步加固日频label字段、回测缺价/退出重试/ST停牌容量、晋级回撤/冻结证据/顺序门、授权竞争和有效期、holdout重封、同日对账review、上海交易日、bundle CLI往返、备份scope及API测试依赖。
+- 验证：当前macOS工作区后端全量`759 passed, 2 warnings`；日频专项`46 passed, 1 warning`；前端`15 passed`且`vue-tsc`、Vite构建通过，保留ECharts核心557.93KB构建提示；compileall、关键错误级Ruff、`git diff --check`和变更Markdown链接检查通过。两条warning分别为Starlette TestClient兼容弃用提示和既有撮合截断提示。
+- 边界：当前仍无可人工执行策略。日频组合回测缺公司行动/历史资格/manifest同等级证据；release/pilot缺数据库证据resolver；worker无生产handler和数据库级CAS；闭环API与统一幂等记录未补齐；日损失/回撤尚未接入成交前门；没有真实30日观察或用户真实成交。后续严格按审查文档H2—H6推进。
+- 入口：[`实施方案及H1记录`](docs/manual-daily-trading-implementation-plan.md#28-2026-09-10远端建设审查与h1加固记录)、[`日频建设审查`](docs/research-runs/manual-daily-implementation-audit-2026-09-10.md)、[`人工执行领域语言`](CONTEXT.md)。
+
 ### 2026-09-09 — M8前瞻门禁加固
 
 - 施工：M8终结报告现在必须注入经验证的交易日历，并严格要求观察日等于pilot启动日之后的连续30个交易日；观测少于30天、缺日或跨日后补齐均不能通过。API在终结前重新检查日历覆盖；`datetime`输入按其日期处理，日历不可用显式失败关闭。
