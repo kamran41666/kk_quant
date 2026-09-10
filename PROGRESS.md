@@ -17,6 +17,16 @@
 
 ## 记录
 
+### 2026-09-10 15:16 CST — H2b精确Arrow与证据目录验证
+
+- Git：`phase4-factor-develop`；提交`d5d10e7`已创建，本条Progress随后提交并推送。
+- Arrow：8个Parquet使用显式date32、int64、bool、decimal128金额/价格/收益schema；零行文件保留完整列、顺序、类型和nullable。cohort计划日期、预算、终态和关闭日合并进入signals证据，未另增合同外文件。
+- 哈希：每个Parquet保存row count、物理文件SHA-256、schema hash及按稳定主键排序的逻辑内容hash；JSON保存版本化schema和逻辑hash；manifest用去除自身hash字段后的规范内容计算自hash。
+- 发布：writer使用同父独占锁、随机staging、逐文件与目录fsync、完整目录自检、原子rename和父目录fsync。验证器要求恰好12个文件，拒绝额外/缺失文件、符号链接、路径逃逸、重复entry、字节/schema/行数/逻辑/manifest hash变化。
+- 验证：当前macOS后端全量`780 passed, 2 warnings`；v3/账本专项`17 passed`；compileall、关键错误级Ruff、`git diff --check`及变更Markdown链接检查通过。专项覆盖空公司行动Arrow schema、summary字节篡改、额外文件和目标不可覆盖。
+- 边界：输出目录内部证据已可验证，但受控输入文件正文及执行规则仍未进入证据目录；总体source replay、artifact pair注册与`portfolio_passed` resolver继续关闭。
+- 入口：[`Arrow检查点`](docs/manual-daily-trading-implementation-plan.md#35-h2b精确arrow与证据目录验证检查点)、[`组合证据合同`](docs/research-runs/manual-daily-portfolio-evidence-v1.md)、[`证据验证器`](quant_engine/backtest/manual_portfolio_evidence.py)。
+
 ### 2026-09-10 15:07 CST — H2b证据写出、指标与内部重放
 
 - Git：`phase4-factor-develop`；提交`28d99ec`已创建，本条Progress随后提交并推送。
