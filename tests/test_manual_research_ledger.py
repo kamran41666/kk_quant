@@ -7,6 +7,7 @@ import pandas as pd
 
 from quant_engine.backtest.manual_research_ledger import (
     ManualResearchLedger,
+    ResearchCohortLot,
     ResearchCorporateAction,
     ResearchExecutionIntent,
 )
@@ -218,3 +219,21 @@ def test_normalized_action_adapter_has_stable_ids_and_preserves_invalid_dates():
     assert first == second
     assert first[0].action_id == second[0].action_id
     assert first[0].pay_date < first[0].ex_date
+
+
+def test_sell_fees_use_final_sellable_quantity_after_bonus_lock():
+    ledger = ManualResearchLedger(100_000, cost_scenario="baseline")
+    ledger.lots[("locked", "600000.SH")] = ResearchCohortLot(
+        "locked", "600000.SH", 150, date(2027, 1, 4), Decimal("10"),
+        Decimal("1500"), [(date(2027, 1, 8), 50)],
+    )
+    attempt = ledger.execute_intent(
+        _intent("sell-unlocked-only", "locked", "sell", 150, day=date(2027, 1, 5), phase="close"),
+        bar=BAR, previous_bar={**BAR, "volume": 1_000_000}, historically_eligible=True,
+    )
+    trade = ledger.trades[-1]
+    assert attempt["filled_quantity"] == 100
+    assert Decimal(trade["gross"]) == Decimal("999.00")
+    assert Decimal(trade["transfer_fee"]) == Decimal("0.02")
+    assert Decimal(trade["stamp_duty"]) == Decimal("0.50")
+    assert Decimal(trade["total_fee"]) == Decimal("5.52")

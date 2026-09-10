@@ -797,3 +797,11 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - 输入身份覆盖dataset、日历、信号、历史资格、公司行动、benchmark和训练/验证artifact；bundle dataset hash或日历hash不一致直接拒绝。基准必须逐交易日覆盖，不前填缺日。
 - v3在内存形成signals、cohorts、intents、attempts、trades、corporate actions、positions、daily portfolio和benchmark九类明细；结果hash覆盖全部明细与质量错误。同一输入逐值稳定。
 - 已知未解释调整显式进入`quality_errors`，`promotion_eligible`在独立重放和artifact pair完成前固定为false。下一步实现固定12文件schema、原子写出、指标与独立replay。
+
+## 34. H2b证据写出与内部独立重放检查点
+
+- 新增独立`manual_portfolio_evidence.py`，不调用生产账本执行函数，从v3明细重算总收益、基准收益/超额、252日Sharpe、非负最大回撤、双边年化换手、费用和按逻辑intent去重的金额加权成交率。
+- 退出重试使用稳定`logical_intent_id`和递增attempt sequence，同一经济退出目标只进入一次成交率分母。成交记录增加执行序号；输入资格严格要求布尔，benchmark日期重复直接拒绝，期末日历不足或未完成cohort进入质量错误。
+- 修复锁定股份裁剪后的卖出费用：先确定最终可卖成交量，再按实际gross计算佣金、过户费和印花税。独立费用重算覆盖该反例。
+- v3结果以同父目录临时目录写出8个固定列schema Parquet及audit/replay/summary/manifest四个JSON，目标存在时拒绝覆盖；manifest保存其余11文件的size/SHA-256、策略core、scenario bundle、输入身份、指标和replay hash。Arrow精确类型与schema hash仍由下一检查点补齐。
+- 内部重放验证intent/attempt/fill关联、共享容量、gross/费用、现金、应收、cohort股数、持仓`close×quantity`、每日市值/权益和收益。尚未从受控输入正文复核原始价格、昨量、资格及action比例，故`source_and_execution_passed=false`、总体`passed=false`、artifact注册资格固定false。

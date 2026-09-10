@@ -65,10 +65,14 @@ class ResearchExecutionIntent:
     requested_quantity: int
     reference_price: Decimal | int | float | str
     reason: str
+    logical_intent_id: str | None = None
+    attempt_sequence: int = 1
 
     def __post_init__(self) -> None:
         if not self.intent_id or not self.cohort_id or not self.code:
             raise ValueError("intent_identity_required")
+        if self.attempt_sequence < 1:
+            raise ValueError("attempt_sequence_must_be_positive")
         if self.phase not in {"open", "close"} or self.side not in {"buy", "sell"}:
             raise ValueError("intent_phase_or_side_invalid")
         if isinstance(self.requested_quantity, bool) or self.requested_quantity <= 0:
@@ -80,6 +84,7 @@ class ResearchExecutionIntent:
             raise ValueError("reference_price_must_be_positive")
         object.__setattr__(self, "code", self.code.strip().upper())
         object.__setattr__(self, "reference_price", price)
+        object.__setattr__(self, "logical_intent_id", self.logical_intent_id or self.intent_id)
 
 
 @dataclass
@@ -180,6 +185,7 @@ class ManualResearchLedger:
         self._applied_actions: set[str] = set()
         self._listed_actions: set[str] = set()
         self._intent_ids: set[str] = set()
+        self._event_sequence = 0
 
     @property
     def receivable_cash(self) -> Decimal:
@@ -428,6 +434,7 @@ class ManualResearchLedger:
         requested_notional = _money(intent.reference_price * intent.requested_quantity)
         intent_row = {
             "intent_id": intent.intent_id, "date": intent.trade_date.isoformat(),
+            "logical_intent_id": intent.logical_intent_id,
             "phase": intent.phase, "cohort_id": intent.cohort_id, "code": intent.code,
             "side": intent.side, "requested_quantity": intent.requested_quantity,
             "reference_price": str(intent.reference_price),
@@ -476,21 +483,26 @@ class ManualResearchLedger:
             reason = "shared_capacity_or_lot_constraint"
         commission = transfer = stamp = total_fee = ZERO
         if reason is None:
-            gross = _money(price * quantity)
-            commission, transfer, stamp, total_fee = self._fees(gross, intent.side, intent.trade_date)
-            if intent.side == "buy":
+            if intent.side == "sell":
+                quantity = min(quantity, sellable)
+                if quantity <= 0:
+                    reason = "cohort_position_unavailable"
+            if reason is not None:
+                gross = ZERO
+            else:
+                gross = _money(price * quantity)
+                commission, transfer, stamp, total_fee = self._fees(gross, intent.side, intent.trade_date)
+            if intent.side == "buy" and reason is None:
                 while quantity >= LOT and self.cash < gross + total_fee:
                     quantity -= LOT
                     gross = _money(price * quantity)
                     commission, transfer, stamp, total_fee = self._fees(gross, intent.side, intent.trade_date) if quantity else (ZERO, ZERO, ZERO, ZERO)
                 if quantity <= 0:
                     reason = "cash_or_lot_constraint"
-            else:
-                quantity = min(quantity, sellable)
-                if quantity <= 0:
-                    reason = "cohort_position_unavailable"
         attempt = {
-            "attempt_id": f"{intent.intent_id}:attempt:1", "intent_id": intent.intent_id,
+            "attempt_id": f"{intent.intent_id}:attempt:{intent.attempt_sequence}", "intent_id": intent.intent_id,
+            "logical_intent_id": intent.logical_intent_id,
+            "attempt_sequence": intent.attempt_sequence,
             "date": intent.trade_date.isoformat(), "phase": intent.phase,
             "cohort_id": intent.cohort_id, "code": intent.code, "side": intent.side,
             "requested_quantity": intent.requested_quantity,
@@ -535,6 +547,7 @@ class ManualResearchLedger:
         attempt["capacity_used_after"] = self.capacity_used[(intent.trade_date, intent.code)]
         intent_row["status"] = "filled" if quantity == intent.requested_quantity else "partially_filled"
         intent_row["filled_quantity"] = quantity
+        self._event_sequence += 1
         self.trades.append({
             "trade_id": f"{intent.intent_id}:fill:1", "intent_id": intent.intent_id,
             "attempt_id": attempt["attempt_id"], "date": intent.trade_date.isoformat(),
@@ -543,6 +556,7 @@ class ManualResearchLedger:
             "gross": str(gross), "commission": str(commission),
             "transfer_fee": str(transfer), "stamp_duty": str(stamp),
             "total_fee": str(total_fee),
+            "event_sequence": self._event_sequence,
         })
         return attempt
 

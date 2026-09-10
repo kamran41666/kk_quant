@@ -112,3 +112,101 @@ def test_v3_fails_on_calendar_or_benchmark_evidence_and_surfaces_known_adjustmen
         input_manifest=_manifest(unresolved=50), start=days[0], end=days[-1],
     )
     assert result.quality_errors == ["unexplained_reference_adjustments"]
+
+
+def test_v3_metrics_replay_and_atomic_twelve_file_output(tmp_path):
+    days = [date(2027, 1, 4) + timedelta(days=index) for index in range(8)]
+    days = [day for day in days if day.weekday() < 5]
+    daily, eligibility, benchmark = _inputs(days)
+    result = run_manual_daily_portfolio_v3(
+        daily=daily, eligibility=eligibility, benchmark=benchmark,
+        signals={days[0]: {"600000.SH": 1}, days[1]: {"000001.SZ": 2}},
+        corporate_actions=[], calendar=Calendar(days), bundle=_bundle(),
+        input_manifest=_manifest(), start=days[0], end=days[-1], initial_capital=100_000,
+    )
+    metrics = result.metrics()
+    assert {
+        "total_return", "benchmark_total_return", "excess_return", "sharpe_252_rf0",
+        "max_drawdown_magnitude", "annual_turnover_double_sided",
+        "capacity_fill_rate_amount_weighted", "total_fees",
+    } <= set(metrics)
+    assert result.replay()["accounting_passed"] is True
+    assert result.replay()["passed"] is False
+    output = result.write_evidence(tmp_path / "evidence")
+    assert {path.name for path in output.iterdir()} == {
+        "signals.parquet", "order_intents.parquet", "order_attempts.parquet",
+        "trades.parquet", "corporate_actions.parquet", "positions.parquet",
+        "daily_portfolio.parquet", "benchmark.parquet", "audit.json",
+        "replay.json", "summary.json", "manifest.json",
+    }
+    manifest = __import__("json").loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert len(manifest["files"]) == 11
+    assert len(manifest["manifest_hash"]) == 64
+    assert manifest["eligible_for_artifact_registration"] is False
+    with pytest.raises(FileExistsError, match="output_exists"):
+        result.write_evidence(output)
+    result.daily[-1]["cash"] = "0"
+    replay = result.replay()
+    assert replay["passed"] is False
+    assert replay["first_difference"]["check"] in {"cash_replay", "equity_replay"}
+
+
+def test_exit_retries_share_one_logical_intent_denominator():
+    days = [date(2027, 1, 4) + timedelta(days=index) for index in range(10)]
+    days = [day for day in days if day.weekday() < 5]
+    daily, eligibility, benchmark = _inputs(days)
+    for day in (days[2], days[3]):
+        daily.loc[(daily["date"] == day) & (daily["code"] == "600000.SH"), "is_suspended"] = True
+    result = run_manual_daily_portfolio_v3(
+        daily=daily, eligibility=eligibility, benchmark=benchmark,
+        signals={days[0]: {"600000.SH": 1}}, corporate_actions=[],
+        calendar=Calendar(days), bundle=_bundle(), input_manifest=_manifest(),
+        start=days[0], end=days[-1], initial_capital=100_000,
+    )
+    exits = [row for row in result.intents if row["side"] == "sell"]
+    assert len(exits) == 3
+    assert len({row["logical_intent_id"] for row in exits}) == 1
+    assert result.metrics()["capacity_fill_rate_amount_weighted"] == "1"
+
+
+def test_v3_rejects_non_boolean_eligibility_and_action_source_mismatch():
+    days = [date(2027, 1, 4) + timedelta(days=index) for index in range(4)]
+    daily, eligibility, benchmark = _inputs(days)
+    eligibility["is_eligible"] = "False"
+    with pytest.raises(ValueError, match="eligibility_value_not_boolean"):
+        run_manual_daily_portfolio_v3(
+            daily=daily, eligibility=eligibility, benchmark=benchmark, signals={},
+            corporate_actions=[], calendar=Calendar(days), bundle=_bundle(),
+            input_manifest=_manifest(), start=days[0], end=days[-1],
+        )
+    eligibility["is_eligible"] = True
+    action = ResearchCorporateAction(
+        action_id="wrong-source", code="600000.SH", record_date=days[0],
+        ex_date=days[1], pay_date=days[2], stock_listing_date=None,
+        source_hash="9" * 64, cash_per_share="0.1", bonus_ratio="0",
+    )
+    with pytest.raises(ValueError, match="action_source_hash_mismatch"):
+        run_manual_daily_portfolio_v3(
+            daily=daily, eligibility=eligibility, benchmark=benchmark, signals={},
+            corporate_actions=[action], calendar=Calendar(days), bundle=_bundle(),
+            input_manifest=_manifest(), start=days[0], end=days[-1],
+        )
+
+
+def test_replay_detects_coordinated_position_and_daily_market_value_inflation():
+    days = [date(2027, 1, 4) + timedelta(days=index) for index in range(6)]
+    daily, eligibility, benchmark = _inputs(days)
+    result = run_manual_daily_portfolio_v3(
+        daily=daily, eligibility=eligibility, benchmark=benchmark,
+        signals={days[0]: {"600000.SH": 1}}, corporate_actions=[],
+        calendar=Calendar(days), bundle=_bundle(), input_manifest=_manifest(),
+        start=days[0], end=days[-1], initial_capital=100_000,
+    )
+    target_date = result.positions[0]["date"]
+    result.positions[0]["market_value"] = str(Decimal(result.positions[0]["market_value"]) + 10_000)
+    daily_row = next(row for row in result.daily if row["date"] == target_date)
+    daily_row["market_value"] = str(Decimal(daily_row["market_value"]) + 10_000)
+    daily_row["equity"] = str(Decimal(daily_row["equity"]) + 10_000)
+    replay = result.replay()
+    assert replay["accounting_passed"] is False
+    assert replay["first_difference"]["check"] == "position_market_value_replay"

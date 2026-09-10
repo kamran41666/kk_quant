@@ -6,12 +6,15 @@ from datetime import date
 from decimal import Decimal, ROUND_DOWN
 import hashlib
 import json
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
+import numpy as np
 
 from quant_engine.backtest.manual_research_ledger import (
     ManualResearchLedger,
+    RESEARCH_EXECUTION_COSTS,
     ResearchCorporateAction,
     ResearchExecutionIntent,
 )
@@ -98,8 +101,13 @@ class ManualDailyPortfolioV3Result:
     @property
     def result_hash(self) -> str:
         return _hash({
+            "protocol_version": "manual-daily-portfolio-v3",
+            "strategy_core_hash": self.bundle.strategy_core_hash,
             "bundle_hash": self.bundle.bundle_hash,
+            "cost_policy": RESEARCH_EXECUTION_COSTS[self.bundle.cost_scenario],
             "input_manifest_hash": self.input_manifest.manifest_hash,
+            "start_date": self.start_date, "end_date": self.end_date,
+            "initial_capital": self.initial_capital,
             "signals": self.signals, "cohorts": self.cohorts,
             "intents": self.intents, "attempts": self.attempts,
             "trades": self.trades, "corporate_actions": self.corporate_actions,
@@ -113,6 +121,21 @@ class ManualDailyPortfolioV3Result:
         # Independent replay and pair registration are intentionally required
         # before this can ever become true.
         return False
+
+    def metrics(self) -> dict[str, str | int]:
+        from quant_engine.backtest.manual_portfolio_evidence import calculate_portfolio_metrics
+
+        return calculate_portfolio_metrics(self)
+
+    def replay(self) -> dict[str, Any]:
+        from quant_engine.backtest.manual_portfolio_evidence import replay_portfolio_result
+
+        return replay_portfolio_result(self)
+
+    def write_evidence(self, output_dir: str | Path) -> Path:
+        from quant_engine.backtest.manual_portfolio_evidence import write_portfolio_evidence
+
+        return write_portfolio_evidence(self, output_dir)
 
 
 def _bar_map(frame: pd.DataFrame) -> dict[tuple[date, str], dict[str, Any]]:
@@ -137,12 +160,20 @@ def _eligibility_map(frame: pd.DataFrame) -> dict[tuple[date, str], bool]:
     rows["code"] = rows["code"].astype(str).str.upper()
     if rows.duplicated(["date", "code"]).any():
         raise ValueError("manual_v3_eligibility_rows_not_unique")
-    return {(row["date"], row["code"]): bool(row["is_eligible"]) for row in rows.to_dict("records")}
+    result = {}
+    for row in rows.to_dict("records"):
+        if not isinstance(row["is_eligible"], (bool, np.bool_)):
+            raise ValueError("manual_v3_eligibility_value_not_boolean")
+        result[(row["date"], row["code"])] = bool(row["is_eligible"])
+    return result
 
 
 def _benchmark_rows(frame: pd.DataFrame, days: Sequence[date]) -> list[dict[str, Any]]:
     if {"date", "close"} - set(frame.columns):
         raise ValueError("manual_v3_benchmark_fields_missing")
+    normalized_dates = frame["date"].map(_date)
+    if normalized_dates.duplicated().any():
+        raise ValueError("manual_v3_benchmark_dates_not_unique")
     values = {_date(row["date"]): _decimal(row["close"], "benchmark_close") for row in frame.to_dict("records")}
     if any(day not in values or values[day] <= 0 for day in days):
         raise ValueError("manual_v3_benchmark_coverage_insufficient")
@@ -190,8 +221,21 @@ def run_manual_daily_portfolio_v3(
         for day, values in signals.items()
     }
     benchmark_rows = _benchmark_rows(benchmark, days)
+    if any(action.source_hash != input_manifest.corporate_action_content_hash for action in corporate_actions):
+        raise ValueError("manual_v3_corporate_action_source_hash_mismatch")
     ledger = ManualResearchLedger(initial_capital, cost_scenario=bundle.cost_scenario)
     ledger.register_corporate_actions(list(corporate_actions))
+    action_definitions = [{
+        "action_id": action.action_id, "action_hash": action.action_hash,
+        "economic_key": action.economic_key, "date": (action.ex_date or action.record_date or start).isoformat(),
+        "stage": "definition", "code": action.code, "cohort_id": None,
+        "record_date": action.record_date.isoformat() if action.record_date else None,
+        "ex_date": action.ex_date.isoformat() if action.ex_date else None,
+        "pay_date": action.pay_date.isoformat() if action.pay_date else None,
+        "stock_listing_date": action.stock_listing_date.isoformat() if action.stock_listing_date else None,
+        "cash_per_share": str(action.cash_per_share), "bonus_ratio": str(action.bonus_ratio),
+        "allocation_verified": action.allocation_verified, "source_hash": action.source_hash,
+    } for action in sorted(corporate_actions, key=lambda item: (item.economic_key, item.action_id))]
     cohorts: list[dict[str, Any]] = []
     signal_rows: list[dict[str, Any]] = []
     daily_rows: list[dict[str, Any]] = []
@@ -227,6 +271,7 @@ def run_manual_daily_portfolio_v3(
                         phase="open", cohort_id=cohort["id"], code=code, side="buy",
                         requested_quantity=requested, reference_price=raw_reference,
                         reason="cohort_entry",
+                        logical_intent_id=f"{cohort['id']}:entry:{code}",
                     ),
                     bar=bar, previous_bar=previous_bar,
                     historically_eligible=eligibility_by_day.get((day, code), False),
@@ -249,11 +294,18 @@ def run_manual_daily_portfolio_v3(
                     engine_audit.append({"date": day.isoformat(), "code": code, "reason": "exit_reference_price_unavailable", "severity": "error"})
                     continue
                 ledger.execute_intent(
+                    # Retries get immutable attempt records under one logical
+                    # exit target, so they do not multiply the fill-rate denominator.
                     ResearchExecutionIntent(
                         intent_id=f"{cohort['id']}:close:{day.isoformat()}:{order}:{code}",
                         trade_date=day, phase="close", cohort_id=cohort["id"],
                         code=code, side="sell", requested_quantity=lot.quantity,
                         reference_price=reference, reason="cohort_exit",
+                        logical_intent_id=f"{cohort['id']}:exit:{code}",
+                        attempt_sequence=1 + sum(
+                            row.get("logical_intent_id") == f"{cohort['id']}:exit:{code}"
+                            for row in ledger.intents
+                        ),
                     ),
                     bar=bar, previous_bar=previous_bar, historically_eligible=True,
                 )
@@ -300,12 +352,25 @@ def run_manual_daily_portfolio_v3(
         *(item["reason"] for item in engine_audit if item.get("severity") == "error"),
         *(item["reason"] for item in ledger.corporate_action_audit if item.get("severity") == "error"),
         *(["unexplained_reference_adjustments"] if input_manifest.unresolved_adjustment_count else []),
+        *(["insufficient_forward_calendar"] if any(row["rank_status"] == "insufficient_forward_calendar" for row in signal_rows) else []),
+        *(["unfinished_cohorts_at_end"] if any(item["status"] in {"planned", "open", "exiting"} for item in cohorts) else []),
     })
+    cohort_by_signal = {item["signal_date"]: item for item in cohorts}
+    for signal_row in signal_rows:
+        cohort = cohort_by_signal.get(signal_row["signal_date"])
+        signal_row.update({
+            "cohort_id": cohort["id"] if cohort else None,
+            "entry_date": cohort["entry_date"] if cohort else None,
+            "planned_exit_date": cohort["exit_date"] if cohort else None,
+            "cohort_budget": cohort["budget"] if cohort else None,
+            "cohort_terminal_status": cohort["status"] if cohort else None,
+            "closed_date": cohort.get("closed_date") if cohort else None,
+        })
     return ManualDailyPortfolioV3Result(
         bundle=bundle, input_manifest=input_manifest, start_date=days[0], end_date=days[-1],
         initial_capital=_decimal(initial_capital, "initial_capital"), signals=signal_rows,
         cohorts=cohorts, intents=ledger.intents, attempts=ledger.attempts,
-        trades=ledger.trades, corporate_actions=ledger.corporate_actions,
+        trades=ledger.trades, corporate_actions=action_definitions + ledger.corporate_actions,
         positions=ledger.positions, daily=daily_rows, benchmark=benchmark_rows,
         audit=engine_audit + ledger.corporate_action_audit,
         quality_errors=quality_errors,
