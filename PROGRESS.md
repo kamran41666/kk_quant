@@ -17,6 +17,16 @@
 
 ## 记录
 
+### 2026-09-10 14:50 CST — H2b正式v3组合循环接通
+
+- Git：`phase4-factor-develop`；提交`b9c9383`已创建，本条Progress随后提交并推送。
+- 修改：新增`ManualPortfolioInputManifest`、`ManualDailyPortfolioV3Result`与正式`run_manual_daily_portfolio_v3`。v3使用cohort研究账本，固定执行公司行动结转→开盘进入→收盘到期退出/重试→估值→登记权益→捕获新信号；退出受阻持续占用sleeve，阻止超额新批次。
+- 证据：输入身份覆盖dataset、日历、信号、历史资格、公司行动、benchmark和训练/验证artifact；dataset/calendar不匹配或benchmark缺交易日直接拒绝。输出对象已保存signals、cohorts、intents、attempts、trades、actions、positions、daily和benchmark九类明细，result hash覆盖全部内容和质量错误。
+- 门禁：normalized-v2已知50条未解释调整通过`unresolved_adjustment_count`进入`quality_errors`；在固定12文件写出、独立replay和artifact pair完成前，`promotion_eligible`固定false，旧v2也继续不可晋级。
+- 验证：当前macOS后端全量`775 passed, 2 warnings`；v3及公司行动专项`12 passed`；compileall、关键错误级Ruff、`git diff --check`和变更Markdown链接检查通过。
+- 边界：manifest目前验证声明身份及日历绑定，尚未逐文件重算normalized输入hash；固定schema输出、原子目录写入、组合指标、独立账务重放和portfolio resolver仍未完成。
+- 入口：[`v3实施记录`](docs/manual-daily-trading-implementation-plan.md#33-h2b正式v3组合循环检查点)、[`组合证据合同`](docs/research-runs/manual-daily-portfolio-evidence-v1.md)、[`v3组合循环`](quant_engine/backtest/manual_daily_portfolio_v3.py)。
+
 ### 2026-09-10 14:41 CST — H2b cohort公司行动子账
 
 - Git：`phase4-factor-develop`；提交`6378438`已创建，本条Progress随后提交并推送。
