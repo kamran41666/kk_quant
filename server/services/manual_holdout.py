@@ -16,6 +16,7 @@ from server.models.database import ensure_savepoint_transaction
 from server.models.schema import (
     FactorExperiment,
     ManualHoldoutBinding,
+    ManualHoldoutEvaluation,
     ResearchHoldoutAccess,
     ResearchHoldoutWindow,
     ResearchEvidenceArtifact,
@@ -80,12 +81,12 @@ def _promotion_request_hash(release: StrategyRelease, evaluation: StrategyPromot
     return _hash(request)
 
 
-def _verify_portfolio_parent(db: Session, release: StrategyRelease) -> StrategyPromotionEvaluation:
+def _verify_portfolio_parent(db: Session, release: StrategyRelease, *, require_portfolio_status: bool = True) -> StrategyPromotionEvaluation:
     """Re-resolve the sole passed portfolio evaluation and its research parent."""
     from server.services.manual_evidence import _release_identity_valid
     from server.services.manual_portfolio_promotion import _research_evaluation_valid, resolve_portfolio_passed
 
-    if release.status != "portfolio_passed":
+    if require_portfolio_status and release.status != "portfolio_passed":
         raise ManualHoldoutError("release_must_be_portfolio_passed")
     if not _release_identity_valid(release):
         raise ManualHoldoutError("release_identity_invalid")
@@ -196,6 +197,18 @@ def _factor_experiment_overlap(db: Session, start: date, end: date) -> None:
             raise ManualHoldoutError("holdout_range_overlaps_factor_experiment")
 
 
+def _evaluation_scope_overlap(db: Session, start: date, end: date) -> None:
+    """A frozen evaluation reserves the complete source read scope."""
+    rows = db.scalars(select(ManualHoldoutEvaluation).where(
+        ManualHoldoutEvaluation.read_scope_start.is_not(None),
+        ManualHoldoutEvaluation.read_scope_end.is_not(None),
+    )).all()
+    for row in rows:
+        scope_start, scope_end = _date(row.read_scope_start, "evaluation_scope_start"), _date(row.read_scope_end, "evaluation_scope_end")
+        if start <= scope_end and end >= scope_start:
+            raise ManualHoldoutError("holdout_range_overlaps_evaluation_read_scope")
+
+
 def _protocol(release: StrategyRelease, evaluation: StrategyPromotionEvaluation, dataset_id: str, data_hash: str, start: date, end: date) -> dict[str, Any]:
     return {
         "protocol_version": "manual-holdout-preregistration-v1",
@@ -266,7 +279,22 @@ def create_manual_holdout(
         evaluation = _verify_portfolio_parent(db, release)
         _intervals_after_validation(db, evaluation, start)
         _lock_registry(db)
+        # The parent check above is intentionally outside the short registry
+        # lock.  Refresh both rows under that lock and refuse a concurrent
+        # release/evaluation change instead of binding stale evidence.
+        db.refresh(release)
+        fresh_evaluation = db.get(StrategyPromotionEvaluation, evaluation.id)
+        if (
+            fresh_evaluation is None
+            or release.status != "portfolio_passed"
+            or release.release_hash != evaluation.release_hash
+            or fresh_evaluation.evaluation_hash != evaluation.evaluation_hash
+            or fresh_evaluation.release_hash != release.release_hash
+        ):
+            raise ManualHoldoutError("holdout_parent_changed_during_create")
+        evaluation = fresh_evaluation
         _factor_experiment_overlap(db, start, end)
+        _evaluation_scope_overlap(db, start, end)
         protocol = _protocol(release, evaluation, dataset_id, data_content_hash, start, end)
         protocol_json = _canonical(protocol)
         protocol_hash = _hash(protocol)
@@ -399,7 +427,9 @@ def _artifact_snapshot(db: Session, release: StrategyRelease, evaluation: Strate
     refs.extend(_object(evaluation.evidence_refs_json, "portfolio_evaluation_refs").values())
     result: dict[str, tuple[Any, ...]] = {}
     for artifact_id in sorted(set(refs)):
-        row = db.get(ResearchEvidenceArtifact, artifact_id)
+        row = db.scalars(select(ResearchEvidenceArtifact).where(
+            ResearchEvidenceArtifact.id == artifact_id,
+        ).execution_options(populate_existing=True)).first()
         if row is None:
             raise ManualHoldoutError("holdout_parent_artifact_missing")
         result[artifact_id] = (row.id, row.status, row.evidence_hash, row.identity_hash, row.manifest_hash)

@@ -117,6 +117,18 @@ def ensure_factor_period_unreserved(db: Session, start_date: date | str, end_dat
         row_start, row_end = _date(row.start_date), _date(row.end_date)
         if start <= row_end and end >= row_start:
             raise HoldoutError("factor_period_reserved_for_manual_holdout")
+    # A completed/failed economic evaluation has already exposed the full
+    # normalized read scope.  Keep that scope reserved for ordinary factor
+    # research even after the window lifecycle reaches completed.
+    from server.models.schema import ManualHoldoutEvaluation
+    evaluations = db.scalars(select(ManualHoldoutEvaluation).where(
+        ManualHoldoutEvaluation.read_scope_start.is_not(None),
+        ManualHoldoutEvaluation.read_scope_end.is_not(None),
+    )).all()
+    for evaluation in evaluations:
+        scope_start, scope_end = _date(evaluation.read_scope_start), _date(evaluation.read_scope_end)
+        if start <= scope_end and end >= scope_start:
+            raise HoldoutError("factor_period_reserved_for_manual_holdout")
 
 
 def access_holdout(

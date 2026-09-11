@@ -799,6 +799,39 @@ class ManualHoldoutBinding(Base):
     created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
 
 
+class ManualHoldoutEvaluation(Base):
+    """One immutable economic evaluation request for a frozen holdout binding."""
+    __tablename__ = "manual_holdout_evaluation"
+    __table_args__ = (
+        UniqueConstraint("binding_id", name="uq_manual_holdout_evaluation_binding"),
+        UniqueConstraint("request_key", name="uq_manual_holdout_evaluation_request_key"),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed')",
+            name="ck_manual_holdout_evaluation_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    binding_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    input_json: Mapped[str] = mapped_column(Text, nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    lease_until: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    access_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    result_manifest_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    result_manifest_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    result_artifact_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    completed_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    read_scope_start: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    read_scope_end: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+
+
 class DailyDecision(Base):
     """Immutable daily signal decision bound to one release and authorization."""
     __tablename__ = "daily_decision"
@@ -1151,7 +1184,7 @@ class ManualBackupRecord(Base):
     account_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     backup_path: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    schema_version: Mapped[str] = mapped_column(String(30), nullable=False, default="manual-backup-v3")
+    schema_version: Mapped[str] = mapped_column(String(30), nullable=False, default="manual-backup-v4")
     row_counts: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="written")
     created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)

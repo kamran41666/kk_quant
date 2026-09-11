@@ -21,6 +21,7 @@
 | 日频组合证据读回补充规范 | [`research-runs/manual-daily-portfolio-evidence-v2.md`](research-runs/manual-daily-portfolio-evidence-v2.md) | 读取v2固定12文件、源receipt、独立replay及baseline/stress pair的补充规则 |
 | 日频组合数据库登记与晋级 | [`manual-portfolio-promotion.md`](manual-portfolio-promotion.md) | 数据库 pair 登记、上游血缘、portfolio resolver、评价链和 API 读回边界 |
 | H2c holdout预注册与访问 | [`manual-holdout-preregistration.md`](manual-holdout-preregistration.md) | 冻结窗口、策略绑定、访问事实、历史读取隔离、backup-v3元数据边界与尚未开放的经济评估 |
+| H2c 经济 holdout 评估 | [`manual-holdout-evaluation.md`](manual-holdout-evaluation.md) | 冻结输入、先访问后读取、同步执行、artifact 验证和 holdout 晋级门 |
 | 人工执行语言 | [`CONTEXT.md`](../CONTEXT.md) | 修改人工执行领域对象、状态或接口前统一术语 |
 
 ## 数据与研究

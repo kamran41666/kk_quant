@@ -865,3 +865,9 @@ v2实现固定12个证据文件。manifest保存完整`run_envelope`、源receip
 
 - 调度任务增加 lease token 并使用 CAS 语义约束领取、心跳和完成操作的归属；token 只证明数据库租约事实。
 - 本轮实测文件 SQLite 多进程抢同任务只有一份有效租约、过期同 worker 旧 token 的四种动作均拒绝、recover 竞争、handler 未提交写入回滚，以及 DB 非锁故障的有界退出。lease token/CAS 已有基础验证，但生产 handler、自动长任务续租和业务 exactly-once 仍未接入，不能把 token 视为完整 scheduler 能力。
+
+## 43. H2c经济 holdout评估
+
+- 旧 preregistration bundle 不变；评估唯一允许绑定新的 dataset manifest 与 benchmark receipt，整个输入 manifest 的读取范围在冻结时确定，不能在读入后重新封存。访问事实先于经济文件读取，phase heartbeat 不自动续租，失败不重封且输入不能变更。
+- 同步 API 与可复用 Python service 入口冻结 actor 与相对 source path，完成后原子保存 `holdout_result` artifact、evaluation 和 completed window；当前没有独立 CLI 命令。phase heartbeat 会在当前执行期间续租，但没有后台自动持续续租。完成表示结果经过验证，不表示满足晋级资格；技术失败将 evaluation 置为 `failed`，只有 promotion 经济门失败才追加 blocked evaluation，技术重试仅复用同一冻结输入。
+- resolver 复验真实 artifact/hash、window/evaluation completed、access binding、release/hash/core 和唯一 portfolio 父评价链，复用旧 portfolio 证据重验但不采信升级后的当前 status。经济门使用 binding 冻结的 `ManualDailyPromotionPolicyV1` 和未见样本 baseline/stress 指标。具体验收见 [`manual-holdout-evaluation.md`](manual-holdout-evaluation.md) 与 [`PROGRESS.md`](../PROGRESS.md)，本节不记录未完成验收数字。

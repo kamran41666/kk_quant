@@ -21,7 +21,11 @@ from server.config import settings
 from server.models.schema import (
     FactorCandidate,
     FactorExperiment,
+    ManualHoldoutBinding,
+    ManualHoldoutEvaluation,
     ResearchEvidenceArtifact,
+    ResearchHoldoutAccess,
+    ResearchHoldoutWindow,
     StrategyPromotionEvaluation,
     StrategyRelease,
     manual_now_str,
@@ -30,7 +34,7 @@ from server.models.schema import (
 from server.services.strategy_promotion import create_strategy_release
 
 
-RESOLVER_VERSION = "manual-release-evidence-v2"
+RESOLVER_VERSION = "manual-release-evidence-v3"
 _FACTOR_FILES = (
     "factor_values.parquet",
     "ic_series.parquet",
@@ -105,10 +109,26 @@ def _file_hash(path: Path) -> str:
 
 
 def _resolver_code_hash() -> str:
-    return _hash({
-        name: _file_hash(Path(__file__).with_name(name))
-        for name in ("manual_evidence.py", "manual_portfolio_promotion.py", "manual_portfolio_registration.py")
-    })
+    names = (
+        "manual_evidence.py", "manual_portfolio_promotion.py",
+        "manual_portfolio_registration.py", "manual_holdout_promotion.py",
+        "manual_holdout_evaluation.py",
+    )
+    files = {}
+    for name in names:
+        path = Path(__file__).with_name(name)
+        files[name] = _file_hash(path)
+    root = Path(__file__).resolve().parents[2]
+    for name in (
+        "server/services/manual_holdout_engine.py",
+        "quant_engine/backtest/manual_daily_portfolio_v3.py",
+        "quant_engine/backtest/manual_portfolio_sources.py",
+        "quant_engine/backtest/manual_portfolio_artifacts.py",
+        "quant_engine/backtest/manual_portfolio_evidence.py",
+    ):
+        path = root / name
+        files[name] = _file_hash(path)
+    return _hash(files)
 
 
 def _factor_artifact_manifest(artifact_dir: Path, allowed_root: Path) -> dict[str, Any]:
@@ -293,10 +313,82 @@ class ResolvedReleaseEvidence:
     checks: Mapping[str, bool]
     evidence_refs: Mapping[str, str]
     resolved_evidence_hash: str
+    # Read-only identity snapshot used to fence the final status CAS.  It is
+    # deliberately outside resolved_evidence_hash: economic evidence remains
+    # the resolver's content hash, while this snapshot protects its commit.
+    commit_snapshot: Mapping[str, Any] | None = None
 
     @property
     def passed(self) -> bool:
         return bool(self.checks) and all(self.checks.values())
+
+
+def holdout_commit_snapshot(db: Session, release_id: str) -> dict[str, Any]:
+    """Capture all DB facts which can affect a holdout promotion commit."""
+    db.expire_all()
+    release = db.get(StrategyRelease, release_id)
+    if release is None:
+        raise ManualEvidenceError("strategy_release_not_found")
+
+    def row_payload(row: Any) -> dict[str, Any]:
+        return {column.name: getattr(row, column.name) for column in row.__table__.columns}
+
+    def table_rows(model: Any, statement: Any) -> list[dict[str, Any]]:
+        result = db.scalars(statement.execution_options(populate_existing=True)).all()
+        return [row_payload(row) for row in result]
+
+    promotion_rows = table_rows(StrategyPromotionEvaluation, select(StrategyPromotionEvaluation).where(
+        StrategyPromotionEvaluation.release_id == release_id,
+    ).order_by(StrategyPromotionEvaluation.created_at.asc(), StrategyPromotionEvaluation.id.asc()))
+    artifact_ids: set[str] = set()
+    try:
+        release_refs = json.loads(release.research_evidence or "{}")
+        if isinstance(release_refs, dict):
+            artifact_ids.update(str(value) for key, value in release_refs.items() if key.endswith("_artifact_id"))
+        for promotion in promotion_rows:
+            refs = json.loads(promotion.get("evidence_refs_json") or "{}")
+            if isinstance(refs, dict):
+                artifact_ids.update(str(value) for key, value in refs.items() if key.endswith("_artifact_id"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        # The resolver will reject malformed JSON; retaining the raw release
+        # and evaluation bodies in the snapshot still fences the commit.
+        pass
+    binding_rows = db.scalars(select(ManualHoldoutBinding).where(
+        ManualHoldoutBinding.release_id == release_id,
+    ).order_by(ManualHoldoutBinding.created_at.asc(), ManualHoldoutBinding.id.asc()).execution_options(populate_existing=True)).all()
+    binding_payloads: list[dict[str, Any]] = []
+    for binding in binding_rows:
+        window = db.get(ResearchHoldoutWindow, binding.window_id)
+        evaluation = db.scalars(select(ManualHoldoutEvaluation).where(
+            ManualHoldoutEvaluation.binding_id == binding.id,
+        ).execution_options(populate_existing=True)).first()
+        artifact = db.get(ResearchEvidenceArtifact, evaluation.result_artifact_id) if evaluation and evaluation.result_artifact_id else None
+        if artifact:
+            artifact_ids.add(artifact.id)
+        accesses = table_rows(ResearchHoldoutAccess, select(ResearchHoldoutAccess).where(
+            ResearchHoldoutAccess.window_id == binding.window_id,
+        ).order_by(ResearchHoldoutAccess.accessed_at.asc(), ResearchHoldoutAccess.id.asc()))
+        binding_payloads.append({
+            "binding": row_payload(binding),
+            "window": row_payload(window) if window else None,
+            "evaluation": row_payload(evaluation) if evaluation else None,
+            "accesses": accesses,
+        })
+    artifact_rows = table_rows(ResearchEvidenceArtifact, select(ResearchEvidenceArtifact).where(
+        ResearchEvidenceArtifact.id.in_(tuple(sorted(artifact_ids)))
+    ).order_by(ResearchEvidenceArtifact.id.asc())) if artifact_ids else []
+    return {
+        "release": row_payload(release),
+        "promotions": promotion_rows,
+        "bindings": binding_payloads,
+        "artifacts": artifact_rows,
+    }
+
+
+def _holdout_snapshot_matches(db: Session, snapshot: Mapping[str, Any]) -> bool:
+    release = snapshot.get("release")
+    release_id = release.get("id") if isinstance(release, dict) else None
+    return bool(release_id) and holdout_commit_snapshot(db, str(release_id)) == dict(snapshot)
 
 
 def _resolve_research_passed(
@@ -363,6 +455,12 @@ def resolve_release_evidence(
         from server.services.manual_portfolio_promotion import resolve_portfolio_passed
 
         return resolve_portfolio_passed(db, release, evidence_refs)
+    if target_status == "holdout_passed":
+        # Keep the economic holdout resolver local to avoid importing the
+        # execution service (and its engine dependencies) at API startup.
+        from server.services.manual_holdout_promotion import resolve_holdout_passed
+
+        return resolve_holdout_passed(db, release, evidence_refs)
     reason = f"{target_status}_evidence_resolver_not_supported"
     return ResolvedReleaseEvidence(target_status, {reason: False}, dict(evidence_refs), _hash({
         "release_id": release.id, "release_hash": release.release_hash,
@@ -447,8 +545,21 @@ def advance_release_from_evidence(
         previous_evaluation_hash=previous.evaluation_hash if previous else "",
         evaluation_hash=_hash(evaluation_payload),
     )
-    db.add(evaluation)
     if resolved.passed:
+        if target_status == "holdout_passed":
+            if resolved.commit_snapshot is None:
+                db.rollback()
+                raise ManualEvidenceError("holdout_commit_snapshot_required")
+            # Serialize against holdout registration/access invalidation and
+            # re-read the complete set before the final release CAS.  The
+            # economic verifier is intentionally not rerun under this lock.
+            from server.services.research_holdout import _lock_registry
+
+            _lock_registry(db)
+            if not _holdout_snapshot_matches(db, resolved.commit_snapshot):
+                db.rollback()
+                raise ManualEvidenceError("holdout_commit_snapshot_changed")
+        db.add(evaluation)
         updated = db.query(StrategyRelease).filter(
             StrategyRelease.id == release.id,
             StrategyRelease.release_hash == release.release_hash,
@@ -457,6 +568,8 @@ def advance_release_from_evidence(
         if updated != 1:
             db.rollback()
             raise ManualEvidenceError("release_changed_during_promotion")
+    else:
+        db.add(evaluation)
     db.commit()
     db.refresh(evaluation)
     return evaluation

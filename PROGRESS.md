@@ -17,6 +17,15 @@
 
 ## 记录
 
+### 2026-09-11 16:23 CST — H2c经济holdout执行、晋级解析与统一验收
+
+- Git：基线 `a59dbb4`；分支 `phase4-factor-develop`；本条与本轮 18 个文件随统一提交/推送完成，实际功能 commit hash 以 Git 交付结果为准。机械代码、测试和文档写入及验证由 `gpt-5.6-luna` 完成，主模型负责架构审查、字段契约、并发边界和结果核对。
+- H2c：新增冻结输入、同步执行、lease/先持久 access、原子 `holdout_result` artifact、completed readback、严格 evidence API 和 `holdout_passed` resolver；经济门只使用 binding 冻结的 `ManualDailyPromotionPolicyV1`，完整 preregistered binding 集合必须全部完成、验证并通过，不能挑选窗口。resolver commit snapshot 覆盖 release、晋级链、binding/window/evaluation/access、holdout 与上游 artifacts，并在最终 CAS 前 fresh 比较。
+- API/证据：metadata/evidence 白名单不泄露绝对路径；promotion 后再次真实 verify readback；负收益完成结果保持 `portfolio_passed` 并追加 blocked evaluation；新增 binding、artifact 失效、access 篡改和缺 snapshot 均拒绝晋级。专题入口见 [`manual-holdout-evaluation.md`](docs/manual-holdout-evaluation.md) 与实施方案[`第43节`](docs/manual-daily-trading-implementation-plan.md#43-h2c经济-holdout评估)。
+- 备份/协议：人工备份已升级到 `manual-backup-v4`；文档补充固定尾部、完整 preregistered 集合、heartbeat 当前运行续租但无后台自动续租、技术失败与 promotion blocked 的区别、commit snapshot 并发边界。文档地图已加入经济 holdout 入口。
+- 验证：当前 macOS 工作区的 H2c 新专项 `23 passed, 1 warning`；后端全量 `/tmp/kk_quant_h2c_economic_full_pytest.log` 为 `859 passed, 2 warnings`（既有 Starlette TestClient 弃用及 matcher 截断警告），fixture 使用受控合成行情与真实文件/SQLite 读回链；`compileall quant_engine server tests`、本轮 Python 关键 Ruff、`git diff --check` 和修改 Markdown 本地链接检查通过。未运行前端（本轮无前端修改）。
+- 边界：当前仍未完成 H2 pilot；H3 production handlers/后台自动续租；H4 UI 与统一 HTTP 幂等；H5 数据修复后的真实研究重跑及 normalized-v2 50 条未知调整；H6 真实 30 日观察。以上测试使用受控真实文件与 SQLite fixture，不能替代真实市场资格、券商委托或真实前瞻观察。
+
 ### 2026-09-11 15:33 CST — H2c holdout预注册/访问隔离与H3 lease基础统一验收
 
 - Git：基线 `4288842`；分支 `phase4-factor-develop`；本轮由 `gpt-5.6-luna` 完成机械写入与测试，主模型负责架构审查和结果核对；本轮改动随记录统一提交推送，最终 hash 由 Git 交付确认。

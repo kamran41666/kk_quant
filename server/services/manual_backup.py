@@ -31,6 +31,7 @@ from server.models.schema import (
     ManualExecutionItem,
     ManualExecutionPlan,
     ManualHoldoutBinding,
+    ManualHoldoutEvaluation,
     ManualLedgerEvent,
     ManualPositionLot,
     ManualPositionSnapshot,
@@ -60,8 +61,9 @@ MANUAL_MODELS = (
     ManualReconciliation, ManualDailyJob, ManualValuation, ManualDailyReview,
     ResearchRevision, ManualCorporateActionFact, ManualProspectivePilot,
     ManualPilotObservation,
+    ManualHoldoutEvaluation,
 )
-SCHEMA_VERSION = "manual-backup-v3"
+SCHEMA_VERSION = "manual-backup-v4"
 
 
 def _json_value(value: Any) -> Any:

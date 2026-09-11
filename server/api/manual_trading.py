@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from quant_engine.data.calendar import TradingCalendar
 from server.models.database import get_db
-from server.models.schema import ManualAccount, ManualDailyJob, ManualDailyReview, ManualExecutionAuthorization, ManualExecutionConfirmation, ManualExecutionEvent, ManualExecutionItem, ManualExecutionPlan, ManualValuation, ResearchEvidenceArtifact, StrategyPromotionEvaluation, StrategyRelease, ManualHoldoutBinding, ResearchHoldoutWindow
+from server.models.schema import ManualAccount, ManualDailyJob, ManualDailyReview, ManualExecutionAuthorization, ManualExecutionConfirmation, ManualExecutionEvent, ManualExecutionItem, ManualExecutionPlan, ManualValuation, ResearchEvidenceArtifact, StrategyPromotionEvaluation, StrategyRelease, ManualHoldoutBinding, ManualHoldoutEvaluation, ResearchHoldoutWindow
 from server.services.manual_ledger import (
     ManualLedgerError,
     create_manual_account,
@@ -285,6 +285,33 @@ class HoldoutInvalidateRequest(StrictModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class HoldoutEvaluationCreateRequest(StrictModel):
+    """Only the operator and already-frozen source locators are accepted.
+
+    Strategy, signal, capital, cost and gate fields deliberately have no
+    representation in this request.  The binding protocol owns those values.
+    """
+    actor: str = Field(min_length=1, max_length=80)
+    dataset_manifest_path: str = Field(min_length=1)
+    benchmark_receipt_path: str = Field(min_length=1)
+
+    @field_validator("dataset_manifest_path", "benchmark_receipt_path")
+    @classmethod
+    def validate_relative_input_path(cls, value: str) -> str:
+        value = value.strip()
+        if not value or Path(value).is_absolute() or PureWindowsPath(value).is_absolute():
+            raise ValueError("holdout_input_path_must_be_relative")
+        if PureWindowsPath(value).drive or re.match(r"^[A-Za-z]:", value):
+            raise ValueError("holdout_input_path_must_be_relative")
+        if any(part == ".." for part in value.replace("\\", "/").split("/")):
+            raise ValueError("holdout_input_path_must_not_escape_root")
+        return value
+
+
+class HoldoutEvaluationRunRequest(StrictModel):
+    actor: str = Field(min_length=1, max_length=80)
+
+
 def _envelope(data: Any, *, as_of: str | None = None, evidence_status: str = "user_reported") -> dict[str, Any]:
     return {
         "data": data, "manual_execution": True, "broker_connected": False,
@@ -369,7 +396,7 @@ def get_release_evidence(release_id: str, db: Session = Depends(get_db)):
     ).order_by(StrategyPromotionEvaluation.created_at.asc())).all()
     artifact_ref_keys = {
         "training_artifact_id", "validation_artifact_id",
-        "baseline_artifact_id", "stress_artifact_id",
+        "baseline_artifact_id", "stress_artifact_id", "holdout_artifact_id",
     }
     try:
         release_refs = json.loads(release.research_evidence or "{}")
@@ -823,6 +850,61 @@ def _holdout_row(db: Session, binding_id: str) -> tuple[ManualHoldoutBinding, Re
     return binding, window
 
 
+def _holdout_evaluation_metadata(row: Any) -> dict[str, Any]:
+    """Serialize evaluation state without exposing frozen filesystem paths."""
+    allowed = (
+        "id", "binding_id", "input_hash", "request_key", "created_by", "status",
+        "attempt_count", "lease_until", "access_id", "result_manifest_sha256",
+        "result_artifact_id", "read_scope_start", "read_scope_end", "created_at",
+        "completed_at",
+    )
+    result = {name: getattr(row, name) for name in allowed if hasattr(row, name)}
+    if "created_by" in result and "actor" not in result:
+        result["actor"] = result["created_by"]
+    return result
+
+
+def _holdout_verified_evidence(payload: Any, artifact_id: str) -> dict[str, Any]:
+    """Expose the fixed verifier contract without filesystem locators."""
+    required = {
+        "artifact_id", "evaluation_id", "binding_id", "metrics", "independent_replays",
+        "quality_errors", "accesses", "pair_hash", "original_strategy_core_hash",
+        "derived_strategy_core_hash", "evaluation_core_hash", "parent_portfolio_evaluation_id",
+        "parent_portfolio_evaluation_hash", "verified",
+    }
+    if not isinstance(payload, dict) or not required.issubset(payload):
+        raise ValueError("holdout_verified_result_invalid")
+    if payload["artifact_id"] != artifact_id or payload["verified"] is not True:
+        raise ValueError("holdout_verified_result_identity_invalid")
+    return {
+        "artifact_id": artifact_id,
+        "metrics": payload["metrics"],
+        "hashes": {
+            "pair_hash": payload["pair_hash"],
+            "original_strategy_core_hash": payload["original_strategy_core_hash"],
+            "derived_strategy_core_hash": payload["derived_strategy_core_hash"],
+            "evaluation_core_hash": payload["evaluation_core_hash"],
+            "parent_portfolio_evaluation_hash": payload["parent_portfolio_evaluation_hash"],
+        },
+        "meta": {
+            "evaluation_id": payload["evaluation_id"],
+            "binding_id": payload["binding_id"],
+            "parent_portfolio_evaluation_id": payload["parent_portfolio_evaluation_id"],
+            "independent_replays": payload["independent_replays"],
+            "quality_errors": payload["quality_errors"],
+            "accesses": payload["accesses"],
+            "verified": payload["verified"],
+        },
+    }
+
+
+def _holdout_evaluation_service() -> Any:
+    """Load the executor without making engine dependencies API startup work."""
+    from server.services import manual_holdout_evaluation
+
+    return manual_holdout_evaluation
+
+
 @router.post("/holdouts", status_code=201)
 def create_holdout_route(
     req: HoldoutCreateRequest,
@@ -890,6 +972,88 @@ def invalidate_holdout_route(binding_id: str, req: HoldoutInvalidateRequest, db:
     except OSError as exc:
         raise _error(ValueError("holdout_evidence_unavailable")) from exc
     except ValueError as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/holdouts/{binding_id}/evaluations", status_code=201)
+def freeze_holdout_evaluation_route(
+    binding_id: str,
+    req: HoldoutEvaluationCreateRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=160),
+    db: Session = Depends(get_db),
+):
+    try:
+        service = _holdout_evaluation_service()
+        row = service.freeze_holdout_evaluation(
+            db, binding_id=binding_id, actor=req.actor,
+            dataset_manifest_path=req.dataset_manifest_path,
+            benchmark_receipt_path=req.benchmark_receipt_path,
+            idempotency_key=idempotency_key,
+        )
+        return _envelope(_holdout_evaluation_metadata(row), evidence_status="holdout_evaluation_frozen")
+    except OSError as exc:
+        raise _error(ValueError("holdout_evidence_unavailable")) from exc
+    except (ValueError, TypeError) as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/holdout-evaluations/{evaluation_id}/run")
+def run_holdout_evaluation_route(
+    evaluation_id: str,
+    req: HoldoutEvaluationRunRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        service = _holdout_evaluation_service()
+        row = service.run_holdout_evaluation(db, evaluation_id=evaluation_id, actor=req.actor)
+        return _envelope(_holdout_evaluation_metadata(row), evidence_status="holdout_evaluation_completed" if getattr(row, "status", None) == "completed" else getattr(row, "status", "database_resolved"))
+    except OSError as exc:
+        raise _error(ValueError("holdout_evidence_unavailable")) from exc
+    except (ValueError, TypeError) as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/holdout-evaluations/{evaluation_id}")
+def get_holdout_evaluation(evaluation_id: str, db: Session = Depends(get_db)):
+    try:
+        row = db.get(ManualHoldoutEvaluation, evaluation_id)
+        if row is None:
+            raise ValueError("holdout_evaluation_not_found")
+        return _envelope(_holdout_evaluation_metadata(row), evidence_status="database_resolved")
+    except (ValueError, TypeError) as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/holdout-evaluations/{evaluation_id}/evidence")
+def get_holdout_evaluation_evidence(evaluation_id: str, db: Session = Depends(get_db)):
+    try:
+        row = db.get(ManualHoldoutEvaluation, evaluation_id)
+        if row is None:
+            raise ValueError("holdout_evaluation_not_found")
+        service = _holdout_evaluation_service()
+        artifact_id = getattr(row, "artifact_id", None) or getattr(row, "result_artifact_id", None)
+        if getattr(row, "status", None) != "completed" or not artifact_id:
+            raise ValueError("holdout_evaluation_not_completed")
+        payload = service.verify_completed_holdout(db, artifact_id)
+        evidence = _holdout_verified_evidence(payload, artifact_id)
+        artifact = db.get(ResearchEvidenceArtifact, artifact_id)
+        if artifact is None:
+            raise ValueError("holdout_result_artifact_invalid")
+        evidence.setdefault("hashes", {}).update({
+            "identity_hash": artifact.identity_hash,
+            "manifest_hash": artifact.manifest_hash,
+            "evidence_hash": artifact.evidence_hash,
+            "manifest_sha256": getattr(row, "result_manifest_sha256", None),
+        })
+        evidence.setdefault("meta", {}).update({
+            "evaluation_id": evaluation_id,
+            "binding_id": getattr(row, "binding_id", None),
+            "status": getattr(row, "status", None),
+        })
+        return _envelope(evidence, evidence_status="holdout_evidence_verified")
+    except OSError as exc:
+        raise _error(ValueError("holdout_evidence_unavailable")) from exc
+    except (ValueError, TypeError) as exc:
         raise _error(exc) from exc
 
 
