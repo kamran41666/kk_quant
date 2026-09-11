@@ -2,7 +2,7 @@
 
 > 类型：active-research-contract
 > 适用阶段：H2b / `research_passed → portfolio_passed`
-> 当前实现状态：合同已冻结；v3循环、精确Arrow证据、目录验证、内部账务与基础源执行重放已完成；公司行动经济重算深化和artifact resolver尚未完成
+> 当前实现状态：合同已冻结；v3循环、精确Arrow证据、目录验证、内部账务、公司行动经济重算和源执行重放已完成；v2读回补充规范见 [`manual-daily-portfolio-evidence-v2.md`](manual-daily-portfolio-evidence-v2.md)，artifact pair登记与数据库 resolver尚未完成
 
 ## 1. 目标
 
@@ -133,7 +133,7 @@ fill_rate   = numerator / denominator
 ## 10. 当前施工顺序
 
 1. 已完成：前一交易日容量、1%/0.5%成本口径、`strategy_core_hash`和追加式晋级评价哈希链。
-2. 已完成底层模块：提取cohort-aware原子成交和共享容量池；尚未接入正式v3组合循环。
+2. 已完成底层模块：提取cohort-aware原子成交和共享容量池，并已接入正式v3组合循环。
 3. 已完成：历史资格进入原子买入门；公司行动cohort子账覆盖登记、应收、派息、红股分配和上市锁定，并已接入正式v3循环。
 4. 已完成内部证据层：v3保存signals/cohorts/intents/attempts/trades/actions/positions/daily/benchmark，并以固定Arrow schema的12文件、物理/schema/逻辑三层hash和不可覆盖原子目录写出；cohort终态合并到signals证据。
 5. 已完成源重放：受控输入重新从磁盘核验并加载，独立检查日历、benchmark、signals、执行与估值原价、滑点、昨量容量、历史资格和T+1；公司行动从源正文重建登记权益、税后现金分币、账户级红股最大余数分配、派息到账、上市日及逐cohort可卖股份。

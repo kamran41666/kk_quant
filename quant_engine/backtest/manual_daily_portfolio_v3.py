@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal, ROUND_DOWN
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Sequence
 
 import pandas as pd
 import numpy as np
@@ -87,8 +88,14 @@ class ManualPortfolioInputManifest:
 
     @property
     def source_files_complete(self) -> bool:
-        roles = {str(item.get("role")) for item in self.source_files}
-        return roles == {"daily", "actions", "securities", "calendar", "benchmark", "signals"}
+        required = {"daily", "actions", "securities", "calendar", "benchmark", "signals"}
+        if len(self.source_files) != len(required):
+            return False
+        if any(not isinstance(item, Mapping) for item in self.source_files):
+            return False
+        roles = [str(item.get("role")) for item in self.source_files]
+        paths = [str(item.get("path")) for item in self.source_files]
+        return set(roles) == required and len(set(roles)) == len(required) and len(set(paths)) == len(required)
 
 
 @dataclass

@@ -23,6 +23,7 @@ from quant_engine.trading.effective_rules import EffectiveDatedTradingRuleRegist
 
 ZERO = Decimal("0")
 CENT = Decimal("0.01")
+EIGHTEEN_PLACES = Decimal("1e-18")
 
 
 def _decimal(value: Any, field_name: str) -> Decimal:
@@ -53,6 +54,11 @@ def _file_hash(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _quantized_equal(left: Any, right: Any, quantum: Decimal = EIGHTEEN_PLACES) -> bool:
+    """Compare persisted ratio-like values at the Arrow decimal precision."""
+    return _decimal(left, "left").quantize(quantum) == _decimal(right, "right").quantize(quantum)
 
 
 def _allocate_source_cash(
@@ -376,8 +382,8 @@ def replay_portfolio_result(result: Any, sources: Any | None = None) -> dict[str
                     if (
                         recorded["date"] != day.isoformat()
                         or _decimal(recorded["close"], "benchmark_close") != close
-                        or _decimal(recorded["nav"], "benchmark_nav") != close / origin
-                        or _decimal(recorded["daily_return"], "benchmark_return") != close / prior - Decimal("1")
+                        or not _quantized_equal(recorded["nav"], close / origin)
+                        or not _quantized_equal(recorded["daily_return"], close / prior - Decimal("1"))
                     ):
                         benchmark_ok = False
                         break
@@ -390,11 +396,22 @@ def replay_portfolio_result(result: Any, sources: Any | None = None) -> dict[str
                 if result.start_date <= day <= result.end_date
                 for code, score in values.items()
             }
+            signal_keys = [(row["signal_date"], row["code"]) for row in result.signals]
+            if len(signal_keys) != len(set(signal_keys)):
+                fail("signal_rows_unique")
             recorded_signals = {
                 (row["signal_date"], row["code"]): _decimal(row["score"], "recorded_signal")
                 for row in result.signals
             }
-            source_checks["signal_source"] = expected_signals == recorded_signals
+            source_checks["signal_source"] = (
+                set(expected_signals) == set(recorded_signals)
+                and len(expected_signals) == len(recorded_signals)
+                and all(
+                    _quantized_equal(expected_signals[key], recorded_signals[key])
+                    for key in expected_signals
+                )
+                and not any(item["check"] == "signal_rows_unique" for item in errors)
+            )
 
             day_index = {day: index for index, day in enumerate(fresh["calendar"])}
             costs = RESEARCH_EXECUTION_COSTS[result.bundle.cost_scenario]
@@ -1005,24 +1022,38 @@ def write_portfolio_evidence(result: Any, output_dir: str | Path, *, sources: An
             table = _table(rows_by_file[name], schema)
             pq.write_table(table, temporary / name, compression="zstd")
             tables[name] = table
-        replay = replay_portfolio_result(result, sources=sources)
-        metrics = calculate_portfolio_metrics(result)
-        summary = {
-            "protocol_version": "manual-daily-portfolio-summary-v3",
-            "result_hash": result.result_hash, "metrics": metrics,
-            "quality_errors": result.quality_errors,
-            "accounting_replay_passed": replay["accounting_passed"],
-            "source_and_execution_passed": replay["source_and_execution_passed"],
-            "promotion_eligible": False,
-            "evidence_status": "unregistered",
-        }
+        # The generator object is not the persisted contract: Arrow decimal
+        # columns quantize values on disk.  Reconstruct and audit the exact
+        # bytes that will be consumed by the v2 reader.
         audit = {
             "schema_version": "manual-portfolio-audit-v1",
             "items": result.audit, "quality_errors": result.quality_errors,
             "error_count": sum(item.get("severity") == "error" for item in result.audit),
             "warning_count": sum(item.get("severity") == "warning" for item in result.audit),
         }
-        (temporary / "audit.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        (temporary / "audit.json").write_text(
+            json.dumps(audit, ensure_ascii=False, indent=2, default=str), encoding="utf-8",
+        )
+        from quant_engine.backtest.manual_portfolio_artifacts import (
+            ARTIFACT_VERSION, reconstruct_result, run_envelope,
+        )
+        envelope = run_envelope(result)
+        persisted = reconstruct_result(
+            envelope, result.input_manifest.__dict__,
+            {name: pq.read_table(temporary / name) for name in _ARROW_SCHEMAS}, audit,
+        )
+        generator_result_hash = result.result_hash
+        replay = replay_portfolio_result(persisted, sources=sources)
+        metrics = calculate_portfolio_metrics(persisted)
+        summary = {
+            "protocol_version": "manual-daily-portfolio-summary-v3",
+            "result_hash": persisted.result_hash, "generator_result_hash": generator_result_hash,
+            "metrics": metrics, "quality_errors": persisted.quality_errors,
+            "accounting_replay_passed": replay["accounting_passed"],
+            "source_and_execution_passed": replay["source_and_execution_passed"],
+            "promotion_eligible": False,
+            "evidence_status": "unregistered",
+        }
         (temporary / "replay.json").write_text(json.dumps(replay, ensure_ascii=False, indent=2), encoding="utf-8")
         (temporary / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         files = [
@@ -1035,17 +1066,24 @@ def write_portfolio_evidence(result: Any, output_dir: str | Path, *, sources: An
         )
         files.sort(key=lambda item: item["path"])
         manifest = {
-            "protocol_version": "manual-daily-portfolio-evidence-v1",
-            "strategy_core_hash": result.bundle.strategy_core_hash,
-            "scenario_bundle_hash": result.bundle.bundle_hash,
-            "scenario": result.bundle.cost_scenario,
+            "protocol_version": ARTIFACT_VERSION,
+            "generated_at": pd.Timestamp.now(tz="UTC").isoformat(),
+            "strategy_core_hash": persisted.bundle.strategy_core_hash,
+            "scenario_bundle_hash": persisted.bundle.bundle_hash,
+            "scenario": persisted.bundle.cost_scenario,
             "input_manifest": result.input_manifest.__dict__,
-            "input_manifest_hash": result.input_manifest.manifest_hash,
-            "result_hash": result.result_hash,
+            "input_manifest_hash": persisted.input_manifest.manifest_hash,
+            "result_hash": persisted.result_hash,
+            "generator_result_hash": generator_result_hash,
             "metrics": metrics,
             "replay_hash": replay["replay_hash"],
-            "quality_errors": result.quality_errors,
-            "eligible_for_artifact_registration": replay["passed"] and not result.quality_errors,
+            "quality_errors": persisted.quality_errors,
+            "eligible_for_artifact_registration": replay["passed"] and not persisted.quality_errors,
+            "run_envelope": envelope,
+            "source_locator": (
+                sources.source_locator() if sources is not None
+                and hasattr(sources, "source_locator") else None
+            ),
             "files": files,
         }
         manifest["manifest_hash"] = _hash(manifest)
@@ -1115,10 +1153,16 @@ def verify_portfolio_evidence_directory(source: str | Path) -> dict[str, Any]:
             schema = _ARROW_SCHEMAS[name]
             if not table.schema.equals(schema, check_metadata=True):
                 raise ValueError(f"portfolio_evidence_schema_mismatch:{name}")
+            if any(table.column(field.name).null_count for field in schema if not field.nullable):
+                raise ValueError(f"portfolio_evidence_null_value:{name}")
             if _hash(_schema_identity(schema)) != entry.get("schema_hash"):
                 raise ValueError(f"portfolio_evidence_schema_hash_mismatch:{name}")
             if table.num_rows != int(entry.get("row_count", -1)):
                 raise ValueError(f"portfolio_evidence_row_count_mismatch:{name}")
+            primary_key = _PRIMARY_KEYS[name]
+            keys = [tuple(row.get(field) for field in primary_key) for row in table.to_pylist()]
+            if len(keys) != len(set(keys)):
+                raise ValueError(f"portfolio_evidence_primary_key_mismatch:{name}")
             if _hash(_logical_rows(table, _PRIMARY_KEYS[name])) != entry.get("logical_content_hash"):
                 raise ValueError(f"portfolio_evidence_logical_hash_mismatch:{name}")
         else:

@@ -1,11 +1,11 @@
 """Verified file-backed inputs for manual-daily portfolio evidence."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date
 import hashlib
 import json
-from pathlib import Path
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import pandas as pd
@@ -28,18 +28,87 @@ def _hash(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _controlled_file(configured: str | Path, manifest_dir: Path, root: Path) -> Path:
+def _controlled_file(
+    configured: str | Path,
+    base: Path,
+    root: Path,
+    *,
+    allow_absolute: bool = False,
+) -> Path:
+    """Resolve one controlled file after checking every path component.
+
+    ``allow_absolute`` is only for the loader's explicit API arguments. Paths
+    carried by a dataset manifest or artifact locator are always relative.
+    Checking before ``resolve`` is essential: checking ``is_symlink`` after
+    resolving can never detect a symlink in the original path.
+    """
     supplied = Path(configured)
-    candidates = (supplied, manifest_dir / supplied.name)
-    path = next((item for item in candidates if item.exists()), None)
-    if path is None:
+    if supplied.is_absolute() and not allow_absolute:
+        raise ValueError(f"verified_source_path_absolute:{supplied.name}")
+    if ".." in supplied.parts:
+        raise ValueError(f"verified_source_path_escape:{supplied.name}")
+    candidate = supplied if supplied.is_absolute() else base / supplied
+    if candidate.is_absolute():
+        # Permit an alias such as macOS /var for an allowed root under
+        # /private/var, but reject symlinks introduced below that root.
+        cursor = Path(candidate.anchor)
+        for part in candidate.parts[1:]:
+            cursor /= part
+            if cursor.is_symlink():
+                if cursor.parent.resolve(strict=False).is_relative_to(root):
+                    raise ValueError(f"verified_source_file_symlink:{supplied.name}")
+                resolved_cursor = cursor.resolve(strict=False)
+                if not root.is_relative_to(resolved_cursor):
+                    raise ValueError(f"verified_source_file_symlink:{supplied.name}")
+    else:
+        try:
+            raw_relative = candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"verified_source_path_escape:{supplied.name}") from exc
+        cursor = root
+        for part in raw_relative.parts:
+            cursor /= part
+            if cursor.is_symlink():
+                raise ValueError(f"verified_source_file_symlink:{supplied.name}")
+    resolved_candidate = candidate.resolve(strict=False)
+    try:
+        relative = resolved_candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"verified_source_path_escape:{supplied.name}") from exc
+    cursor = root
+    for part in relative.parts:
+        cursor /= part
+        if cursor.is_symlink():
+            raise ValueError(f"verified_source_file_symlink:{supplied.name}")
+    if not resolved_candidate.exists():
         raise FileNotFoundError(f"verified_source_file_missing:{supplied.name}")
-    if path.is_symlink() or not path.is_file():
-        raise ValueError(f"verified_source_file_invalid:{path.name}")
-    resolved = path.resolve(strict=True)
-    if resolved != root and root not in resolved.parents:
-        raise ValueError(f"verified_source_path_escape:{path.name}")
-    return resolved
+    if not resolved_candidate.is_file():
+        raise ValueError(f"verified_source_file_invalid:{supplied.name}")
+    return resolved_candidate.resolve(strict=True)
+
+
+def _manifest_entry_file(configured: str | Path, manifest_dir: Path, root: Path) -> Path:
+    """Load a normalized file, with a narrow legacy absolute-path fallback."""
+    raw = str(configured)
+    windows_path = PureWindowsPath(raw)
+    supplied = Path(configured)
+    if windows_path.is_absolute() and not supplied.is_absolute():
+        # On POSIX, ``Path`` does not recognize a Windows drive path.
+        supplied = Path(windows_path.name)
+    if supplied.is_absolute():
+        try:
+            return _controlled_file(supplied, manifest_dir, root, allow_absolute=True)
+        except (ValueError, FileNotFoundError) as exc:
+            if "symlink" in str(exc):
+                raise
+            # Existing, unsafe local paths must fail closed. A fallback is
+            # allowed only when the old absolute target is absent or outside
+            # this controlled root, and the local basename is a real file.
+            original = Path(configured)
+            if original.exists() and (original.is_symlink() or original.resolve().is_relative_to(root)):
+                raise
+            return _controlled_file(windows_path.name, manifest_dir, root)
+    return _controlled_file(supplied, manifest_dir, root)
 
 
 @dataclass(frozen=True)
@@ -69,27 +138,42 @@ class VerifiedPortfolioSources:
     input_manifest: ManualPortfolioInputManifest
     source_root: Path
     signal_value_column: str = "factor"
+    receipt_files: tuple[dict[str, Any], ...] = ()
+
+    def source_locator(self) -> dict[str, Any]:
+        return {
+            "receipts": [dict(item) for item in self.receipt_files],
+            "signal_value_column": self.signal_value_column,
+        }
 
     def verify_files(self) -> bool:
         try:
-            for item in self.input_manifest.source_files:
-                path = (self.source_root / str(item["path"])).resolve(strict=True)
-                if path.is_symlink() or self.source_root not in path.parents:
-                    return False
+            if not self.input_manifest.source_files_complete:
+                return False
+            entries = list(self.input_manifest.source_files) + list(self.receipt_files)
+            if self.receipt_files and (
+                len(self.receipt_files) != 2
+                or any(not isinstance(item, dict) for item in self.receipt_files)
+                or {item.get("role") for item in self.receipt_files}
+                != {"dataset_manifest", "benchmark_receipt"}
+            ):
+                return False
+            for item in entries:
+                path = _controlled_file(item["path"], self.source_root, self.source_root)
                 if path.stat().st_size != int(item["size"]) or _hash_file(path) != item["sha256"]:
                     return False
         except (KeyError, OSError, TypeError, ValueError):
             return False
-        return self.input_manifest.source_files_complete
+        return True
 
     def source_path(self, role: str) -> Path:
         item = next((value for value in self.input_manifest.source_files if value.get("role") == role), None)
         if item is None:
             raise KeyError(f"verified_source_role_missing:{role}")
-        path = (self.source_root / str(item["path"])).resolve(strict=True)
-        if self.source_root not in path.parents or path.is_symlink():
-            raise ValueError(f"verified_source_path_invalid:{role}")
-        return path
+        try:
+            return _controlled_file(item["path"], self.source_root, self.source_root)
+        except (OSError, TypeError, ValueError) as exc:
+            raise ValueError(f"verified_source_path_invalid:{role}") from exc
 
     def reload(self) -> dict[str, Any]:
         if not self.verify_files():
@@ -98,6 +182,10 @@ class VerifiedPortfolioSources:
         securities = pd.read_parquet(self.source_path("securities"))
         actions_frame = pd.read_parquet(self.source_path("actions"))
         signal_frame = pd.read_parquet(self.source_path("signals"))
+        if {"date", "code", self.signal_value_column} - set(signal_frame.columns):
+            raise ValueError("signal_source_fields_missing")
+        if signal_frame.duplicated(["date", "code"]).any():
+            raise ValueError("signal_source_rows_not_unique")
         signals: dict[date, dict[str, Any]] = {}
         for row in signal_frame[["date", "code", self.signal_value_column]].to_dict("records"):
             if pd.isna(row[self.signal_value_column]):
@@ -155,9 +243,13 @@ def load_verified_portfolio_sources(
     signal_value_column: str = "factor",
 ) -> VerifiedPortfolioSources:
     root = Path(allowed_root).resolve(strict=True)
-    dataset_manifest_file = _controlled_file(dataset_manifest_path, Path(dataset_manifest_path).parent, root)
-    benchmark_receipt_file = _controlled_file(benchmark_receipt_path, Path(benchmark_receipt_path).parent, root)
-    signal_file = _controlled_file(signal_path, Path(signal_path).parent, root)
+    dataset_manifest_file = _controlled_file(
+        dataset_manifest_path, root, root, allow_absolute=True,
+    )
+    benchmark_receipt_file = _controlled_file(
+        benchmark_receipt_path, root, root, allow_absolute=True,
+    )
+    signal_file = _controlled_file(signal_path, root, root, allow_absolute=True)
     try:
         dataset_manifest = json.loads(dataset_manifest_file.read_text(encoding="utf-8"))
         benchmark_receipt = json.loads(benchmark_receipt_file.read_text(encoding="utf-8"))
@@ -170,7 +262,10 @@ def load_verified_portfolio_sources(
     source_entries = []
     for role in ("daily", "actions", "securities", "calendar"):
         item = files[role]
-        path = _controlled_file(item["path"], dataset_manifest_file.parent, root)
+        # Dataset fixtures before the v2 locator used absolute paths. Accept
+        # those only while loading the legacy manifest; the emitted
+        # ``source_files`` and v2 locator are always normalized relative paths.
+        path = _manifest_entry_file(item["path"], dataset_manifest_file.parent, root)
         actual = _hash_file(path)
         if actual != item.get("sha256"):
             raise ValueError(f"normalized_source_hash_mismatch:{role}")
@@ -188,6 +283,7 @@ def load_verified_portfolio_sources(
         raise ValueError("normalized_manifest_content_hash_mismatch")
     benchmark_path = _controlled_file(
         benchmark_receipt_file.with_suffix(".parquet"), benchmark_receipt_file.parent, root,
+        allow_absolute=True,
     )
     if _hash_file(benchmark_path) != benchmark_receipt.get("sha256"):
         raise ValueError("benchmark_source_hash_mismatch")
@@ -240,6 +336,10 @@ def load_verified_portfolio_sources(
         corporate_actions=tuple(load_research_corporate_actions(actions_frame, source_hash=files["actions"]["sha256"])),
         calendar=FrozenTradingCalendar(days, calendar_hash), input_manifest=manifest,
         source_root=root, signal_value_column=signal_value_column,
+        receipt_files=tuple(sorted((
+            _source_entry("dataset_manifest", dataset_manifest_file, root),
+            _source_entry("benchmark_receipt", benchmark_receipt_file, root),
+        ), key=lambda item: item["role"])),
     )
     if not result.verify_files():
         raise ValueError("verified_source_files_changed_during_load")

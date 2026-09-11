@@ -4,7 +4,7 @@
 > 版本：manual-daily-v1
 > 日期：2026-09-09（Asia/Shanghai）
 > 用户决定：日频决策；所有真实买入和卖出均由用户在券商端人工完成；用户承诺严格按系统计划操作并回填实际结果
-> 当前状态：方案已冻结，尚未实施；现有因子候选没有人工执行资格
+> 当前状态：M1—M9组件已建设；H2—H6收口以 [`PROGRESS.md`](../PROGRESS.md) 和最新审查为准，现有因子候选没有人工执行资格
 
 ## 1. 施工目标
 
@@ -839,3 +839,7 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 - 修复“登记后先卖出、除权后红股回到已关闭cohort”的残留持仓：公司行动重新形成lot时，cohort恢复为`exiting`并从当日开始按锁定与容量规则重试，直至清仓后再次关闭。源重放额外拒绝`closed/entry_failed`终态仍持有股份的结果。
 - 持仓估值价格新增对受控daily收盘价的直接核验，避免同时改写position close、market value和daily equity制造伪收益。公司行动定义的登记日/除权日在数据日历覆盖内时必须是交易日。
 - 无缺陷合成案例覆盖“买入→登记→现金/送股除权→原始股退出→红股上市→派息→红股退出”并通过全部重放；分别篡改应收现金、红股数量和上市前可卖数量均被对应源检查拒绝。下一步实现baseline/stress pair登记及数据库`portfolio_passed` resolver。
+
+## 39. v2证据读回实施检查点
+
+v2实现固定12个证据文件。manifest保存完整`run_envelope`、源receipt、相对source路径、八模块代码hash和顶层UTC `generated_at`；writer以实际Arrow落盘文件重建规范结果，区分持久`result_hash`与生成器内存追溯`generator_result_hash`。`read_portfolio_artifact`从receipt和六类source重新加载并独立重算指标与replay，拒绝旧v1封套、代码/身份不匹配、非法路径、符号链接、空必填值、重复主键和伪造摘要；`audit_portfolio_pair`只接受baseline/stress，以共享非成本身份和两份manifest文件SHA绑定`pair_hash`。跨受控根复制并删除旧source仍读回通过，伪摘要及重算hash不一致均拒绝。专项验证`33 passed`，全量后端`796 passed, 2 warnings`；compileall和本次变更文件关键Ruff检查通过。该reader/pair检查无数据库副作用，数据库登记和`portfolio_passed` resolver仍未实现。详见[`日频组合证据读回补充规范v2`](research-runs/manual-daily-portfolio-evidence-v2.md)与[`PROGRESS.md`](../PROGRESS.md)。

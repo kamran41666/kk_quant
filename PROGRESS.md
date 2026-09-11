@@ -17,6 +17,16 @@
 
 ## 记录
 
+### 2026-09-11 14:26 CST — H2b v2组合证据读回、pair审计与最终验收
+
+- Git：基线 `830df01`；当前分支 `phase4-factor-develop`。本轮改动随本记录统一提交，提交与推送结果由交付Git记录确认。
+- 分工：收到用户偏好后，全部机械代码/文档/配置写入和测试执行均交由 `gpt-5.6-luna`，由主模型负责架构、任务拆解、明确验收、审查和结果核对；该规则已持久写入 [`AGENTS.md`](AGENTS.md)。
+- v2：完成固定12文件的运行封套与读回协议；manifest保存完整bundle、日期、分币初始资本、`require_closed_cohorts`、成本正文、八模块代码hash、顶层UTC `generated_at`、两份source receipt和相对路径。writer按实际Arrow落盘文件重建结果并区分持久规范 `result_hash` 与生成器内存追溯 `generator_result_hash`；reader从receipt和六类source重新加载并独立计算指标、replay；pair只读接受baseline/stress并绑定共享非成本身份及两份manifest SHA的`pair_hash`。
+- 证据：跨受控根复制后删除旧source仍可读回通过；伪摘要、篡改摘要和重算hash不一致均被拒绝。读回与pair审计无数据库副作用，数据库artifact登记和`portfolio_passed` resolver仍未实现。
+- 验证：组合v2专项 `33 passed`；后端全量 `796 passed, 2 warnings`。警告为既有Starlette `TestClient`弃用提示和既有matcher超剩余量截断提示。`compileall quant_engine server tests`通过；Ruff按本次变更文件的关键E9/F63/F7/F82/F811检查通过。无前端改动，本轮未运行前端测试。
+- 边界：没有新增真实广域回测或30日观察；此前 normalized-v2 的50条未知调整本轮未修复。`PROGRESS`历史既有tradingagents文档断链不属于本轮，未清理。
+- 入口：[`v2读回补充规范`](docs/research-runs/manual-daily-portfolio-evidence-v2.md)、[`第39节实施检查点`](docs/manual-daily-trading-implementation-plan.md#39-v2证据读回实施检查点)、[`v2读回实现`](quant_engine/backtest/manual_portfolio_artifacts.py)。
+
 ### 2026-09-10 16:18 CST — H2b公司行动源经济重放与残留持仓修复
 
 - Git：`phase4-factor-develop`；功能提交`15773c9`已创建，本条Progress随后提交并推送到`origin/phase4-factor-develop`。
