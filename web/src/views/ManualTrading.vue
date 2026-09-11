@@ -5,7 +5,7 @@
         <h1>人工执行</h1>
         <p class="page-note">A 股日频人工执行闭环：系统生成和展示计划，用户在券商侧操作后回填成交事实。</p>
       </div>
-      <button class="btn-secondary" type="button" :disabled="loading" @click="refreshAll">{{ loading ? '刷新中...' : '刷新账户' }}</button>
+      <div class="manual-header-actions"><router-link class="btn-secondary" to="/daily-workflow">进入日频研究闭环 ↗</router-link><button class="btn-secondary" type="button" :disabled="loading" @click="refreshAll">{{ loading ? '刷新中...' : '刷新账户' }}</button></div>
     </div>
 
     <section class="manual-guardrail" aria-labelledby="manual-guardrail-title">
@@ -279,6 +279,7 @@ onMounted(() => { void refreshAll() })
 
 <style scoped>
 .page-note { max-width: 700px; margin-top: 6px; color: var(--text-secondary); font-size: 13px; }
+.manual-header-actions { display: flex; align-items: center; gap: 8px; }
 .manual-guardrail { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; border: 1px solid rgba(228, 168, 58, .42); border-radius: var(--radius-md); background: rgba(228, 168, 58, .08); padding: 16px 18px; }
 .guardrail-mark { color: var(--warning); font-size: 24px; }
 .manual-guardrail h2 { font-size: 15px; }
@@ -325,6 +326,7 @@ onMounted(() => { void refreshAll() })
 .link-button:hover { color: var(--accent-hover); }
 @media (max-width: 900px) { .two-column { grid-template-columns: 1fr; gap: 0; } }
 @media (max-width: 640px) {
+  .manual-header-actions { align-items: stretch; flex-direction: column; }
   .manual-guardrail { align-items: flex-start; flex-wrap: wrap; }
   .guardrail-pill { margin-left: 38px; }
   .account-create, .form-grid { grid-template-columns: 1fr; }

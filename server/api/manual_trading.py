@@ -10,7 +10,7 @@ from decimal import Decimal
 import json
 from pathlib import Path, PureWindowsPath
 import re
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -226,6 +226,17 @@ class PilotObservationRequest(StrictModel):
 
 class PilotFinalizeRequest(StrictModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class PaperStartRequest(StrictModel):
+    """Only operator intent and the frozen daily-loss ratio enter admission."""
+
+    actor: str = Field(min_length=1, max_length=80)
+    maximum_daily_loss: Decimal = Field(gt=Decimal("0"), le=Decimal("1"))
+
+
+class PilotMarketReceiptRequest(StrictModel):
+    actor: str = Field(min_length=1, max_length=80)
 
 
 class AuthorizationRequest(StrictModel):
@@ -675,6 +686,9 @@ def _pilot(row: ManualProspectivePilot) -> dict[str, Any]:
         "observation_days": row.observation_days, "valid_days": row.valid_days,
         "report_hash": row.report_hash, "blocked_reason": row.blocked_reason,
         "required_evidence": row.required_evidence,
+        # A pilot row is an observation envelope only.  Promotion is owned by
+        # the evidence-bound resolver and is never inferred from this status.
+        "qualification": "not_granted",
     }
 
 
@@ -692,6 +706,91 @@ def _pilot_calendar(value: Any) -> TradingCalendar:
     return calendar
 
 
+def _safe_pilot_metadata(value: Any, *, key: str = "") -> Any:
+    """Serialize admission/receipt metadata without exposing source locators."""
+    lowered = key.lower()
+    if lowered in {"path", "source_path", "absolute_path", "source_locator", "root", "root_path"}:
+        return None
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for name, item in value.items():
+            safe = _safe_pilot_metadata(item, key=str(name))
+            if safe is not None:
+                result[str(name)] = safe
+        return result
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_pilot_metadata(item, key=key) for item in value]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, str):
+        if Path(value).is_absolute() or PureWindowsPath(value).is_absolute() or PureWindowsPath(value).drive:
+            return None
+        return value
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return _safe_pilot_metadata(vars(value), key=key) if hasattr(value, "__dict__") else str(value)
+
+
+def _pilot_receipt_metadata(value: Any, *, require_verified: bool = False) -> dict[str, Any]:
+    """Return the fixed receipt readback whitelist; rows and locators stay private."""
+    raw = value if isinstance(value, Mapping) else vars(value)
+    allowed = {
+        "id", "pilot_id", "binding_hash", "session_date", "provider",
+        "capture_started_at", "received_at", "created_by", "request_key",
+        "request_hash", "manifest_sha256", "content_hash",
+    }
+    if require_verified:
+        if raw.get("verified") is not True:
+            raise ManualPilotError("pilot_receipt_not_verified")
+        allowed.add("verified")
+    missing = sorted(allowed - set(raw))
+    if missing:
+        raise ManualPilotError("pilot_receipt_metadata_incomplete")
+    return {
+        key: _safe_pilot_metadata(raw[key], key=key)
+        for key in allowed
+        if key in raw and _safe_pilot_metadata(raw[key], key=key) is not None
+    }
+
+
+@router.post("/releases/{release_id}/start-paper", status_code=201)
+def start_paper_observation(
+    release_id: str,
+    req: PaperStartRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=160),
+    db: Session = Depends(get_db),
+):
+    try:
+        from server.services.manual_pilot_admission import start_paper_observation as admit_start
+
+        key = idempotency_key.strip()
+        if not key:
+            raise ManualPilotError("idempotency_key_required")
+        result = admit_start(
+            db,
+            release_id=release_id,
+            actor=req.actor,
+            idempotency_key=key,
+            maximum_daily_loss=req.maximum_daily_loss,
+        )
+        # Admission returns the durable pilot row.  Read the binding back from
+        # the verifier so this response cannot be assembled from request
+        # fields or a client supplied calendar.
+        from server.services.manual_pilot_admission import verify_pilot_binding
+
+        pilot_id = result.id if isinstance(result, ManualProspectivePilot) else str(result.get("pilot_id", ""))
+        if not pilot_id:
+            raise ManualPilotError("manual_pilot_not_found")
+        evidence = verify_pilot_binding(db, pilot_id)
+        return _envelope(_safe_pilot_metadata(evidence), evidence_status="paper_observing")
+    except OSError as exc:
+        raise _error(ManualPilotError("pilot_source_unavailable")) from exc
+    except (ManualPilotError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
 @router.post("/pilots", status_code=201)
 def add_pilot(req: PilotCreateRequest, db: Session = Depends(get_db)):
     try:
@@ -701,10 +800,59 @@ def add_pilot(req: PilotCreateRequest, db: Session = Depends(get_db)):
         raise _error(exc) from exc
 
 
+@router.post("/pilots/{pilot_id}/market-receipts", status_code=201)
+def add_pilot_market_receipt(
+    pilot_id: str,
+    req: PilotMarketReceiptRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=160),
+    db: Session = Depends(get_db),
+):
+    try:
+        from server.services.manual_pilot_receipts import capture_pilot_market_receipt
+
+        key = idempotency_key.strip()
+        if not key:
+            raise ManualPilotError("idempotency_key_required")
+        receipt = capture_pilot_market_receipt(
+            db, pilot_id=pilot_id, actor=req.actor, idempotency_key=key,
+        )
+        return _envelope(_pilot_receipt_metadata(receipt), evidence_status="market_receipt_recorded")
+    except OSError as exc:
+        raise _error(ManualPilotError("pilot_source_unavailable")) from exc
+    except (ManualPilotError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/pilot-market-receipts/{receipt_id}")
+def get_pilot_market_receipt(receipt_id: str, db: Session = Depends(get_db)):
+    try:
+        from server.services.manual_pilot_receipts import verify_pilot_market_receipt
+
+        metadata = verify_pilot_market_receipt(db, receipt_id)
+        return _envelope(_pilot_receipt_metadata(metadata, require_verified=True), evidence_status="market_receipt_verified")
+    except OSError as exc:
+        raise _error(ManualPilotError("pilot_source_unavailable")) from exc
+    except (ManualPilotError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
 @router.get("/pilots")
 def list_pilots(db: Session = Depends(get_db)):
     rows = db.scalars(select(ManualProspectivePilot).order_by(ManualProspectivePilot.created_at.desc())).all()
     return _envelope([_pilot(row) for row in rows])
+
+
+@router.get("/pilots/{pilot_id}/evidence")
+def get_pilot_evidence(pilot_id: str, db: Session = Depends(get_db)):
+    try:
+        from server.services.manual_pilot_admission import verify_pilot_binding
+
+        evidence = verify_pilot_binding(db, pilot_id)
+        return _envelope(_safe_pilot_metadata(evidence), evidence_status="paper_observing")
+    except OSError as exc:
+        raise _error(ManualPilotError("pilot_source_unavailable")) from exc
+    except (ManualPilotError, ValueError) as exc:
+        raise _error(exc) from exc
 
 
 @router.post("/pilots/{pilot_id}/observations", status_code=201)

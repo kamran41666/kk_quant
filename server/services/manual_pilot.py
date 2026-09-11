@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from server.models.schema import ManualPilotObservation, ManualProspectivePilot, StrategyRelease, manual_now_str, uuid4_str
+from server.models.schema import ManualPilotBinding, ManualPilotObservation, ManualProspectivePilot, StrategyRelease, manual_now_str, uuid4_str
 
 
 class ManualPilotError(ValueError):
@@ -133,6 +133,21 @@ def _expected_trading_days(start_date: date, target_days: int, calendar: Calenda
     return expected
 
 
+def _has_evidence_binding(db: Session, pilot: ManualProspectivePilot) -> bool:
+    """Return whether this pilot has entered the trusted evidence-bound path.
+
+    The binding is the sole trusted admission marker.  A missing binding must
+    therefore fail closed for the legacy self-reported path.
+    """
+    return db.scalars(select(ManualPilotBinding).where(ManualPilotBinding.pilot_id == pilot.id)).first() is not None
+
+
+def _require_trusted_checkpoint_path(db: Session, pilot: ManualProspectivePilot) -> None:
+    """Reject self-reported observations for all evidence-bound pilots."""
+    if pilot.data_mode == "real_forward" or _has_evidence_binding(db, pilot):
+        raise ManualPilotError("requires_trusted_daily_checkpoint")
+
+
 def create_pilot(
     db: Session,
     *,
@@ -154,6 +169,12 @@ def create_pilot(
         raise ManualPilotError("pilot_strategy_fingerprint_mismatch")
     if data_mode not in {"real_forward", "synthetic_engineering"}:
         raise ManualPilotError("unsupported_manual_pilot_data_mode")
+    # ``real_forward`` used to let callers manufacture a 30-day pilot by
+    # posting self-reported observations.  New starts must be created by the
+    # evidence-bound admission service, which owns the frozen holdout chain,
+    # calendar and risk policy.
+    if data_mode == "real_forward":
+        raise ManualPilotError("pilot_requires_evidence_bound_start")
     day = _date(start_date, "start_date")
     policy = policy or ManualProspectivePolicyV1()
     key = str(pilot_key or f"{release_id}:{day.isoformat()}:{data_mode}")
@@ -194,6 +215,7 @@ def record_pilot_observation(
     pilot = db.get(ManualProspectivePilot, pilot_id)
     if pilot is None:
         raise ManualPilotError("manual_pilot_not_found")
+    _require_trusted_checkpoint_path(db, pilot)
     if pilot.status in {"passed", "failed", "blocked"}:
         raise ManualPilotError("manual_pilot_is_immutable")
     day, as_of = _date(observation_date, "observation_date"), _date(data_as_of, "data_as_of")
@@ -264,6 +286,7 @@ def finalize_pilot(
     pilot = db.get(ManualProspectivePilot, pilot_id)
     if pilot is None:
         raise ManualPilotError("manual_pilot_not_found")
+    _require_trusted_checkpoint_path(db, pilot)
     if pilot.report_hash:
         return pilot
     policy = policy or ManualProspectivePolicyV1(target_days=pilot.target_days)

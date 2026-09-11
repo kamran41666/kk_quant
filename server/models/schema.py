@@ -1184,7 +1184,7 @@ class ManualBackupRecord(Base):
     account_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     backup_path: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    schema_version: Mapped[str] = mapped_column(String(30), nullable=False, default="manual-backup-v4")
+    schema_version: Mapped[str] = mapped_column(String(30), nullable=False, default="manual-backup-v5")
     row_counts: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="written")
     created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
@@ -1305,6 +1305,56 @@ class ManualProspectivePilot(Base):
     blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
     completed_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+
+
+class ManualPilotBinding(Base):
+    """Immutable H2d binding between one release, holdout chain and pilot."""
+    __tablename__ = "manual_pilot_binding"
+    __table_args__ = (
+        UniqueConstraint("pilot_id", name="uq_manual_pilot_binding_pilot"),
+        UniqueConstraint("release_id", name="uq_manual_pilot_binding_release"),
+        UniqueConstraint("request_key", name="uq_manual_pilot_binding_request_key"),
+        UniqueConstraint("binding_hash", name="uq_manual_pilot_binding_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    pilot_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    release_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    holdout_evaluation_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    holdout_evaluation_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    holdout_artifact_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    holdout_artifact_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    protocol_json: Mapped[str] = mapped_column(Text, nullable=False)
+    protocol_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    binding_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
+
+
+class ManualPilotMarketReceipt(Base):
+    """Immutable provider receipt captured for one pilot session."""
+    __tablename__ = "manual_pilot_market_receipt"
+    __table_args__ = (
+        UniqueConstraint("pilot_id", "session_date", name="uq_manual_pilot_receipt_session"),
+        UniqueConstraint("request_key", name="uq_manual_pilot_receipt_request_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    pilot_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    binding_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    session_date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    capture_started_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    received_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(80), nullable=False)
+    request_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_path: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
 
 
 class ManualPilotObservation(Base):

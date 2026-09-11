@@ -17,6 +17,30 @@
 
 ## 记录
 
+### 2026-09-11 17:44 CST — H2d 绑定观察与日频闭环工作台首版
+
+- Git：当前分支 `phase4-factor-develop`，基线 `7eaf669`，工作树包含本轮未提交、未推送改动；本轮遵循用户优先级“先打通端到端功能，再细化”。
+- H2d：完成 evidence-bound start-paper、legacy self-reported real-forward 防伪、pilot evidence readback、BaoStock 原价行情收件 API 及严格元数据白名单；只完成研究链绑定、30日预注册和日线到达证据。trusted daily checkpoint、每日 runner、pilot report 晋级和真实30日观察仍关闭。
+- 工作台：新增独立 `/daily-workflow` 前端与真实 DB overview/API 联通；编排服务仅写 WorkflowRun/WorkflowAction，`manual_daily_runtime` 保持纯计算，支持一键 research→observe→plan→confirm→fill→review→next_day、partial/unfilled、刷新恢复、研究/执行曲线、候选 baseline/stress 指标、成交/持仓/复盘和390px窄屏。响应明确 `engineering_demo/project_state` 与 `live_authorized=false/broker_connected=false`，不代表真实资格。
+- 前端文件：[`DailyWorkflow.vue`](web/src/views/DailyWorkflow.vue)、[`workflow.ts`](web/src/types/workflow.ts)、路由/主导航/人工执行入口、workflow API token拦截和 [`workflow.test.mjs`](web/tests/workflow.test.mjs)。本地地址 `http://127.0.0.1:5173/daily-workflow`；后端联调地址 `http://127.0.0.1:8000/api/v1/daily-workflow/overview`。
+- 验证（当前 macOS 工作区）：backend最终统一结果 `892 passed, 2 warnings`；最终服务已重启并完成新 run 的 UI/HTTP 联通验收；前端 `npm test` 为 `16 passed`，`npm run build` 通过（既有 charts-core 大 chunk 提示），`git diff --check` 和本轮新增 Markdown 本地链接检查通过。独立临时 Chrome profile 的 Playwright 实际点击通过一键流程、次日 partial、刷新恢复和390px无横向溢出；截图仅保存在本机未跟踪的 `outputs/daily-workflow-desktop.png` 与 `outputs/daily-workflow-mobile.png`，不随 Git 交付；可复核代码见 [`DailyWorkflow.vue`](web/src/views/DailyWorkflow.vue) 与 [`workflow.test.mjs`](web/tests/workflow.test.mjs)。浏览器插件连接不可用，后备未读取现有 Chrome profile/cookies。
+- 边界：仍缺 trusted daily checkpoint、pilot report resolver 晋级、H3 production handlers/自动续租、真实研究重跑、真实30日观察、用户真实人工成交与日终循环验收和此前50条未知调整；backup-v5 仅按当前真实代码边界兼容 v4 人工元数据备份，不能恢复原始行情或生成新资格；工程演示收益不能升格为研究门或人工执行资格。专题入口见 [`daily-workflow-first-release.md`](docs/daily-workflow-first-release.md)、实施方案第44/45节和 [`manual-pilot-evidence.md`](docs/manual-pilot-evidence.md)。
+
+### 2026-09-11 17:40 CST — 工程工作流 runtime 版本栅栏
+
+- Git：当前分支 `phase4-factor-develop`，工作树继续未提交、未推送。
+- 修改：workflow run 读回增加 `runtime_version`/`legacy` 标记；advance 对旧 runtime state 以 409 `workflow_runtime_version_stale` 失败关闭，要求新建演示 run。保留旧 HTTP 调试 run，不清理用户数据。
+- 验证：workflow 专项 `3 passed, 1 warning`；Ruff 与 `git diff --check`通过。runtime v2 就绪后需重启现有 uvicorn session 并新建 run 进行最终 HTTP 验收。
+- 边界：旧 run 仅可读，不能继续推进；工程演示仍不构成真实交易资格或 paper 证据。
+
+### 2026-09-11 17:25 CST — 独立日频工程工作流联通
+
+- Git：当前分支 `phase4-factor-develop`，基线 `7eaf669`，工作树含本轮未提交改动；未提交、未推送。
+- 修改：新增独立 `WorkflowRun`/`WorkflowAction` 持久模型、`manual_workflow` service/API 及 `/api/v1/daily-workflow` 路由；overview 从真实数据库表计算候选、实验、release、pilot、人工账户、计划和复盘状态，工程演示仅写独立 workflow 表，不触碰真实 manual/Paper/StrategyRelease 链。runtime 固定使用 `quant_engine.trading.manual_daily_runtime`。
+- 验证：workflow 专项 `2 passed, 1 warning`；真实 HTTP 已完成 `research → observe → plan → confirm → fill → review → next_day`，revision `0→7`，readback=7；新增文件 compileall、Ruff、`git diff --check`通过。服务以 `QUANT_SCHEDULER_ENABLED=false` 在 `127.0.0.1:8000` 运行供前端联调。
+- 边界：工程演示使用合成 runtime，不能作为真实策略资格、paper observation 或交易证据；前端联调服务进程由当前工作区保留，最终全量回归待前端改动合并后统一执行。
+- 入口：[`manual_workflow service`](server/services/manual_workflow.py)、[`daily-workflow API`](server/api/manual_workflow.py)、[`workflow models`](server/models/manual_workflow.py)、[`工程 runtime`](quant_engine/trading/manual_daily_runtime.py)。
+
 ### 2026-09-11 16:27 CST — H2c统一交付同步
 
 - Git：功能提交 `f569e32` 已提交并推送到 `origin/phase4-factor-develop`；本条同步记录随后单独提交并推送，工作树交付状态以最终 Git 检查为准。

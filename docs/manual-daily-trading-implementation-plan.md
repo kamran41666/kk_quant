@@ -868,6 +868,18 @@ v2实现固定12个证据文件。manifest保存完整`run_envelope`、源receip
 
 ## 43. H2c经济 holdout评估
 
-- 旧 preregistration bundle 不变；评估唯一允许绑定新的 dataset manifest 与 benchmark receipt，整个输入 manifest 的读取范围在冻结时确定，不能在读入后重新封存。访问事实先于经济文件读取，phase heartbeat 不自动续租，失败不重封且输入不能变更。
+- 旧 preregistration bundle 不变；评估唯一允许绑定新的 dataset manifest 与 benchmark receipt，整个输入 manifest 的读取范围在冻结时确定，不能在读入后重新封存。访问事实先于经济文件读取，无后台自动持续续租，失败不重封且输入不能变更。
 - 同步 API 与可复用 Python service 入口冻结 actor 与相对 source path，完成后原子保存 `holdout_result` artifact、evaluation 和 completed window；当前没有独立 CLI 命令。phase heartbeat 会在当前执行期间续租，但没有后台自动持续续租。完成表示结果经过验证，不表示满足晋级资格；技术失败将 evaluation 置为 `failed`，只有 promotion 经济门失败才追加 blocked evaluation，技术重试仅复用同一冻结输入。
 - resolver 复验真实 artifact/hash、window/evaluation completed、access binding、release/hash/core 和唯一 portfolio 父评价链，复用旧 portfolio 证据重验但不采信升级后的当前 status。经济门使用 binding 冻结的 `ManualDailyPromotionPolicyV1` 和未见样本 baseline/stress 指标。具体验收见 [`manual-holdout-evaluation.md`](manual-holdout-evaluation.md) 与 [`PROGRESS.md`](../PROGRESS.md)，本节不记录未完成验收数字。
+
+## 44. H2d 纸面观察启动与行情收件
+
+- `POST /releases/{id}/start-paper` 是 evidence-bound pilot 的唯一启动入口，只接受 actor、maximum daily loss 和幂等键；服务端绑定完整 holdout 链、冻结日历、资金和风险策略后才把 release 置为 `paper_observing`。旧 self-reported `real_forward` 创建、观察和终结路径关闭，已有旧行不能作为资格。
+- `GET /pilots/{id}/evidence` 只读服务端验证后的 binding、日历、风险和哈希元数据；`POST /pilots/{id}/market-receipts` 只接受 actor 和幂等键，服务端使用上海今日、冻结30日列表、16:30后的固定 BaoStock 原价日线，读回白名单不泄露行情 rows 或绝对路径。
+- 本阶段只完成真实研究链绑定、预注册30日窗口和原价日线到达证据；没有 trusted daily checkpoint、每日决策/计划/账本/reconcile/review runner，也没有 pilot report 晋级。真实30日观察、生产 handlers 尚未完成；正式研究尚未重跑，此前50条未知调整仍未修复。专题见 [`manual-pilot-evidence.md`](manual-pilot-evidence.md)。
+
+## 45. 日频研究闭环工作台首版
+
+- 新增 `/daily-workflow` 前端和 `/api/v1/daily-workflow` 工程工作流：真实 overview 读取候选、实验、release、pilot、人工账户、计划和复盘；工程演示独立持久化 run/action，不触碰真实 manual、Paper、release 或券商链路。
+- 页面按 research→observe→plan→confirm→fill→review→next_day 展示服务端状态，支持一键体验、逐步推进、full/partial/unfilled、刷新恢复、研究回测/执行演练曲线、候选 baseline/stress 指标和 390px 窄屏。
+- 响应固定标记 `engineering_demo`、`project_state`、`live_authorized=false`、`broker_connected=false`；工程合成收益不等于真实研究通过、paper 观察资格或 `manual_ready`。首版验收与剩余边界见 [`daily-workflow-first-release.md`](daily-workflow-first-release.md)。

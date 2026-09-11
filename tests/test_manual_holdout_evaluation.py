@@ -44,11 +44,11 @@ def test_freeze_identity_and_request_key_are_immutable(db_session, tmp_path, mon
         freeze_holdout_evaluation(db_session, **changed)
 
 
-def test_backup_v4_contains_holdout_evaluation_metadata(db_session, tmp_path, monkeypatch):
+def test_backup_v5_contains_holdout_evaluation_metadata(db_session, tmp_path, monkeypatch):
     case = build_holdout_case(db_session, tmp_path, monkeypatch)
     freeze_holdout_evaluation(db_session, **case["freeze_kwargs"])
     backup = build_manual_backup(db_session)
-    assert backup["schema_version"] == "manual-backup-v4"
+    assert backup["schema_version"] == "manual-backup-v5"
     assert backup["row_counts"][ManualHoldoutEvaluation.__tablename__] == 1
 
 

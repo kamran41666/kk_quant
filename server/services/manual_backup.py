@@ -36,6 +36,8 @@ from server.models.schema import (
     ManualPositionLot,
     ManualPositionSnapshot,
     ManualPilotObservation,
+    ManualPilotBinding,
+    ManualPilotMarketReceipt,
     ManualProspectivePilot,
     ManualReconciliation,
     ManualValuation,
@@ -60,10 +62,10 @@ MANUAL_MODELS = (
     ManualLedgerEvent, ManualPositionLot, ManualAccountSnapshot, ManualPositionSnapshot,
     ManualReconciliation, ManualDailyJob, ManualValuation, ManualDailyReview,
     ResearchRevision, ManualCorporateActionFact, ManualProspectivePilot,
-    ManualPilotObservation,
+    ManualPilotBinding, ManualPilotMarketReceipt, ManualPilotObservation,
     ManualHoldoutEvaluation,
 )
-SCHEMA_VERSION = "manual-backup-v4"
+SCHEMA_VERSION = "manual-backup-v5"
 
 
 def _json_value(value: Any) -> Any:
@@ -141,7 +143,7 @@ def load_manual_backup(source: str | Path | Mapping[str, Any]) -> dict[str, Any]
             payload = json.loads(Path(source).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ManualBackupError("backup_read_failed") from exc
-    if payload.get("schema_version") != SCHEMA_VERSION or not isinstance(payload.get("tables"), dict):
+    if payload.get("schema_version") not in {"manual-backup-v4", SCHEMA_VERSION} or not isinstance(payload.get("tables"), dict):
         raise ManualBackupError("unsupported_manual_backup_schema")
     expected_hash = payload.get("content_hash")
     without_hash = {key: value for key, value in payload.items() if key != "content_hash"}

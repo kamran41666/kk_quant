@@ -66,11 +66,16 @@ def _metric(scenario: Mapping[str, Any], name: str) -> Decimal | None:
     return _decimal(scenario.get(name), name)
 
 
-def _parent_portfolio(db: Session, release: StrategyRelease) -> tuple[StrategyPromotionEvaluation, dict[str, bool]]:
+def _parent_portfolio(
+    db: Session,
+    release: StrategyRelease,
+    *,
+    require_portfolio_status: bool = True,
+) -> tuple[StrategyPromotionEvaluation, dict[str, bool]]:
     """Revalidate the historical portfolio evaluation and its research parent."""
     from server.services.manual_holdout import _verify_portfolio_parent
 
-    row = _verify_portfolio_parent(db, release)
+    row = _verify_portfolio_parent(db, release, require_portfolio_status=require_portfolio_status)
     return row, {
         "portfolio_parent_chain_valid": True,
         "portfolio_parent_replay_valid": True,
@@ -117,6 +122,8 @@ def resolve_holdout_passed(
     db: Session,
     release: StrategyRelease,
     evidence_refs: Mapping[str, str],
+    *,
+    require_portfolio_status: bool = True,
 ) -> Any:
     """Resolve H2c from a completed, independently verified holdout artifact."""
     from server.services.manual_evidence import ManualEvidenceError, ResolvedReleaseEvidence, _release_identity_valid, holdout_commit_snapshot
@@ -194,12 +201,20 @@ def resolve_holdout_passed(
             set_artifacts.append((candidate_binding, candidate_eval, candidate_artifact, candidate_verified))
         all_artifact_ids = [item[2].id for item in set_artifacts]
 
-        parent, parent_checks = _parent_portfolio(db, release)
+        parent, parent_checks = _parent_portfolio(
+            db, release, require_portfolio_status=require_portfolio_status,
+        )
         wp = {"status": window.status}
         metrics = verified.get("metrics") if isinstance(verified.get("metrics"), dict) else {}
         checks: dict[str, bool] = {
             "release_identity_valid": _release_identity_valid(release),
-            "release_status_portfolio_passed": release.status == "portfolio_passed",
+            "release_status_portfolio_passed": (
+                release.status == "portfolio_passed"
+                or (
+                    not require_portfolio_status
+                    and release.status in {"holdout_passed", "paper_observing", "paper_passed", "manual_ready"}
+                )
+            ),
             "artifact_verified": artifact.status == "verified",
             "artifact_kind_holdout_result": artifact.kind == "holdout_result",
             "binding_release_match": verified.get("binding_id") == binding.id and binding.release_id == release.id,
