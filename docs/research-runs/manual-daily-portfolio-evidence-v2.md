@@ -21,7 +21,7 @@
 11. `summary.json`
 12. `manifest.json`
 
-v2 读回不登记数据库 artifact，不推进 release 状态，也不产生 `portfolio_passed`。数据库登记与 `portfolio_passed` resolver 仍待完成。
+v2 读回函数本身不登记数据库 artifact、不推进 release 状态，也不产生 `portfolio_passed`。其上层数据库登记与 resolver 见 [`日频组合数据库登记与晋级专题`](../manual-portfolio-promotion.md)；两者必须分开审查。
 
 ## 2. manifest v2 运行封套
 
@@ -66,11 +66,11 @@ writer 以实际 Arrow 落盘数据重建结果，再生成 metrics、replay、s
 
 `audit_portfolio_pair(baseline_dir, stress_dir, *, allowed_root, source_root)` 只接受一份 baseline 和一份 stress。两份 artifact 必须共享全部非成本身份：`strategy_core_hash`、输入 manifest hash、起止日期、分币初始资本、`require_closed_cohorts`、八模块代码 hash 和 `source_locator`。只允许预注册成本场景差异。
 
-`pair_hash` 绑定 pair 身份以及两份 `manifest.json` 的文件 SHA-256。任一 manifest 被替换、两场景身份不一致、场景不是 baseline/stress 或成本之外的字段变化，均拒绝配对。该检查仍是只读内存结果，不写数据库。
+`pair_hash` 绑定 pair 身份以及两份 `manifest.json` 的文件 SHA-256。任一 manifest 被替换、两场景身份不一致、场景不是 baseline/stress 或成本之外的字段变化，均拒绝配对。该检查仍是只读内存结果，不写数据库；数据库登记由独立服务在重新审计后完成。
 
 ## 7. 当前边界与入口
 
-本文只补充 v2 读回协议；实现与验收状态以 [`PROGRESS.md`](../../PROGRESS.md) 及其最新指针为准。数据库 artifact 登记和 `portfolio_passed` resolver 尚未实现，不能把读回通过描述为晋级或真实委托资格。
+本文只补充 v2 读回协议；实现与验收状态以 [`PROGRESS.md`](../../PROGRESS.md) 及其最新指针为准。读回通过不能单独描述为晋级或真实委托资格；数据库登记、release 绑定和 `portfolio_passed` resolver 已在其上层专题实现，边界见 [`日频组合数据库登记与晋级专题`](../manual-portfolio-promotion.md)。
 
 代码入口仅有以下两个函数：
 

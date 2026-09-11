@@ -19,6 +19,7 @@
 | 日频建设审查 | [`research-runs/manual-daily-implementation-audit-2026-09-10.md`](research-runs/manual-daily-implementation-audit-2026-09-10.md) | 阅读远端M1—M9实现的已修缺陷、当前真实完成度和H2—H6收口顺序 |
 | 日频组合证据合同 | [`research-runs/manual-daily-portfolio-evidence-v1.md`](research-runs/manual-daily-portfolio-evidence-v1.md) | 实现baseline/stress组合产物、公司行动、容量、重放和portfolio晋级前的冻结合同 |
 | 日频组合证据读回补充规范 | [`research-runs/manual-daily-portfolio-evidence-v2.md`](research-runs/manual-daily-portfolio-evidence-v2.md) | 读取v2固定12文件、源receipt、独立replay及baseline/stress pair的补充规则 |
+| 日频组合数据库登记与晋级 | [`manual-portfolio-promotion.md`](manual-portfolio-promotion.md) | 数据库 pair 登记、上游血缘、portfolio resolver、评价链和 API 读回边界 |
 | 人工执行语言 | [`CONTEXT.md`](../CONTEXT.md) | 修改人工执行领域对象、状态或接口前统一术语 |
 
 ## 数据与研究

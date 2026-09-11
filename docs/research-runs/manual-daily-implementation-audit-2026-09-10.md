@@ -58,14 +58,14 @@
 
 `draft → research_passed`解析器已经实现并重新核验候选表达式、实验状态、manual daily label、数据hash、评价policy、训练/验证时间隔离、数据库报告与`report.json`语义一致以及全部Parquet/JSON字节hash。旧`promote_release(..., evidence={...})`不能再提升状态；组合、holdout、paper和manual_ready解析器未具备足够底层证据时会追加blocked evaluation并保持当前release状态。
 
-H2尚未整体完成。下一步H2b需要新增日频组合产物登记与重放证明，再将holdout结果和真实前瞻daily checkpoint接入相同resolver；当前任何release最多只能由新解析器到达`research_passed`。
+H2尚未整体完成。H2b数据库组合产物登记、重放证明和 `portfolio_passed` resolver 已新增；后续仍需将 holdout 结果、真实前瞻 daily checkpoint 和人工执行门接入相同生命周期。当前不能据此把 release 描述为 `manual_ready` 或真实委托资格。
 
-## H2b 实施状态（2026-09-10）
+## H2b 实施状态（更新于 2026-09-11；原始审查日期为 2026-09-10）
 
 原“研究组合回测还不能用于晋级”边界中的引擎与证据目录建设已推进：正式v3组合循环现在使用cohort原子账本、前一日容量、历史资格、原价成交、公司行动子账、benchmark和固定12文件证据目录；源加载器可从受控manifest定位并重验daily/actions/securities/calendar/benchmark/signals正文。独立重放已经覆盖账务、执行/估值价格、容量、T+1、目标进入和公司行动经济过程，包括登记权益、税后现金分币、账户级红股分配、派息、上市锁及逐日可卖股份。
 
 后续复核又实际复现“cohort在登记日后先卖出关闭、除权日红股重新形成lot但不再退出”的P0残留持仓；v3现在会把该cohort恢复为`exiting`并在红股上市后继续退出。公司行动重放同时核对每个经济事件的source/action/economic hash、definition完整字段和终态cohort持仓，篡改身份字段或把残留持仓标为closed均不能通过。
 
-H2b仍未完成数据库登记门。当前writer的`eligible_for_artifact_registration`只说明单个结果目录满足工程重放条件，尚无服务端baseline/stress配对登记，也没有从落盘文件重新解析并驱动`portfolio_passed`的resolver。真实`normalized-v2`仍有50条未解释参考调整，不能登记或晋级；完成pair resolver后还需生成新结果版本，不能复用旧v2组合结果。
+H2b已完成服务端 baseline/stress 配对登记和从落盘文件重解析并驱动 `portfolio_passed` 的 resolver；writer 的 `eligible_for_artifact_registration` 仍只表示单个结果目录满足工程重放条件，不能替代数据库登记。真实 `normalized-v2` 的历史未解释参考调整仍是该数据版本的独立边界，不能把本机合成 fixture 的 API 验收数字解释为真实策略通过；holdout、pilot 和人工执行门仍未闭合。
 
 本审查不修改冻结研究结果，也不评价远端提交中与日频闭环无关的新增内容。

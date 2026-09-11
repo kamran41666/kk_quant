@@ -843,3 +843,11 @@ UI固定显示“人工执行、用户回填、未经券商API验证”。任何
 ## 39. v2证据读回实施检查点
 
 v2实现固定12个证据文件。manifest保存完整`run_envelope`、源receipt、相对source路径、八模块代码hash和顶层UTC `generated_at`；writer以实际Arrow落盘文件重建规范结果，区分持久`result_hash`与生成器内存追溯`generator_result_hash`。`read_portfolio_artifact`从receipt和六类source重新加载并独立重算指标与replay，拒绝旧v1封套、代码/身份不匹配、非法路径、符号链接、空必填值、重复主键和伪造摘要；`audit_portfolio_pair`只接受baseline/stress，以共享非成本身份和两份manifest文件SHA绑定`pair_hash`。跨受控根复制并删除旧source仍读回通过，伪摘要及重算hash不一致均拒绝。专项验证`33 passed`，全量后端`796 passed, 2 warnings`；compileall和本次变更文件关键Ruff检查通过。该reader/pair检查无数据库副作用，数据库登记和`portfolio_passed` resolver仍未实现。详见[`日频组合证据读回补充规范v2`](research-runs/manual-daily-portfolio-evidence-v2.md)与[`PROGRESS.md`](../PROGRESS.md)。
+
+## 40. H2b数据库组合登记与portfolio晋级专题
+
+- 新增专题 [`manual-portfolio-promotion.md`](manual-portfolio-promotion.md)，将 v1/v2 的固定12文件、pair hash、受控 source replay 与数据库边界分开记录。v2 reader 和 pair audit 本身无数据库副作用；登记服务必须重新审计两份目录后才可写入证据。
+- pair 登记只接受 baseline/stress 相对目录，roots 使用服务默认配置。服务重新核对真实 training/validation artifact、完整验证信号、direction、`rank` 角色、候选血缘、交易日历和退出尾部；客户端不能提交 roots、metrics、passed 或任意替代证据。
+- 有效 pair 在同一 savepoint/事务内新增恰好两个 `ResearchEvidenceArtifact`，以稳定 `pair_hash` 自然幂等返回原 ID；半 pair、内容变化、失效行或任一验证失败均拒绝。统一 HTTP `Idempotency-Key` 仍属于 H4，不能由自然 pair 幂等替代。
+- portfolio resolver 只接受 artifact ID，从数据库和受控目录重读并验证 release baseline bundle/core fingerprint/execution policy、唯一 `research_passed` 评价 hash 链、收益/超额、stress Sharpe `>=0.8`、stress 回撤 `<=0.2`、两场景换手/成交率 policy 门、独立 replay 与冻结执行协议重现。失败追加 blocked evaluation；通过才允许追加 `portfolio_passed`。本轮统一验收为后端 `813 passed, 2 warnings`，但该数字包含合成 fixture 的工程/API 证据链，不能证明真实策略已通过。
+- API `POST /manual-trading/portfolio-pairs` 的登记响应为 `registered_not_promoted`；`GET /releases/{id}/evidence` 只读同 release 的四类 artifact 引用和评价链字段。登记和晋级不改变 release 之外的 manual/Paper 账本，也不增加下单或自动执行入口。当前已支持 `portfolio_passed`，holdout、pilot、`manual_ready` 和人工执行门仍未闭合。实现验收见 [`PROGRESS.md`](../PROGRESS.md)。

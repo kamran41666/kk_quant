@@ -30,7 +30,7 @@ from server.models.schema import (
 from server.services.strategy_promotion import create_strategy_release
 
 
-RESOLVER_VERSION = "manual-release-evidence-v1"
+RESOLVER_VERSION = "manual-release-evidence-v2"
 _FACTOR_FILES = (
     "factor_values.parquet",
     "ic_series.parquet",
@@ -105,7 +105,10 @@ def _file_hash(path: Path) -> str:
 
 
 def _resolver_code_hash() -> str:
-    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    return _hash({
+        name: _file_hash(Path(__file__).with_name(name))
+        for name in ("manual_evidence.py", "manual_portfolio_promotion.py", "manual_portfolio_registration.py")
+    })
 
 
 def _factor_artifact_manifest(artifact_dir: Path, allowed_root: Path) -> dict[str, Any]:
@@ -239,6 +242,22 @@ def verify_research_artifact(artifact: ResearchEvidenceArtifact) -> bool:
 
 
 def _reverify_factor_artifact(db: Session, artifact: ResearchEvidenceArtifact) -> bool:
+    # Re-verification must be read-only.  The registration helper commits when
+    # it creates a new attempt, so reject any producer lineage mismatch before
+    # calling it; a changed experiment attempt must never be able to mutate a
+    # caller transaction while an evidence gate is being checked.
+    experiment = db.get(FactorExperiment, artifact.producer_entity_id)
+    expected_stage = {"factor_training": "training", "factor_validation": "validation"}.get(artifact.kind)
+    if (
+        experiment is None
+        or artifact.producer_protocol != "factor-experiment-v2"
+        or artifact.producer_entity_type != "factor_experiment"
+        or artifact.status != "verified"
+        or expected_stage != experiment.stage
+        or experiment.status != "completed"
+        or artifact.producer_attempt != experiment.attempt
+    ):
+        return False
     try:
         manifest = json.loads(artifact.manifest_json)
         artifact_dir = Path(manifest["artifact_dir"])
@@ -338,6 +357,12 @@ def resolve_release_evidence(
         raise ManualEvidenceError("strategy_release_not_found")
     if target_status == "research_passed":
         return _resolve_research_passed(db, release, evidence_refs)
+    if target_status == "portfolio_passed":
+        # Deliberately local: the portfolio resolver validates the research
+        # chain through this module and importing it at module load would cycle.
+        from server.services.manual_portfolio_promotion import resolve_portfolio_passed
+
+        return resolve_portfolio_passed(db, release, evidence_refs)
     reason = f"{target_status}_evidence_resolver_not_supported"
     return ResolvedReleaseEvidence(target_status, {reason: False}, dict(evidence_refs), _hash({
         "release_id": release.id, "release_hash": release.release_hash,

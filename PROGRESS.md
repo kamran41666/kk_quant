@@ -17,6 +17,15 @@
 
 ## 记录
 
+### 2026-09-11 14:57 CST — H2b数据库组合登记、portfolio resolver与API统一验收
+
+- Git：基线 `b438682`；当前分支 `phase4-factor-develop`；提交与推送状态由最终 Git 交付确认。三名 `gpt-5.6-luna` 子代理分别完成登记、晋级服务与 API/fixture/测试机械写入，主模型负责架构审查和结果核对。
+- 数据库证据：pair 以真实 SQLite 上游 training/validation artifact 为根，重新验证完整 validation 因子方向、`rank` 血缘、NaN 预热值、worker 时间戳、交易日和退出尾部；baseline/stress 两条 `ResearchEvidenceArtifact` 使用 savepoint 原子登记、自然 pair hash 幂等和重验。resolver 只接受 artifact IDs，重新绑定 release bundle/core/execution policy、唯一 `research_passed` 评价链、两场景指标、独立 replay 和完整冻结执行协议复现。
+- 反例与修复：覆盖 savepoint 第二条写入失败、半 pair 混 pair、不变目录复用、已登记目录改版拒绝、预算篡改、跨 Session 失效和 attempt 无 commit；修复 attempt 变化时旧只读复核的隐式 commit 缺陷。API 登记返回 `registered_not_promoted`，release evidence 展示 training/validation/baseline/stress 四类引用及评价链。
+- API/范围：新增严格相对路径登记接口，不允许客户端覆写 roots、metrics 或 passed；登记不改变 release、manual/Paper 账户或订单。合成行情加真实文件和 SQLite 工程验证，不构成实际策略资格。
+- 验证：后端全量 `813 passed, 2 warnings`；registration/evidence/artifacts 专项 `22 passed`；promotion/evidence/policy 专项 `14 passed`；API 专项 `3 passed, 1 warning`；`compileall`、关键 Ruff、`git diff --check` 和相关 Markdown 链接检查通过。
+- 边界：H2c holdout/pilot、H3 编排、H4 统一 HTTP 幂等与完整 UI、H5 真实研究重跑、H6 真实 30 日观察仍未完成；此前 normalized-v2 的 50 条未知调整本轮未修复。入口见 [`第40节实施摘要`](docs/manual-daily-trading-implementation-plan.md#40-h2b数据库组合登记与portfolio晋级专题)、[`数据库登记与晋级专题`](docs/manual-portfolio-promotion.md)、[`登记服务`](server/services/manual_portfolio_registration.py)、[`晋级服务`](server/services/manual_portfolio_promotion.py)。
+
 ### 2026-09-11 14:26 CST — H2b v2组合证据读回、pair审计与最终验收
 
 - Git：基线 `830df01`；当前分支 `phase4-factor-develop`。本轮改动随本记录统一提交，提交与推送结果由交付Git记录确认。

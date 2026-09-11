@@ -8,10 +8,12 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import json
+from pathlib import Path, PureWindowsPath
+import re
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -31,6 +33,7 @@ from server.services.manual_evidence import (
     advance_release_from_evidence,
     create_evidence_bound_release,
 )
+from server.services.manual_portfolio_registration import register_manual_portfolio_pair
 from server.services.manual_plan_persistence import mark_plan_viewed
 from server.services.manual_review import (
     ManualReviewError,
@@ -88,6 +91,25 @@ class PromotionRequest(StrictModel):
     target_status: str = Field(pattern=r"^(research_passed|portfolio_passed|holdout_passed|paper_observing|paper_passed|manual_ready)$")
     evidence_refs: dict[str, str]
     actor: str = Field(min_length=1, max_length=80)
+
+
+class PortfolioPairRequest(StrictModel):
+    baseline_path: str = Field(min_length=1)
+    stress_path: str = Field(min_length=1)
+
+    @field_validator("baseline_path", "stress_path")
+    @classmethod
+    def validate_relative_directory_path(cls, value: str) -> str:
+        value = value.strip()
+        # Path.is_absolute() follows the host OS only; PureWindowsPath also
+        # rejects drive-letter and UNC paths when the API runs on POSIX.
+        if not value or Path(value).is_absolute() or PureWindowsPath(value).is_absolute():
+            raise ValueError("portfolio_artifact_path_must_be_relative")
+        if PureWindowsPath(value).drive or re.match(r"^[A-Za-z]:", value):
+            raise ValueError("portfolio_artifact_path_must_be_relative")
+        if any(part == ".." for part in value.replace("\\", "/").split("/")):
+            raise ValueError("portfolio_artifact_path_must_not_escape_root")
+        return value
 
 
 class CashEventRequest(StrictModel):
@@ -326,7 +348,28 @@ def get_release_evidence(release_id: str, db: Session = Depends(get_db)):
     evaluations = db.scalars(select(StrategyPromotionEvaluation).where(
         StrategyPromotionEvaluation.release_id == release_id,
     ).order_by(StrategyPromotionEvaluation.created_at.asc())).all()
-    artifact_ids = set(json.loads(release.research_evidence or "{}").values())
+    artifact_ref_keys = {
+        "training_artifact_id", "validation_artifact_id",
+        "baseline_artifact_id", "stress_artifact_id",
+    }
+    try:
+        release_refs = json.loads(release.research_evidence or "{}")
+        if not isinstance(release_refs, dict):
+            raise ValueError("release_research_evidence_invalid")
+        artifact_ids = {
+            str(value) for key, value in release_refs.items()
+            if key in artifact_ref_keys and isinstance(value, str) and value
+        }
+        for evaluation in evaluations:
+            refs = json.loads(evaluation.evidence_refs_json or "{}")
+            if not isinstance(refs, dict):
+                raise ValueError("promotion_evidence_refs_invalid")
+            artifact_ids.update(
+                str(value) for key, value in refs.items()
+                if key in artifact_ref_keys and isinstance(value, str) and value
+            )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise _error(ManualEvidenceError("release_evidence_refs_invalid")) from exc
     artifacts = db.scalars(select(ResearchEvidenceArtifact).where(
         ResearchEvidenceArtifact.id.in_(artifact_ids),
     )).all() if artifact_ids else []
@@ -343,8 +386,22 @@ def get_release_evidence(release_id: str, db: Session = Depends(get_db)):
             "decision": row.decision, "checks": json.loads(row.checks_json),
             "resolved_evidence_hash": row.resolved_evidence_hash,
             "resolver_version": row.resolver_version, "created_at": row.created_at,
+            "previous_evaluation_id": row.previous_evaluation_id,
+            "previous_evaluation_hash": row.previous_evaluation_hash,
+            "evaluation_hash": row.evaluation_hash,
         } for row in evaluations],
     }, evidence_status="database_resolved")
+
+
+@router.post("/portfolio-pairs", status_code=201)
+def register_portfolio_pair(req: PortfolioPairRequest, db: Session = Depends(get_db)):
+    try:
+        result = register_manual_portfolio_pair(db, req.baseline_path, req.stress_path)
+        return _envelope(result, evidence_status="registered_not_promoted")
+    except OSError as exc:
+        raise _error(ManualEvidenceError("portfolio_evidence_file_unavailable")) from exc
+    except (ManualEvidenceError, ValueError) as exc:
+        raise _error(exc) from exc
 
 
 @router.post("/releases/{release_id}/promotions", status_code=201)
@@ -366,7 +423,12 @@ def promote_release_from_ids(
             "decision": row.decision, "checks": json.loads(row.checks_json),
             "resolved_evidence_hash": row.resolved_evidence_hash,
             "resolver_version": row.resolver_version,
+            "previous_evaluation_id": row.previous_evaluation_id,
+            "previous_evaluation_hash": row.previous_evaluation_hash,
+            "evaluation_hash": row.evaluation_hash,
         }, evidence_status=row.decision)
+    except OSError as exc:
+        raise _error(ManualEvidenceError("portfolio_evidence_file_unavailable")) from exc
     except (ManualEvidenceError, ValueError) as exc:
         raise _error(exc) from exc
 
