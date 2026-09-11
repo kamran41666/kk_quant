@@ -17,6 +17,12 @@
 
 ## 记录
 
+### 2026-09-11 17:58 CST — 最终 Git 交付确认
+
+- Git：功能提交 `ddcbe50`（`feat: add daily workflow workbench and evidence-bound pilots`）已推送至 `origin/phase4-factor-develop`；本条 Progress 作为第二个 docs 提交随后推送。outputs 截图和 `/tmp/kk_quant_daily_workflow_full_pytest.log` 均未纳入 Git。
+- 实际验证：功能提交前已完成 backend `892 passed, 2 warnings`、frontend `16 passed`/build、compileall、关键 Ruff、diff/link 检查及最终 HTTP/浏览器验收；本机 macOS 服务 session `91132` 保持运行。
+- 边界：工程演示与 H2d 代码能力不等同于真实策略资格；剩余边界以本记录上一条首版工作台记录和专题文档为准。
+
 ### 2026-09-11 17:44 CST — H2d 绑定观察与日频闭环工作台首版
 
 - Git：当前分支 `phase4-factor-develop`，基线 `7eaf669`，工作树包含本轮未提交、未推送改动；本轮遵循用户优先级“先打通端到端功能，再细化”。
