@@ -7,6 +7,7 @@ import shutil
 import pytest
 from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
 
 from server.models.schema import FactorCandidate, ResearchEvidenceArtifact
 from server.services.manual_evidence import ManualEvidenceError
@@ -41,6 +42,23 @@ def test_register_pair_idempotence_and_reverify(db_session, tmp_path):
         allowed_root=tmp_path / "results", source_root=tmp_path,
     )
     assert result["pair_hash"] == fixture["pair"]["pair_hash"]
+
+
+def test_registration_commit_false_can_be_rolled_back_by_clean_session(db_session, tmp_path):
+    fixture = build_portfolio_pair(db_session, tmp_path)
+    clean_session_factory = sessionmaker(bind=db_session.get_bind(), autocommit=False, autoflush=False)
+    with clean_session_factory() as clean_db:
+        result = register_manual_portfolio_pair(
+            clean_db, fixture["baseline_dir"], fixture["stress_dir"],
+            allowed_root=tmp_path / "results", source_root=tmp_path, commit=False,
+        )
+        assert result["pair_hash"]
+        clean_db.rollback()
+        assert clean_db.query(ResearchEvidenceArtifact).filter(
+            ResearchEvidenceArtifact.kind.in_(
+                ("manual_portfolio_baseline", "manual_portfolio_stress"),
+            ),
+        ).count() == 0
 
 
 def test_registration_rejects_invalidated_factor(db_session, tmp_path):

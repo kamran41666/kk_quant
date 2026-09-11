@@ -6,9 +6,9 @@ binds that replay to the already verified factor evidence in the database.
 """
 from __future__ import annotations
 
-from datetime import date, datetime
-from decimal import Decimal, ROUND_HALF_EVEN
 import json
+from datetime import date, datetime
+from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from typing import Any
 
@@ -29,14 +29,14 @@ from quant_engine.backtest.manual_portfolio_evidence import (
 from quant_engine.factor.manual_daily_label import MANUAL_DAILY_LABEL_V1
 from quant_engine.trading.manual_protocol import stable_hash
 from server.config import settings
+from server.models.database import ensure_savepoint_transaction
 from server.models.schema import ResearchEvidenceArtifact, uuid4_str
 from server.services.manual_evidence import (
-    ManualEvidenceError,
     _MANUAL_LABEL,
+    ManualEvidenceError,
     _reverify_factor_artifact,
     verify_research_artifact,
 )
-
 
 PRODUCER_PROTOCOL = "manual-daily-portfolio-evidence-v2"
 ENTITY_TYPE = "manual_portfolio_pair"
@@ -447,6 +447,7 @@ def register_manual_portfolio_pair(
     # Flush caller work before opening the pair savepoint, so a failed pair
     # cannot erase unrelated pending rows in the caller's transaction.
     try:
+        ensure_savepoint_transaction(db)
         db.flush()
         with db.begin_nested():
             for scenario in _SCENARIOS:

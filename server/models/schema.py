@@ -748,6 +748,16 @@ class ResearchHoldoutWindow(Base):
     created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
     opened_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     invalidated_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    invalidation_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    completed_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+
+
+class ResearchHoldoutRegistryLock(Base):
+    """One database row used to serialize holdout range allocation."""
+    __tablename__ = "research_holdout_registry_lock"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class ResearchHoldoutAccess(Base):
@@ -760,6 +770,33 @@ class ResearchHoldoutAccess(Base):
     accessed_by: Mapped[str] = mapped_column(String(80), nullable=False)
     purpose: Mapped[str] = mapped_column(String(160), nullable=False)
     result_exposed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    binding_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+
+
+class ManualHoldoutBinding(Base):
+    """Frozen release and portfolio evidence identity for one holdout window."""
+    __tablename__ = "manual_holdout_binding"
+    __table_args__ = (
+        UniqueConstraint("window_id", name="uq_manual_holdout_binding_window"),
+        UniqueConstraint("binding_hash", name="uq_manual_holdout_binding_hash"),
+        UniqueConstraint("idempotency_key", name="uq_manual_holdout_binding_idempotency"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
+    window_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    release_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    release_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_core_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    portfolio_evaluation_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    portfolio_evaluation_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    protocol_json: Mapped[str] = mapped_column(Text, nullable=False)
+    protocol_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    binding_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)
 
 
 class DailyDecision(Base):
@@ -1093,6 +1130,7 @@ class ManualDailyJob(Base):
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     lease_owner: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     lease_until: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    lease_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     heartbeat_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     result_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
@@ -1113,7 +1151,7 @@ class ManualBackupRecord(Base):
     account_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     backup_path: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    schema_version: Mapped[str] = mapped_column(String(30), nullable=False, default="manual-backup-v1")
+    schema_version: Mapped[str] = mapped_column(String(30), nullable=False, default="manual-backup-v3")
     row_counts: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="written")
     created_at: Mapped[str] = mapped_column(String(40), default=manual_now_str)

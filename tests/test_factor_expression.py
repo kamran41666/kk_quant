@@ -353,7 +353,7 @@ def test_failed_experiment_can_be_requeued_without_losing_attempt_history(tmp_pa
         experiment.error_code = "SyntheticFailure"
         experiment.error_message = "failure detail"
         db.commit()
-        retried = retry_experiment(db, experiment.id)
+        retried = retry_experiment(db, experiment.id, data_root=tmp_path / "data")
         assert retried.status == "queued"
         assert retried.attempt == 2
         assert retried.error_code is None

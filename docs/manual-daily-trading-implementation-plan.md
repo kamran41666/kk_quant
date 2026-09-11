@@ -851,3 +851,17 @@ v2实现固定12个证据文件。manifest保存完整`run_envelope`、源receip
 - 有效 pair 在同一 savepoint/事务内新增恰好两个 `ResearchEvidenceArtifact`，以稳定 `pair_hash` 自然幂等返回原 ID；半 pair、内容变化、失效行或任一验证失败均拒绝。统一 HTTP `Idempotency-Key` 仍属于 H4，不能由自然 pair 幂等替代。
 - portfolio resolver 只接受 artifact ID，从数据库和受控目录重读并验证 release baseline bundle/core fingerprint/execution policy、唯一 `research_passed` 评价 hash 链、收益/超额、stress Sharpe `>=0.8`、stress 回撤 `<=0.2`、两场景换手/成交率 policy 门、独立 replay 与冻结执行协议重现。失败追加 blocked evaluation；通过才允许追加 `portfolio_passed`。本轮统一验收为后端 `813 passed, 2 warnings`，但该数字包含合成 fixture 的工程/API 证据链，不能证明真实策略已通过。
 - API `POST /manual-trading/portfolio-pairs` 的登记响应为 `registered_not_promoted`；`GET /releases/{id}/evidence` 只读同 release 的四类 artifact 引用和评价链字段。登记和晋级不改变 release 之外的 manual/Paper 账本，也不增加下单或自动执行入口。当前已支持 `portfolio_passed`，holdout、pilot、`manual_ready` 和人工执行门仍未闭合。实现验收见 [`PROGRESS.md`](../PROGRESS.md)。
+
+## 41. H2c holdout预注册与访问边界
+
+- holdout API 只接收 release、dataset、数据内容 hash、日期和 actor；服务端解析 release hash、strategy core、唯一 `portfolio_passed` 评价、冻结执行协议及其 hash，客户端不能提交 policy/hash 替代值、布尔资格、完成状态或经济结果。
+- 创建时在服务端以不可变绑定身份注册 `sealed` 窗口；日期重叠、历史已打开区间、父 release 仅有 status 但缺少完整评价链，均拒绝。幂等重放只返回同一 binding，改变请求或重复占用窗口产生冲突。
+- GET 只读 binding/window 元数据，不计经济访问；access 由服务端固定 `result_exposed=true`，追加 binding/payload hash，响应的 `evidence_status` 为 `access_recorded_only`。invalidate 后拒绝访问；本轮没有 complete 路由，也不开放 `holdout_passed` 或经济评估。
+- 绑定文档见 [`manual-holdout-preregistration.md`](manual-holdout-preregistration.md)。封存是应用级审计事实，不替代磁盘加密；new dataset 评估身份必须独立绑定原策略，实际 executor/resolver 后续实现。
+- 本轮实际验收覆盖真实 SQLite/组合证据目录的预注册、幂等、元数据读、访问 hash、失效拒绝，以及因子 queue/retry/worker 的历史读取前缀隔离；全量后端 `836 passed, 2 warnings`。这仍不是 economic holdout 结果、`holdout_passed` 或真实30日观察。
+- backup-v3 保留原有 manual 账户、现金、成交、计划、复盘等元数据，并新增 holdout binding/access 与 FactorCandidate/FactorExperiment 谱系；不包含原始行情、Parquet 或其他源资产。实际证明 legacy 模式在没有真实外层 `BEGIN` 时释放 SAVEPOINT 后，outer rollback 仍会残留行；`ensure_savepoint_transaction` 已使 outer rollback 恢复正确。旧库 additive migration 另已验证旧行保留、默认值和二次 init 幂等，不能据此宣称源文件可恢复。
+
+## 42. H3 scheduler lease基础边界
+
+- 调度任务增加 lease token 并使用 CAS 语义约束领取、心跳和完成操作的归属；token 只证明数据库租约事实。
+- 本轮实测文件 SQLite 多进程抢同任务只有一份有效租约、过期同 worker 旧 token 的四种动作均拒绝、recover 竞争、handler 未提交写入回滚，以及 DB 非锁故障的有界退出。lease token/CAS 已有基础验证，但生产 handler、自动长任务续租和业务 exactly-once 仍未接入，不能把 token 视为完整 scheduler 能力。

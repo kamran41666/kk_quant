@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session
 
 from server.models.schema import (
     DailyDecision,
+    FactorCandidate,
+    FactorExperiment,
     ManualAccount,
     ManualAccountSnapshot,
     ManualBackupRecord,
@@ -28,6 +30,7 @@ from server.models.schema import (
     ManualExecutionEvent,
     ManualExecutionItem,
     ManualExecutionPlan,
+    ManualHoldoutBinding,
     ManualLedgerEvent,
     ManualPositionLot,
     ManualPositionSnapshot,
@@ -49,7 +52,8 @@ class ManualBackupError(ValueError):
 
 
 MANUAL_MODELS = (
-    ManualAccount, StrategyRelease, ResearchEvidenceArtifact, StrategyPromotionEvaluation, ManualExecutionAuthorization,
+    ManualAccount, StrategyRelease, FactorCandidate, FactorExperiment, ResearchEvidenceArtifact,
+    StrategyPromotionEvaluation, ManualExecutionAuthorization, ManualHoldoutBinding,
     ResearchHoldoutWindow, ResearchHoldoutAccess, DailyDecision, ManualCohort,
     ManualExecutionPlan, ManualExecutionItem, ManualExecutionEvent, ManualExecutionConfirmation, ManualCashEvent,
     ManualLedgerEvent, ManualPositionLot, ManualAccountSnapshot, ManualPositionSnapshot,
@@ -57,7 +61,7 @@ MANUAL_MODELS = (
     ResearchRevision, ManualCorporateActionFact, ManualProspectivePilot,
     ManualPilotObservation,
 )
-SCHEMA_VERSION = "manual-backup-v2"
+SCHEMA_VERSION = "manual-backup-v3"
 
 
 def _json_value(value: Any) -> Any:

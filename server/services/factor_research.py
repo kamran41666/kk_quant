@@ -20,6 +20,7 @@ from quant_engine.factor.generation import GENERATORS
 from quant_engine.factor.operators import to_wide
 from server.config import settings
 from server.models.schema import FactorCandidate, FactorExperiment
+from server.services.research_holdout import ensure_factor_period_unreserved
 
 
 BASELINE_FACTORS = (
@@ -196,6 +197,8 @@ def queue_experiment(
 ) -> tuple[FactorExperiment, bool]:
     if start > end:
         raise ValueError("factor experiment start must not exceed end")
+    # Reserve the registry lock and validate against bound sealed/opened
+    # manual holdouts before this experiment becomes queue-visible.
     if not 1 <= forward_horizon <= 60:
         raise ValueError("factor experiment forward_horizon must be in [1, 60]")
     if stage not in {"training", "validation", "holdout"}:
@@ -278,6 +281,11 @@ def queue_experiment(
         if json.loads(existing.label_spec or "{}") != resolved_label_spec:
             raise ValueError("factor experiment identity already exists with a different label spec")
         return existing, False
+    try:
+        ensure_factor_period_unreserved(db, start_date=available_start, end_date=end)
+    except Exception:
+        db.rollback()
+        raise
     row = FactorExperiment(
         candidate_id=candidate_id,
         dataset_id=dataset_id,
@@ -291,6 +299,7 @@ def queue_experiment(
         status="queued",
     )
     db.add(row)
+    db.flush()
     db.commit()
     db.refresh(row)
     return row, True
@@ -404,12 +413,22 @@ def claim_next_experiment(
     return None
 
 
-def retry_experiment(db: Session, experiment_id: str) -> FactorExperiment:
+def retry_experiment(db: Session, experiment_id: str, *, data_root: Path | None = None) -> FactorExperiment:
     row = db.get(FactorExperiment, experiment_id)
     if row is None:
         raise KeyError(f"factor experiment not found: {experiment_id}")
     if row.status != "failed":
         raise ValueError("only a failed factor experiment can be retried")
+    manifests = _manifest_index(data_root or Path(settings.data_dir))
+    manifest_entry = manifests.get(row.dataset_id)
+    if manifest_entry is None:
+        raise KeyError(f"registered frozen research dataset not found: {row.dataset_id}")
+    read_start = date.fromisoformat(str(manifest_entry[1]["start_date"]))
+    try:
+        ensure_factor_period_unreserved(db, start_date=read_start, end_date=date.fromisoformat(row.end_date))
+    except Exception:
+        db.rollback()
+        raise
     row.status = "queued"
     row.lease_owner = None
     row.lease_until = None
@@ -453,7 +472,7 @@ def _research_panel(
         "code", "date", "open", "close", "adjusted_close", "is_suspended", "is_st",
         *fields,
     }
-    daily = pd.read_parquet(daily_path, columns=sorted(required))
+    daily = pd.read_parquet(daily_path, columns=sorted(required), filters=[("date", "<=", end)])
     daily["date"] = pd.to_datetime(daily["date"]).dt.date
     daily = daily[daily["date"] <= end].copy()
     securities = pd.read_parquet(
@@ -576,6 +595,16 @@ def execute_experiment(
     try:
         manifests = _manifest_index(data_root or Path(settings.data_dir))
         manifest_path, manifest = manifests[row.dataset_id]
+        read_start = date.fromisoformat(str(manifest["start_date"]))
+        ensure_factor_period_unreserved(
+            db, start_date=read_start, end_date=date.fromisoformat(row.end_date)
+        )
+        # The running row/attempt was persisted by the claimant. Release the
+        # registry lock before opening any economic file.
+        db.commit()
+        row = db.get(FactorExperiment, experiment_id)
+        if row is None or row.status != "running" or row.lease_owner != worker_id:
+            raise ValueError("factor experiment lease changed before execution")
         if str(manifest["content_hash"]) != row.data_content_hash:
             raise ValueError("factor experiment dataset hash changed after queueing")
         spec = FactorExpressionSpec.from_dict(json.loads(candidate.expression_spec))

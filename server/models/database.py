@@ -24,6 +24,22 @@ def get_db():
         db.close()
 
 
+def ensure_savepoint_transaction(db) -> None:
+    """Ensure SQLite has a real outer transaction before ``begin_nested``.
+
+    Python's sqlite legacy transaction mode does not begin a transaction for a
+    read, and releasing the first savepoint can otherwise commit unexpectedly.
+    The explicit immediate transaction also gives callers a database-level
+    write boundary for atomic manual-domain operations.
+    """
+    if db.get_bind().dialect.name != "sqlite":
+        return
+    connection = db.connection()
+    raw = connection.connection.driver_connection
+    if not raw.in_transaction:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     # The project intentionally has no migration dependency in Phase 2. Keep
@@ -104,6 +120,17 @@ def init_db():
             "previous_evaluation_id": "VARCHAR(36)",
             "previous_evaluation_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
             "evaluation_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+        },
+        "research_holdout_window": {
+            "invalidation_reason": "TEXT",
+            "completed_at": "VARCHAR(40)",
+        },
+        "research_holdout_access": {
+            "binding_hash": "VARCHAR(64)",
+            "payload_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+        },
+        "manual_daily_job": {
+            "lease_token": "VARCHAR(64)",
         },
     }
     inspector = inspect(engine)

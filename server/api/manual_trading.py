@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from quant_engine.data.calendar import TradingCalendar
 from server.models.database import get_db
-from server.models.schema import ManualAccount, ManualDailyJob, ManualDailyReview, ManualExecutionAuthorization, ManualExecutionConfirmation, ManualExecutionEvent, ManualExecutionItem, ManualExecutionPlan, ManualValuation, ResearchEvidenceArtifact, StrategyPromotionEvaluation, StrategyRelease
+from server.models.schema import ManualAccount, ManualDailyJob, ManualDailyReview, ManualExecutionAuthorization, ManualExecutionConfirmation, ManualExecutionEvent, ManualExecutionItem, ManualExecutionPlan, ManualValuation, ResearchEvidenceArtifact, StrategyPromotionEvaluation, StrategyRelease, ManualHoldoutBinding, ResearchHoldoutWindow
 from server.services.manual_ledger import (
     ManualLedgerError,
     create_manual_account,
@@ -61,6 +61,7 @@ from server.services.manual_execution_cycle import (
     record_confirmed_fill,
 )
 from server.services.operator_auth import require_operator
+from server.services.manual_holdout import create_manual_holdout, open_manual_holdout, invalidate_manual_holdout
 
 
 router = APIRouter(prefix="/manual-trading", tags=["manual-trading"], dependencies=[Depends(require_operator)])
@@ -263,6 +264,24 @@ class ConfirmedFillRequest(StrictModel):
 
 
 class UnfilledItemRequest(StrictModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class HoldoutCreateRequest(StrictModel):
+    release_id: str = Field(min_length=1, max_length=36)
+    dataset_id: str = Field(min_length=1, max_length=160)
+    data_content_hash: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    start_date: date | str
+    end_date: date | str
+    actor: str = Field(min_length=1, max_length=80)
+
+
+class HoldoutAccessRequest(StrictModel):
+    actor: str = Field(min_length=1, max_length=80)
+    purpose: str = Field(min_length=1, max_length=160)
+
+
+class HoldoutInvalidateRequest(StrictModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
@@ -764,6 +783,113 @@ def unfilled_item_route(account_id: str, plan_id: str, item_id: str, req: Unfill
         row = mark_item_unfilled(db, plan_id=plan_id, item_id=item_id, reason=req.reason)
         return _envelope({"id": row.id, "plan_id": row.plan_id, "status": row.status, "reason_codes": row.reason_codes}, evidence_status="user_reported")
     except (ManualExecutionCycleError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+def _holdout_metadata(binding: ManualHoldoutBinding, window: ResearchHoldoutWindow) -> dict[str, Any]:
+    """Expose holdout identity and lifecycle metadata only.
+
+    In particular, protocol JSON and any result/metric payload remain server side.
+    """
+    return {
+        "binding_id": binding.id,
+        "window_id": window.id,
+        "release_id": binding.release_id,
+        "release_hash": binding.release_hash,
+        "strategy_core_hash": binding.strategy_core_hash,
+        "portfolio_evaluation_id": binding.portfolio_evaluation_id,
+        "portfolio_evaluation_hash": binding.portfolio_evaluation_hash,
+        "protocol_hash": binding.protocol_hash,
+        "binding_hash": binding.binding_hash,
+        "dataset_id": window.dataset_id,
+        "data_content_hash": window.data_content_hash,
+        "start_date": window.start_date,
+        "end_date": window.end_date,
+        "status": window.status,
+        "created_at": binding.created_at,
+        "opened_at": window.opened_at,
+        "invalidated_at": window.invalidated_at,
+        "invalidation_reason": window.invalidation_reason,
+    }
+
+
+def _holdout_row(db: Session, binding_id: str) -> tuple[ManualHoldoutBinding, ResearchHoldoutWindow]:
+    binding = db.get(ManualHoldoutBinding, binding_id)
+    if binding is None:
+        raise ValueError("holdout_binding_not_found")
+    window = db.get(ResearchHoldoutWindow, binding.window_id)
+    if window is None:
+        raise ValueError("holdout_window_not_found")
+    return binding, window
+
+
+@router.post("/holdouts", status_code=201)
+def create_holdout_route(
+    req: HoldoutCreateRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=8, max_length=160),
+    db: Session = Depends(get_db),
+):
+    try:
+        binding = create_manual_holdout(db, **req.model_dump(exclude={"actor"}), actor=req.actor, idempotency_key=idempotency_key)
+        window = db.get(ResearchHoldoutWindow, binding.window_id)
+        if window is None:
+            raise ValueError("holdout_window_not_found")
+        return _envelope(_holdout_metadata(binding, window), evidence_status="holdout_preregistered")
+    except OSError as exc:
+        raise _error(ValueError("holdout_evidence_unavailable")) from exc
+    except ValueError as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/holdouts")
+def list_holdouts(release_id: str | None = None, db: Session = Depends(get_db)):
+    query = select(ManualHoldoutBinding).order_by(ManualHoldoutBinding.created_at.desc(), ManualHoldoutBinding.id.desc())
+    if release_id is not None:
+        query = query.where(ManualHoldoutBinding.release_id == release_id)
+    rows = db.scalars(query).all()
+    result = []
+    for binding in rows:
+        window = db.get(ResearchHoldoutWindow, binding.window_id)
+        if window is not None:
+            result.append(_holdout_metadata(binding, window))
+    return _envelope(result, evidence_status="database_resolved")
+
+
+@router.get("/holdouts/{binding_id}")
+def get_holdout(binding_id: str, db: Session = Depends(get_db)):
+    try:
+        binding, window = _holdout_row(db, binding_id)
+        return _envelope(_holdout_metadata(binding, window), evidence_status="database_resolved")
+    except ValueError as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/holdouts/{binding_id}/access", status_code=201)
+def access_holdout_route(binding_id: str, req: HoldoutAccessRequest, db: Session = Depends(get_db)):
+    try:
+        binding, _window = _holdout_row(db, binding_id)
+        access = open_manual_holdout(db, binding_id, actor=req.actor, purpose=req.purpose)
+        return _envelope({
+            "access_id": access.id,
+            "accessed_at": access.accessed_at,
+            "binding_hash": access.binding_hash or binding.binding_hash,
+            "payload_hash": access.payload_hash,
+        }, evidence_status="access_recorded_only")
+    except OSError as exc:
+        raise _error(ValueError("holdout_evidence_unavailable")) from exc
+    except ValueError as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/holdouts/{binding_id}/invalidate")
+def invalidate_holdout_route(binding_id: str, req: HoldoutInvalidateRequest, db: Session = Depends(get_db)):
+    try:
+        binding, _window = _holdout_row(db, binding_id)
+        window = invalidate_manual_holdout(db, binding_id, reason=req.reason)
+        return _envelope(_holdout_metadata(binding, window), evidence_status="holdout_invalidated")
+    except OSError as exc:
+        raise _error(ValueError("holdout_evidence_unavailable")) from exc
+    except ValueError as exc:
         raise _error(exc) from exc
 
 

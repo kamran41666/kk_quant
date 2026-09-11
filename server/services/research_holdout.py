@@ -1,11 +1,19 @@
 """Sealed research holdout lifecycle with explicit access evidence."""
 from __future__ import annotations
 
-from datetime import date
-from sqlalchemy import select
+from datetime import date, datetime
+import re
+from sqlalchemy import insert, select, update
 from sqlalchemy.orm import Session
 
-from server.models.schema import ResearchHoldoutAccess, ResearchHoldoutWindow, manual_now_str, uuid4_str
+from server.models.schema import (
+    ManualHoldoutBinding,
+    ResearchHoldoutAccess,
+    ResearchHoldoutRegistryLock,
+    ResearchHoldoutWindow,
+    manual_now_str,
+    uuid4_str,
+)
 
 
 class HoldoutError(ValueError):
@@ -20,7 +28,41 @@ PREVIOUSLY_OPENED_INTERVALS = (
 
 
 def _date(value: date | str) -> date:
-    return value if isinstance(value, date) else date.fromisoformat(str(value))
+    try:
+        if isinstance(value, datetime):
+            return value.date()
+        return value if isinstance(value, date) else date.fromisoformat(str(value))
+    except (TypeError, ValueError) as exc:
+        raise HoldoutError("holdout_dates_must_be_iso") from exc
+
+
+def _sha256(value: str, field: str) -> None:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-fA-F]{64}", value) is None:
+        raise HoldoutError(f"{field}_must_be_sha256")
+
+
+def _lock_registry(db: Session) -> None:
+    """Acquire the single DB row before checking any holdout range.
+
+    SQLite's ``OR IGNORE`` plus an update holds the write transaction until the
+    caller commits.  Other backends use their native conflict clause where
+    available; an unsupported backend fails closed rather than claiming range
+    exclusion that it cannot provide.
+    """
+    dialect = db.get_bind().dialect.name
+    if dialect == "sqlite":
+        db.execute(insert(ResearchHoldoutRegistryLock).prefix_with("OR IGNORE").values(id=1, revision=0))
+    elif dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        db.execute(pg_insert(ResearchHoldoutRegistryLock).values(id=1, revision=0).on_conflict_do_nothing(index_elements=["id"]))
+    else:
+        raise HoldoutError("holdout_registry_backend_unsupported")
+    db.execute(
+        update(ResearchHoldoutRegistryLock)
+        .where(ResearchHoldoutRegistryLock.id == 1)
+        .values(revision=ResearchHoldoutRegistryLock.revision + 1)
+    )
 
 
 def create_holdout_window(
@@ -31,12 +73,14 @@ def create_holdout_window(
     start_date: date | str,
     end_date: date | str,
     policy_hash: str,
+    commit: bool = True,
 ) -> ResearchHoldoutWindow:
+    _lock_registry(db)
     start, end = _date(start_date), _date(end_date)
     if start > end:
         raise HoldoutError("holdout_start_must_not_exceed_end")
-    if len(data_content_hash) != 64 or len(policy_hash) != 64:
-        raise HoldoutError("holdout_hashes_must_be_sha256")
+    _sha256(data_content_hash, "data_content_hash")
+    _sha256(policy_hash, "policy_hash")
     if any(start <= opened_end and end >= opened_start for opened_start, opened_end in PREVIOUSLY_OPENED_INTERVALS):
         raise HoldoutError("holdout_range_was_already_exposed")
     for existing in db.scalars(select(ResearchHoldoutWindow)).all():
@@ -49,9 +93,30 @@ def create_holdout_window(
         status="sealed",
     )
     db.add(row)
-    db.commit()
-    db.refresh(row)
+    db.flush()
+    if commit:
+        db.commit()
+        db.refresh(row)
     return row
+
+
+def ensure_factor_period_unreserved(db: Session, start_date: date | str, end_date: date | str) -> None:
+    """Reject factor work overlapping a sealed/opened managed holdout.
+
+    The registry row is locked for the caller's transaction, so queue creation
+    and managed holdout allocation cannot race around the same interval check.
+    """
+    _lock_registry(db)
+    start, end = _date(start_date), _date(end_date)
+    if start > end:
+        raise HoldoutError("holdout_start_must_not_exceed_end")
+    rows = db.execute(select(ResearchHoldoutWindow).join(
+        ManualHoldoutBinding, ManualHoldoutBinding.window_id == ResearchHoldoutWindow.id,
+    ).where(ResearchHoldoutWindow.status.in_(("sealed", "opened")))).scalars().all()
+    for row in rows:
+        row_start, row_end = _date(row.start_date), _date(row.end_date)
+        if start <= row_end and end >= row_start:
+            raise HoldoutError("factor_period_reserved_for_manual_holdout")
 
 
 def access_holdout(
@@ -65,6 +130,8 @@ def access_holdout(
     window = db.get(ResearchHoldoutWindow, window_id)
     if window is None:
         raise HoldoutError("holdout_not_found")
+    if db.scalars(select(ManualHoldoutBinding.id).where(ManualHoldoutBinding.window_id == window_id)).first() is not None:
+        raise HoldoutError("managed_holdout_requires_manual_service")
     if window.status in {"invalidated", "completed"}:
         raise HoldoutError(f"holdout_{window.status}")
     now = manual_now_str()
@@ -85,10 +152,13 @@ def invalidate_holdout(db: Session, window_id: str, *, reason: str) -> ResearchH
     window = db.get(ResearchHoldoutWindow, window_id)
     if window is None:
         raise HoldoutError("holdout_not_found")
+    if db.scalars(select(ManualHoldoutBinding.id).where(ManualHoldoutBinding.window_id == window_id)).first() is not None:
+        raise HoldoutError("managed_holdout_requires_manual_service")
     if window.status == "completed":
         raise HoldoutError("completed_holdout_cannot_be_invalidated")
     window.status = "invalidated"
     window.invalidated_at = manual_now_str()
+    window.invalidation_reason = str(reason)
     db.commit()
     db.refresh(window)
     return window
@@ -98,11 +168,14 @@ def complete_holdout(db: Session, window_id: str) -> ResearchHoldoutWindow:
     window = db.get(ResearchHoldoutWindow, window_id)
     if window is None:
         raise HoldoutError("holdout_not_found")
+    if db.scalars(select(ManualHoldoutBinding.id).where(ManualHoldoutBinding.window_id == window_id)).first() is not None:
+        raise HoldoutError("managed_holdout_requires_manual_service")
     if window.status == "invalidated":
         raise HoldoutError("holdout_invalidated")
     if window.status != "opened":
         raise HoldoutError("holdout_must_be_opened_before_completion")
     window.status = "completed"
+    window.completed_at = manual_now_str()
     db.commit()
     db.refresh(window)
     return window
@@ -114,4 +187,7 @@ def holdout_accesses(db: Session, window_id: str) -> list[ResearchHoldoutAccess]
     ).order_by(ResearchHoldoutAccess.accessed_at.asc(), ResearchHoldoutAccess.id.asc())).all())
 
 
-__all__ = ["HoldoutError", "create_holdout_window", "access_holdout", "invalidate_holdout", "complete_holdout", "holdout_accesses"]
+__all__ = [
+    "HoldoutError", "create_holdout_window", "ensure_factor_period_unreserved",
+    "access_holdout", "invalidate_holdout", "complete_holdout", "holdout_accesses",
+]

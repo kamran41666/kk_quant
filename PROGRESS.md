@@ -17,6 +17,16 @@
 
 ## 记录
 
+### 2026-09-11 15:33 CST — H2c holdout预注册/访问隔离与H3 lease基础统一验收
+
+- Git：基线 `4288842`；分支 `phase4-factor-develop`；本轮由 `gpt-5.6-luna` 完成机械写入与测试，主模型负责架构审查和结果核对；本轮改动随记录统一提交推送，最终 hash 由 Git 交付确认。
+- H2c：真实 SQLite/组合证据目录验证 binding 预注册、短锁 parent 快照、每次 access 的 CAS、冻结 actor/hash、幂等与失效边界；只开放 metadata/access 事实，不开放 economic holdout 结果或 `holdout_passed`。
+- 研究隔离：factor queue/retry/execution 按实际历史读取前缀阻断 sealed/opened binding，缺 manifest 拒绝，Parquet 按 end 过滤；无重叠研究保持可排队。backup-v3 保留既有 manual 元数据，并补充 holdout binding/access 与 FactorCandidate/FactorExperiment 谱系，不含原始/Parquet 文件。
+- H3：lease_token fences 与 scheduler 基础边界完成；实测文件 SQLite 多进程单一有效租约、过期旧 token 四类动作拒绝、recover 竞争、handler 未提交写入回滚及 DB 非锁故障有界退出。生产 handlers、自动长任务续租和业务 exactly-once 仍未完成。
+- SAVEPOINT/迁移事实：实证修复 legacy 无真实外层 `BEGIN` 时释放 SAVEPOINT 后 outer rollback 残留行的问题；`ensure_savepoint_transaction` 后 outer rollback 恢复正确。旧库 additive migration 已验证旧行保留、默认值和二次 init 幂等。
+- 验证：当前 macOS 工作区全量后端 `836 passed, 2 warnings`；holdout API/绑定专项 `17 passed, 1 warning`；研究隔离专项 `21 passed`；scheduler 及相关专项 `18 passed`；`compileall`、关键 Ruff、`git diff --check`、本轮新增 Markdown 链接检查通过。完整日志见 `/tmp/kk_quant_holdout_scheduler_full_pytest.log` 与 `/tmp/kk_quant_holdout_scheduler_final_checks.log`。
+- 边界：本轮没有真实 holdout 经济评估、现实策略交易资格、真实 30 日观察或实盘；下一步仍为 H2c economic executor/resolver 与 pilot、H3 production handlers/自动续租、H4 完整 UI/统一幂等、H5 数据修复后的研究重跑；原有 50 条未知调整未修改。入口见 [`第41节`](docs/manual-daily-trading-implementation-plan.md#41-h2c-holdout预注册与访问边界)、[`第42节`](docs/manual-daily-trading-implementation-plan.md#42-h3-scheduler-lease基础边界)、[`holdout专题`](docs/manual-holdout-preregistration.md)、[`holdout服务`](server/services/manual_holdout.py)、[`读取隔离服务`](server/services/research_holdout.py)、[`因子研究服务`](server/services/factor_research.py)、[`备份服务`](server/services/manual_backup.py)、[`调度服务`](server/services/manual_scheduler.py)。
+
 ### 2026-09-11 14:57 CST — H2b数据库组合登记、portfolio resolver与API统一验收
 
 - Git：基线 `b438682`；当前分支 `phase4-factor-develop`；提交与推送状态由最终 Git 交付确认。三名 `gpt-5.6-luna` 子代理分别完成登记、晋级服务与 API/fixture/测试机械写入，主模型负责架构审查和结果核对。
